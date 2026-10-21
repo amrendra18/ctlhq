@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# ctlhq-plan-lint: lint a multi-phase plan, or a project PLAN.md (see --help).
+set -u
+# Resolve this file through symlinks (macOS bash 3 has no readlink -f).
+src="$0"
+while [ -L "$src" ]; do
+	dir="$(cd "$(dirname "$src")" && pwd)"
+	src="$(readlink "$src")"
+	case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+here="$(cd "$(dirname "$src")" && pwd)"
+scripts="$(cd "$here/../scripts" && pwd)"
+
+usage() {
+	cat <<'EOF'
+ctlhq-plan-lint: lint a multi-phase plan against the ctlhq-mode plan skeleton.
+With --project, or for a file named PLAN.md, it lints a project plan against the run-method PLAN template.
+
+Usage: ctlhq-plan-lint [--project] <plan.md>
+       (the script's own line: Usage: node check-plan.mjs [--project] <plan.md>)
+
+Two modes. A file named PLAN.md, or any file with --project, is a project plan. Every
+other file is a multi-phase plan.
+
+Multi-phase mode checks a plan written from skills/ctlhq-mode/playbooks/multi-phase-plan.md
+against its skeleton. It checks the "How to read this" markers, the program
+checklist sections (Arm the program, Spawn owners, PR mechanics, Verdict and merge, Boot
+recipe), and every PR section's Depends on, Files, Build, You see, Verify (unit, live,
+perf), Review gate, and Merge blocks. It also fails on a long dash, a curly quote, and a
+mid-sentence colon.
+
+Project mode checks a PLAN.md written from skills/run-method/references/PLAN-template.md.
+Headings are matched by name, so section numbers do not matter. It needs:
+  1. "What, why, how" with What, Why, and How lines.
+  2. "Complete, in plain words" and "Not part of complete", each with text.
+  3. "Repeated jobs": a table; each row has a command in backticks and a check with an
+     exit code.
+  4. "Workstreams and waves": a table; each row owns files in backticks, and no two rows
+     of one wave own the same file.
+  5. "Audit rule" with When, Bar, Severity scale, and Stop lines.
+  6. The table "| # | Milestone | Done when | State |". Row 1 is M0, and its Done when
+     runs `scripts/verify fast` or `full` with --feature. Every Done when names a command
+     in backticks and an exit code. State is planned, in progress, done, or blocked.
+  7. "Approvals ledger" with its table.
+It fails on a long dash, a curly quote, and a placeholder in angle brackets, also inside
+inline code.
+
+Prints one line per problem as <file>:<line>: <message>, with a "  fix: <action>" line
+right under it that names the change and, where a section or sentence is missing, the
+skeleton or template line to copy it from. A "why:" line comes first on stderr when there
+are problems. Exit 0 when the plan is clean, 1 when it found problems, 2 on a usage error.
+A usage error prints "ctlhq-plan-lint: <what>", "why: <why>", and "fix: <command>" on stderr.
+
+Runs: node skills/ctlhq-mode/scripts/check-plan.mjs [--project] <plan.md>
+EOF
+}
+for arg in "$@"; do
+	case "$arg" in
+	-h|--help) usage; exit 0 ;;
+	esac
+done
+
+files=()
+for arg in "$@"; do
+	[ "$arg" = "--project" ] || files+=("$arg")
+done
+if [ "${#files[@]}" -ne 1 ] || [ ! -f "${files[0]}" ]; then
+	printf 'ctlhq-plan-lint: expected one existing plan file, got: %s\n' "$*" >&2
+	printf 'why: ctlhq-plan-lint lints one plan file at a time\n' >&2
+	printf 'fix: ctlhq-plan-lint <path to plan.md>; write the plan from skills/ctlhq-mode/playbooks/multi-phase-plan.md, or a project PLAN.md from skills/run-method/references/PLAN-template.md, first if none exists\n' >&2
+	exit 2
+fi
+exec node "$scripts/check-plan.mjs" "$@"

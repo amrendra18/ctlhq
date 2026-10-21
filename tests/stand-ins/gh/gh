@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""gh: a fake GitHub CLI that replays recorded JSON for the calls ctlhq-watch-pr makes, with no network.
+
+Usage:
+  gh pr view [N] [--repo OWNER/REPO] --json FIELDS
+  gh pr list --repo OWNER/REPO [--state STATE] [--limit N] --json FIELDS
+  gh pr checks N --repo OWNER/REPO --json FIELDS
+  gh api graphql -f query=QUERY [-f|-F name=value ...]
+  gh --help | --version
+
+Environment:
+  FAKE_GH_RECORDINGS  folder of recordings (required)
+  FAKE_GH_LOG         optional file; each call appends its argv as one JSON line
+  GH_REPO             OWNER/REPO for a `pr view` without --repo, as the real gh uses it
+
+Each call maps to one recording file. <repo dir> is FAKE_GH_RECORDINGS/OWNER/REPO, or
+FAKE_GH_RECORDINGS itself for a `pr view` with no --repo and no GH_REPO.
+  pr view N            <repo dir>/pr-view-N.json      (no N: pr-view.json)
+  pr list              <repo dir>/pr-list-STATE.json  (STATE defaults to open)
+  pr checks N          <repo dir>/pr-checks-N.json
+  api graphql          FAKE_GH_RECORDINGS/OWNER/REPO/graphql-OPERATION[-NAME-VALUE...].json
+                       OPERATION is the name after `query` in QUERY; NAME-VALUE pairs are
+                       every variable except owner and repo, in argument order, with
+                       characters outside A-Z a-z 0-9 . _ = replaced by _
+                       (example: graphql-ReviewThreads-pr-5-after-Y3Vy.json)
+A file holds what the real gh printed. Optional sidecars: <file>.exit (the exit code,
+default 0) and <file>.stderr (printed to stderr). Record one with, for example:
+  gh pr checks 5 --repo o/r --json name,state > pr-checks-5.json; echo $? > pr-checks-5.json.exit
+
+--json FIELDS keeps only those keys of the recorded object, or of each object in a recorded
+list, as the real gh does; a field missing from the recording exits 1. --limit N keeps the
+first N items of a list. An empty recording prints nothing.
+
+Exit codes:
+  0     the recording was replayed (or the .exit sidecar's code, such as 8 for pending checks)
+  1     no recording for this call (stderr names the file to add), a broken recording, or a
+        requested --json field the recording lacks
+  2     usage error: a call shape ctlhq-watch-pr does not make, or FAKE_GH_RECORDINGS unset
+
+Not covered: any other gh command (exit 2), --jq and --template, authentication, rate
+limits, and changes on GitHub between polls (each file gives the same answer every time).
+
+It reads files only. It opens no network connection, ignores GH_HOST and proxies, and
+starts no process.
+"""
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+
+class Usage(Exception):
+    pass
+
+
+class Missing(Exception):
+    pass
+
+
+def fail(code: int, message: str) -> int:
+    print(f"gh (fake): {message}", file=sys.stderr)
+    return code
+
+
+def options(args, known):
+    """Split args into positionals and a dict of known value options; reject anything else."""
+    pos, opts, i = [], {}, 0
+    while i < len(args):
+        arg = args[i]
+        name, eq, value = arg.partition("=")
+        if arg.startswith("-") and (name if eq else arg) in known:
+            key = known[name if eq else arg]
+            if not eq:
+                if i + 1 >= len(args):
+                    raise Usage(f"{arg} needs a value")
+                i += 1
+                value = args[i]
+            opts.setdefault(key, []).append(value)
+        elif arg.startswith("-"):
+            raise Usage(f"unsupported option {arg}")
+        else:
+            pos.append(arg)
+        i += 1
+    return pos, opts
+
+
+def one(opts, key, default=None):
+    values = opts.get(key, [])
+    if len(values) > 1:
+        raise Usage(f"--{key} given more than once")
+    return values[0] if values else default
+
+
+def repo_dir(root: Path, repo):
+    if repo is None:
+        return root
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or ".." in repo:
+        raise Usage(f"--repo must be OWNER/REPO, got {repo!r}")
+    return root / repo
+
+
+def safe(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._=]", "_", text)
+
+
+def resolve(root: Path, argv):
+    """Return (recording path, json fields or None, limit or None) for one gh call."""
+    if argv[:2] == ["pr", "view"]:
+        pos, opts = options(argv[2:], {"--repo": "repo", "-R": "repo", "--json": "json"})
+        if len(pos) > 1 or not opts.get("json"):
+            raise Usage("pr view takes at most one PR number and needs --json")
+        repo = one(opts, "repo", os.environ.get("GH_REPO") or None)
+        name = f"pr-view-{safe(pos[0])}.json" if pos else "pr-view.json"
+        return repo_dir(root, repo) / name, one(opts, "json"), None
+    if argv[:2] == ["pr", "list"]:
+        pos, opts = options(argv[2:], {"--repo": "repo", "-R": "repo", "--json": "json",
+                                       "--state": "state", "-s": "state", "--limit": "limit", "-L": "limit"})
+        if pos or not opts.get("json") or not opts.get("repo"):
+            raise Usage("pr list needs --repo and --json and takes no PR number")
+        limit = one(opts, "limit", "30")
+        if not limit.isdigit():
+            raise Usage("--limit must be a number")
+        name = f"pr-list-{safe(one(opts, 'state', 'open'))}.json"
+        return repo_dir(root, one(opts, "repo")) / name, one(opts, "json"), int(limit)
+    if argv[:2] == ["pr", "checks"]:
+        pos, opts = options(argv[2:], {"--repo": "repo", "-R": "repo", "--json": "json"})
+        if len(pos) != 1 or not opts.get("json") or not opts.get("repo"):
+            raise Usage("pr checks needs one PR number, --repo, and --json")
+        return repo_dir(root, one(opts, "repo")) / f"pr-checks-{safe(pos[0])}.json", one(opts, "json"), None
+    if argv[:2] == ["api", "graphql"]:
+        pairs, i, rest = [], 0, argv[2:]
+        while i < len(rest):
+            if rest[i] not in ("-f", "-F", "--raw-field", "--field") or i + 1 >= len(rest) or "=" not in rest[i + 1]:
+                raise Usage(f"api graphql takes only -f/-F name=value pairs, got {rest[i]!r}")
+            pairs.append(rest[i + 1].split("=", 1))
+            i += 2
+        fields = dict(pairs)
+        match = re.match(r"\s*query\s+([A-Za-z_][A-Za-z0-9_]*)", fields.get("query", ""))
+        if not match or "owner" not in fields or "repo" not in fields:
+            raise Usage("api graphql needs a named query and owner and repo fields")
+        parts = [f"{safe(k)}-{safe(v)}" for k, v in pairs if k not in ("query", "owner", "repo")]
+        name = "-".join(["graphql", match.group(1)] + parts) + ".json"
+        return repo_dir(root, f"{fields['owner']}/{fields['repo']}") / name, None, None
+    raise Usage("unsupported call: gh " + " ".join(argv))
+
+
+def pick(value, fields, path):
+    if isinstance(value, dict):
+        lost = [f for f in fields if f not in value]
+        if lost:
+            raise Missing(f"{path} has no field {', '.join(lost)} for --json")
+        return {f: value[f] for f in fields}
+    return value
+
+
+def replay(path: Path, fields, limit):
+    if not path.is_file():
+        raise Missing(f"no recording for this call; add {path}")
+    text = path.read_text(encoding="utf-8")
+    code_file = Path(str(path) + ".exit")
+    code = int(code_file.read_text().strip() or "0") if code_file.is_file() else 0
+    err_file = Path(str(path) + ".stderr")
+    err = err_file.read_text(encoding="utf-8") if err_file.is_file() else ""
+    if text.strip() and (fields or limit is not None):
+        try:
+            value = json.loads(text)
+        except ValueError as error:
+            raise Missing(f"broken recording {path}: {error}")
+        if isinstance(value, list):
+            if limit is not None:
+                value = value[:limit]
+            value = [pick(item, fields.split(","), path) if fields else item for item in value]
+        elif fields:
+            value = pick(value, fields.split(","), path)
+        text = json.dumps(value) + "\n"
+    return text, err, code
+
+
+def main(argv) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    if argv[0] == "--version":
+        print("gh version 0.0.0 (fake GitHub CLI stand-in)")
+        return 0
+    root = os.environ.get("FAKE_GH_RECORDINGS", "")
+    if not root or not Path(root).is_dir():
+        return fail(2, "FAKE_GH_RECORDINGS must name a folder of recordings")
+    log = os.environ.get("FAKE_GH_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(argv) + "\n")
+    try:
+        path, fields, limit = resolve(Path(root), argv)
+        text, err, code = replay(path, fields, limit)
+    except Usage as error:
+        return fail(2, str(error))
+    except (Missing, OSError, ValueError) as error:
+        return fail(1, str(error))
+    sys.stdout.write(text)
+    sys.stderr.write(err)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

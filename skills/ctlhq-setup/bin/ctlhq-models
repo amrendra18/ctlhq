@@ -1,0 +1,1096 @@
+#!/usr/bin/env python3
+"""ctlhq-models: read and write the ctlhq models file.
+
+The file maps each ctlhq role to a model name. Skills name roles; this file
+names models. Default location: ~/.ctlhq/models.toml. Override it with
+--file PATH (or -f PATH, or --file=PATH) or the environment variable
+CTLHQ_MODELS; --file wins. An empty --file value is a usage error (exit 2); it
+never falls back to the default file. -h or --help prints this text.
+
+Usage:
+  ctlhq-models [--file PATH] show
+  ctlhq-models [--file PATH] init [--budget unlimited|large|medium|small] [--force]
+  ctlhq-models [--file PATH] get <role>
+  ctlhq-models [--file PATH] set <role> <value>        list roles take a,b,c
+  ctlhq-models [--file PATH] unset <role>
+  (`unset budget` removes the budget line, so the default budget applies)
+  ctlhq-models [--file PATH] budget <unlimited|large|medium|small> [--rewrite-names]
+  ctlhq-models [--file PATH] validate [--allow a,b,c]
+  ctlhq-models [--file PATH] prune
+  ctlhq-models [--file PATH] fallback <role> <rejected-model> [--valid a,b,c]
+  ctlhq-models [--file PATH] pick <role> --not-family <model>
+  ctlhq-models known-values
+
+Every command also takes --host claude|codex (or --host=codex); see Host below.
+
+show          table of role, current value, default, and Codex value. Works with no
+              file.
+init          write the file from the defaults. Refuses to overwrite without --force.
+get           print one role's value (a list role prints comma-separated). A role
+              with no line in the file prints its default, the starting value in
+              models.example.toml, with a note: line on stderr. An alias value adds
+              a note: line saying to omit the subagent tool's model parameter.
+set           write one role, keeping the line's comment. Creates the file
+              from the defaults when it is missing. A value with a newline or
+              another control character is refused (exit 2).
+unset         remove the role's line so the default applies again. A line that is
+              already absent is a note on stderr and still exit 0.
+budget        set the budget line and print the effort level it maps to. With
+              --rewrite-names, also rewrite the effort token of every top-level model
+              name that carries one (the last token, or the one before a trailing
+              `fast`, on the ladder max > xhigh > high > medium > low) to the budget's
+              effort, and print old and new per role. A name without a token is left
+              alone and reported.
+validate      read-only. Known roles only, lists where lists belong, single values
+              where single values belong, no empty values, a valid budget. A line
+              whose role is not known is a retired-role problem (prune drops it).
+              With --allow a,b,c (the host's model names), a real value outside the
+              list is a problem, and its fix line sets the closest allowed name
+              of the same family (else the first allowed name); the aliases always
+              pass. After the problems, a next: line says to rerun validate.
+prune         remove the retired role lines (roles not in the defaults) and print
+              each dropped line. This is what validate did before it became read-only.
+fallback      the model to run when the host rejects <rejected-model> for <role>, then
+              the rule applied, one per line. Families go by the vendor prefix of the
+              name (sonnet, opus, haiku, fable count as claude). The answer is the
+              role's first starting value whose family matches the rejected model's
+              family; with no match, the first starting value
+              (exit 1). With --valid a,b,c (the host's model names from its error
+              message), the closest valid name of that family is preferred. A next:
+              line follows when the answer may still be rejected: rerun with --valid.
+pick          one entry of <role> whose vendor family differs from <model>, then the
+              rule applied. Families follow the fallback rule. Alias
+              entries (they run on the parent model) never qualify. With no such entry
+              it prints the first entry (exit 1), a next: line (use that entry and
+              say "same-family review (<family>)" in the reply), and an operator
+              next line that adds a model of another family to the role.
+known-values  the Claude Code model names and the aliases.
+
+Host. --host claude|codex, else the environment variable CTLHQ_HOST, else
+claude, picks whose values get, set, unset, fallback, and pick use, and which
+values validate --allow checks. The top-level role lines hold the Claude Code
+values. The [codex] table at the end of the file holds the Codex values; in
+Codex every ctlhq-models call adds --host codex. With host codex, get reads the
+file's [codex] line, then the [codex] line of models.example.toml. A role with
+neither prints inherit-parent (the session's model) with a note: line, never a
+Claude name. set and unset write inside the [codex] table and create it at the
+end of the file when it is missing. show adds a codex column. validate checks
+that every [codex] key is a role and every value has the role's shape. The
+budget line is shared by both hosts and stays at the top. A host other than
+claude or codex is a usage error (exit 2).
+
+Output lines. A problem: line (validate) or an error line on stderr says what
+is wrong and why. A fix: line under it gives the command or edit that repairs
+it, with the real role, line, and file filled in (and --file when one was
+given). A next: line gives the step to take after a fallback guess or a failed
+check. A note: line on stderr gives context: a default in use, or an alias.
+A fix or next line whose step changes the models file is marked as the
+operator's action: "fix (operator, changes <file>):" or "next (operator,
+changes <file>):". An agent never runs a marked line during a task; it reports
+it to the operator. A plain fix: or next: line an agent may run itself.
+
+The defaults are read from models.example.toml in
+this tool's skill folder. `inherit-parent` or `auto` as a value: the role runs
+on the parent chat model. A value that is not a known Claude Code name or alias
+is accepted with a warning on stderr, because Codex uses other names.
+A value in the [codex] table never gets that warning.
+
+Exit 0 on success, including get printing a default and unset of an absent line.
+Exit 1 when validate finds a problem, when validate or prune finds no models
+file, when init finds an existing file without --force, when fallback finds no
+family match (it prints the first starting value and says so), when pick finds no
+entry of another family (it prints the first entry and says so), or when a file
+(the models file or models.example.toml) cannot be read, parsed, or written.
+Exit 2 on a usage error (an unknown command or option, a wrong argument count, a
+missing or empty option value, a bad budget label, a bad host, a value set
+refuses) or an unknown role.
+"""
+from __future__ import annotations
+
+import difflib
+import os
+import re
+import shlex
+import sys
+from pathlib import Path
+
+KNOWN_NAMES = ("sonnet", "opus", "haiku", "fable")
+ALIASES = ("inherit-parent", "auto")
+BUDGETS = {"unlimited": "max", "large": "xhigh", "medium": "high", "small": "medium"}
+BUDGET_WHY = "each label maps to an effort level: " + ", ".join(f"{k} {v}" for k, v in BUDGETS.items())
+LADDER = ("max", "xhigh", "high", "medium", "low")
+EXAMPLE = Path(__file__).resolve().parent.parent / "models.example.toml"
+DEFAULT_FILE = Path.home() / ".ctlhq" / "models.toml"
+# The table of the models file that holds each host's values: Claude Code at the top level, Codex under [codex].
+HOST_TABLE = {"claude": "", "codex": "codex"}
+TABLE_HEADER = re.compile(r"\s*\[\s*([A-Za-z0-9_-]+)\s*\]\s*(#.*)?")
+
+
+# The command prefix the fix lines print: "ctlhq-models", plus "--file PATH" when one was given,
+# plus "--host HOST" when a host was chosen. BASE_PREFIX leaves out the host.
+PREFIX = "ctlhq-models"
+BASE_PREFIX = "ctlhq-models"
+# The host this run serves and its table; main() sets them. HOST_CHOSEN: --host or CTLHQ_HOST named it.
+HOST = "claude"
+TABLE = ""
+HOST_CHOSEN = False
+# The models file this run reads and writes; main() sets it. Named in the operator marker.
+MODELS_PATH = Path.home() / ".ctlhq" / "models.toml"
+# Commands that change the models file. A fix or next line suggesting one is the operator's action.
+WRITERS = ("init", "set", "unset", "budget", "prune")
+
+
+def tag(kind: str, op: bool) -> str:
+    """`fix:` or `next:`; marked `fix (operator, changes <file>):` when the step changes the models file."""
+    return f"{kind} (operator, changes {MODELS_PATH}):" if op else f"{kind}:"
+
+
+class TomlError(Exception):
+    def __init__(self, msg: str, lineno: int = 0) -> None:
+        super().__init__(msg)
+        self.lineno = lineno
+
+
+class Entry:
+    def __init__(self, key: str, value, comment: str, lineno: int, table: str = "") -> None:
+        self.key = key
+        self.value = value
+        self.comment = comment
+        self.lineno = lineno
+        self.table = table
+
+    @property
+    def is_list(self) -> bool:
+        return isinstance(self.value, list)
+
+
+def parse_value(s: str, lineno: int):
+    """Parse one TOML value (quoted string or list of quoted strings). Return (value, rest)."""
+    s = s.lstrip()
+    if s[:1] in ('"', "'"):
+        q = s[0]
+        out: list[str] = []
+        i = 1
+        while i < len(s):
+            c = s[i]
+            if q == '"' and c == "\\" and i + 1 < len(s):
+                out.append(s[i + 1])
+                i += 2
+                continue
+            if c == q:
+                return "".join(out), s[i + 1:]
+            out.append(c)
+            i += 1
+        raise TomlError(f"line {lineno}: unterminated string", lineno)
+    if s[:1] == "[":
+        rest = s[1:]
+        items: list[str] = []
+        while True:
+            rest = rest.lstrip()
+            if rest[:1] == "]":
+                return items, rest[1:]
+            if rest[:1] in ('"', "'"):
+                item, rest = parse_value(rest, lineno)
+                items.append(item)
+            elif not rest:
+                raise TomlError(f"line {lineno}: unterminated list", lineno)
+            else:
+                raise TomlError(f"line {lineno}: list items must be quoted strings", lineno)
+            rest = rest.lstrip()
+            if rest[:1] == ",":
+                rest = rest[1:]
+            elif rest[:1] != "]":
+                raise TomlError(f"line {lineno}: expected , or ] in the list", lineno)
+    raise TomlError(f"line {lineno}: a value must be a quoted string or a list of quoted strings", lineno)
+
+
+def parse_line(raw: str, lineno: int):
+    """Return an Entry, or None for a blank or comment line."""
+    s = raw.strip()
+    if not s or s.startswith("#"):
+        return None
+    key, eq, rest = s.partition("=")
+    key = key.strip()
+    if not eq or not key or not all(c.isalnum() or c in "_-" for c in key):
+        raise TomlError(f"line {lineno}: expected key = value", lineno)
+    value, rest = parse_value(rest, lineno)
+    rest = rest.strip()
+    if rest and not rest.startswith("#"):
+        raise TomlError(f"line {lineno}: unexpected text after the value: {rest!r}", lineno)
+    return Entry(key, value, rest, lineno)
+
+
+def table_header(raw: str):
+    """The table name of a `[name]` line, else None."""
+    m = TABLE_HEADER.fullmatch(raw)
+    return m.group(1) if m else None
+
+
+def unknown_table(name: str, lineno: int) -> str:
+    return f"line {lineno}: unknown table [{name}]; the only table is [codex]"
+
+
+def parse_text(text: str) -> list:
+    entries = []
+    table = ""
+    for n, raw in enumerate(text.split("\n"), 1):
+        name = table_header(raw)
+        if name is not None:
+            if name not in HOST_TABLE.values():
+                raise TomlError(unknown_table(name, n), n)
+            table = name
+            continue
+        e = parse_line(raw, n)
+        if e is not None:
+            e.table = table
+            entries.append(e)
+    return entries
+
+
+CONTROL_CHAR = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+
+
+def quote(s: str) -> str:
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def format_value(v) -> str:
+    if isinstance(v, list):
+        return "[" + ", ".join(quote(x) for x in v) + "]"
+    return quote(v)
+
+
+def format_line(key: str, value, comment: str) -> str:
+    line = f"{key} = {format_value(value)}"
+    return f"{line}  {comment}" if comment else line
+
+
+def display(v) -> str:
+    return ", ".join(v) if isinstance(v, list) else str(v)
+
+
+def as_list(v) -> list:
+    return list(v) if isinstance(v, list) else [v]
+
+
+def budget_display(label) -> str:
+    if isinstance(label, list):
+        return display(label) + " (invalid: a list)"
+    effort = BUDGETS.get(label)
+    return f"{label} ({effort})" if effort else f"{label} (unknown budget)"
+
+
+def explain(what: str, why: str = "", fix: str = "", stream=None, op: bool = False) -> None:
+    """Print a finding as what is wrong and why on one line, then how to fix it on a `fix:` line.
+    op: the fix changes the models file, so it is marked as the operator's action."""
+    stream = stream or sys.stderr
+    print(f"{what}; {why}" if why else what, file=stream)
+    if fix:
+        print(f"{tag('fix', op)} {fix}", file=stream)
+
+
+def die(msg: str, code: int, why: str = "", fix: str = "", op: bool = False) -> None:
+    explain(msg, why, fix, op=op)
+    sys.exit(code)
+
+
+RESTORE = "restore it from the ctlhq repository: skills/ctlhq-setup/models.example.toml"
+SHAPE = 'role = "model" or role = ["a", "b"]'
+
+
+class Defaults:
+    """The defaults file: header comments, the budget line, one line per role."""
+
+    def __init__(self) -> None:
+        try:
+            self.text = EXAMPLE.read_text(encoding="utf-8")
+        except OSError as e:
+            die(f"cannot read the defaults file {EXAMPLE}: {e}", 1,
+                "every role and default is read from it", RESTORE)
+        try:
+            entries = parse_text(self.text)
+        except TomlError as e:
+            die(f"defaults file {EXAMPLE}: {e}", 1,
+                "no command can run until the defaults parse",
+                f"rewrite line {e.lineno} of {EXAMPLE} as {SHAPE}, or {RESTORE}")
+        self.entries = [e for e in entries if e.table == ""]
+        # One dict per table: the top level (Claude Code) and [codex].
+        self.tables = {t: {e.key: e for e in entries if e.table == t} for t in HOST_TABLE.values()}
+        self.by_key = self.tables[""]
+        if "budget" not in self.by_key:
+            die(f"defaults file {EXAMPLE} has no budget line", 1,
+                "the default budget comes from it",
+                f'add the line budget = "large" to {EXAMPLE}, or {RESTORE}')
+
+    @property
+    def roles(self) -> list:
+        return [e.key for e in self.entries if e.key != "budget"]
+
+
+def resolve_file(explicit) -> Path:
+    if explicit is not None:
+        return Path(explicit).expanduser()
+    env = os.environ.get("CTLHQ_MODELS")
+    if env:
+        return Path(env).expanduser()
+    return DEFAULT_FILE
+
+
+def read_file(path: Path):
+    """Return (lines, entries); exit 1 when the file cannot be read or parsed."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        die(f"cannot read {path}: {e}", 1, "the role values are read from it",
+            f"point at a readable models file: ctlhq-models --file <path to models.toml> <command>")
+    try:
+        return text.split("\n"), parse_text(text)
+    except TomlError as e:
+        die(f"{path}: {e}", 1, "no role in the file can be read until every line parses",
+            f"rewrite line {e.lineno} of {path} as {SHAPE}, or delete it so the default applies "
+            f"({PREFIX} validate lists every problem)", op=True)
+
+
+def write_file(path: Path, lines: list) -> None:
+    text = "\n".join(lines)
+    if not text.endswith("\n"):
+        text += "\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError as e:
+        die(f"cannot write {path}: {e}", 1, "nothing was saved",
+            f"make {path.parent} writable, or write elsewhere: ctlhq-models --file <writable path> <command>")
+
+
+def warn_unknown_names(role: str, value) -> None:
+    names = value if isinstance(value, list) else [value]
+    for n in names:
+        if n not in KNOWN_NAMES and n not in ALIASES:
+            print(
+                f"warning: {role} = {n!r} is not a Claude Code model name or alias "
+                "(Codex names differ); kept as written. "
+                f"Check it against the host's names: {PREFIX} validate --allow <the host's model names>",
+                file=sys.stderr,
+            )
+
+
+def unknown_role(role: str, defaults: Defaults) -> int:
+    close = difflib.get_close_matches(role, ["budget"] + defaults.roles, n=1)
+    hint = f"did you mean {close[0]}? " if close else ""
+    explain(f"unknown role {role!r}. Roles: budget, " + ", ".join(defaults.roles),
+            f"the roles come from {EXAMPLE}",
+            f"{hint}{PREFIX} show prints every role with its value")
+    return 2
+
+
+def not_a_model_role(cmd: str) -> int:
+    explain(f"budget is not a model role for {cmd}",
+            f"{cmd} chooses among a role's model names, and the budget line holds an effort label",
+            f"pass a model role, for example: {PREFIX} {cmd} swarm-workers "
+            + ("<rejected-model>" if cmd == "fallback" else "--not-family <model>"))
+    return 2
+
+
+def alias_notes(values) -> None:
+    """On stderr, say what an alias value means for the spawn."""
+    for a in dict.fromkeys(v for v in as_list(values) if v in ALIASES):
+        print(f"note: {a} runs this entry on the parent chat model; omit the subagent tool's model parameter for it",
+              file=sys.stderr)
+
+
+def table_of(role: str) -> str:
+    """The table a role is read from on this host. The budget line is shared and stays at the top."""
+    return "" if role == "budget" else TABLE
+
+
+def lookup(entries: list, role: str, defaults: Defaults, table: str):
+    """A role's value in one table and where it came from: "file", "default", or "none".
+    "none" happens only in [codex]: the role then runs on the session's model."""
+    hit = next((e for e in entries if e.table == table and e.key == role), None)
+    if hit is not None:
+        return hit.value, "file"
+    d = defaults.tables[table].get(role)
+    if d is not None:
+        return d.value, "default"
+    return "inherit-parent", "none"
+
+
+def default_text(role: str, defaults: Defaults, table: str) -> str:
+    value, source = lookup([], role, defaults, table)
+    return display(value) + (", no Codex value" if source == "none" else "")
+
+
+def is_retired(e: Entry, defaults: Defaults) -> bool:
+    """No skill reads the line: its key is not in the defaults, or it is a budget line inside [codex]."""
+    return e.key not in defaults.by_key or (e.table != "" and e.key == "budget")
+
+
+def table_label(e: Entry) -> str:
+    return f"[{e.table}] {e.key}" if e.table else e.key
+
+
+def prefix_for(table: str) -> str:
+    """The fix-line prefix for a value in <table>: it names the host when the host was chosen or is not the default."""
+    host = next(h for h, t in HOST_TABLE.items() if t == table)
+    return f"{BASE_PREFIX} --host {host}" if HOST_CHOSEN or host != "claude" else BASE_PREFIX
+
+
+def current_value(path: Path, role: str, defaults: Defaults):
+    """The role's value on this host: the file's line, else the default (inherit-parent in [codex] with none)."""
+    entries = read_file(path)[1] if path.exists() else []
+    return lookup(entries, role, defaults, table_of(role))[0]
+
+
+def family(name: str):
+    """The vendor family of a model name: its first token. None for an alias."""
+    if name in ALIASES:
+        return None
+    if name in KNOWN_NAMES:
+        return "claude"
+    return re.split(r"[-._/:]", name.strip().lower(), 1)[0]
+
+
+def closeness(candidate: str, rejected: str) -> tuple:
+    """Higher is closer: shared leading tokens, then shared tokens anywhere."""
+    a = re.split(r"[-._]", candidate.lower())
+    b = re.split(r"[-._]", rejected.lower())
+    prefix = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        prefix += 1
+    return prefix, sum(1 for t in a if t in b)
+
+
+def set_entry(path: Path, key: str, value, defaults: Defaults, table: str = "") -> None:
+    """Rewrite one line of <table>, keeping its comment. A missing file starts from the defaults.
+    A missing line goes after the table's last line; a missing [codex] table is added at the end."""
+    if path.exists():
+        lines, entries = read_file(path)
+    else:
+        print(f"models file missing; creating it from the defaults: {path}", file=sys.stderr)
+        lines, entries = defaults.text.split("\n"), parse_text(defaults.text)
+    rows = [e for e in entries if e.table == table]
+    hit = next((e for e in rows if e.key == key), None)
+    d = defaults.tables[table].get(key)
+    default_comment = d.comment if d is not None else ""
+    if hit is not None:
+        lines[hit.lineno - 1] = format_line(key, value, hit.comment or default_comment)
+        write_file(path, lines)
+        return
+    line = format_line(key, value, default_comment)
+    headers = [i for i, raw in enumerate(lines) if table_header(raw) is not None]
+    if rows:
+        lines.insert(max(e.lineno for e in rows), line)
+    elif table == "":
+        lines.insert(headers[0] if headers else len(lines), line)
+    else:
+        own = [i for i in headers if table_header(lines[i]) == table]
+        if own:
+            lines.insert(own[0] + 1, line)
+        else:
+            while lines and not lines[-1].strip():
+                lines.pop()
+            lines += ["", f"[{table}]", line]
+    write_file(path, lines)
+
+
+def cmd_show(path: Path, defaults: Defaults) -> int:
+    present = path.exists()
+    entries = read_file(path)[1] if present else []
+    current = {e.key: e for e in entries if e.table == ""}
+    note = "" if present else f"  (missing; showing the defaults. {tag('fix', True)} {PREFIX} init --budget large)"
+    print(f"file: {path}{note}")
+    rows = [("role", "current", "default", "codex")]
+    for d in defaults.entries:
+        cur = current.get(d.key)
+        if d.key == "budget":
+            default = budget_display(d.value)
+            curv = budget_display(cur.value) if cur is not None else default + " (default)"
+        else:
+            default = display(d.value)
+            curv = display(cur.value) if cur is not None else default + " (default)"
+        rows.append((d.key, curv, default, codex_cell(entries, d.key, defaults)))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    for e in entries:
+        if is_retired(e, defaults):
+            print(
+                f"retired role (not in the defaults, so no skill reads it; {tag('fix', True)} {PREFIX} prune): "
+                f"line {e.lineno}: {table_label(e)} = {display(e.value)}"
+            )
+    for e in entries:
+        if e.table == "" and e.key in defaults.by_key and e.key != "budget":
+            warn_unknown_names(e.key, e.value)
+    return 0
+
+
+def codex_cell(entries: list, role: str, defaults: Defaults) -> str:
+    """The show cell of a role's Codex value. The budget line is shared, so its cell stays empty."""
+    if role == "budget":
+        return ""
+    value, source = lookup(entries, role, defaults, "codex")
+    return display(value) + {"file": "", "default": " (default)", "none": " (no Codex value)"}[source]
+
+
+def cmd_init(path: Path, budget: str, force: bool, defaults: Defaults) -> int:
+    if path.exists() and not force:
+        explain(f"{path} exists; pass --force to overwrite it",
+                "init rewrites every line from the defaults, so the role choices in it would be lost",
+                f"change one role with {PREFIX} set <role> <value>, or start over with {PREFIX} init --force", op=True)
+        return 1
+    lines = defaults.text.split("\n")
+    b = defaults.by_key["budget"]
+    lines[b.lineno - 1] = format_line("budget", budget, b.comment)
+    write_file(path, lines)
+    print(f"wrote {path}  (budget {budget}, effort {BUDGETS[budget]})")
+    return 0
+
+
+def cmd_get(path: Path, role: str, defaults: Defaults) -> int:
+    if role not in defaults.by_key:
+        return unknown_role(role, defaults)
+    entries = read_file(path)[1] if path.exists() else []
+    table = table_of(role)
+    value, source = lookup(entries, role, defaults, table)
+    where = path if path.exists() else f"{path} (no such file)"
+    if source == "default" and table == "":
+        print(f"note: {role} is not in {where}; printing the default, its starting value in {EXAMPLE}",
+              file=sys.stderr)
+    elif source == "default":
+        print(f"note: {role} is not in the [{table}] table of {where}; printing the default, "
+              f"its starting value in the [{table}] table of {EXAMPLE}", file=sys.stderr)
+    elif source == "none":
+        print(f"note: no Codex value for {role}; runs on the session's model", file=sys.stderr)
+    print(display(value))
+    alias_notes(value)
+    return 0
+
+
+def rewrite_token(name: str, effort: str):
+    """The name with its effort token replaced, or None when it carries no token."""
+    toks = name.split("-")
+    idx = len(toks) - 1
+    if toks[idx].lower() == "fast" and len(toks) >= 2:
+        idx -= 1
+    if toks[idx].lower() not in LADDER:
+        return None
+    toks[idx] = effort
+    return "-".join(toks)
+
+
+def cmd_budget(path: Path, label: str, defaults: Defaults, rewrite: bool = False) -> int:
+    label = label.strip()
+    if label not in BUDGETS:
+        die("budget must be one of: " + ", ".join(BUDGETS), 2, f"got {label!r}; {BUDGET_WHY}",
+            f"{PREFIX} budget large", op=True)
+    set_entry(path, "budget", label, defaults)
+    effort = BUDGETS[label]
+    print(f"budget {label}: effort {effort}  ({path})")
+    if not rewrite:
+        return 0
+    lines, entries = read_file(path)
+    rewritten = 0
+    for e in entries:
+        if e.table != "" or e.key == "budget" or e.key not in defaults.by_key:
+            continue
+        new_values = []
+        report = []
+        changed = False
+        for v in as_list(e.value):
+            if v in ALIASES:
+                new_values.append(v)
+                report.append(f"{v} (alias; unchanged)")
+                continue
+            nv = rewrite_token(v, effort)
+            if nv is None:
+                new_values.append(v)
+                report.append(f"{v} (no effort token; left alone)")
+            elif nv == v:
+                new_values.append(v)
+                report.append(f"{v} (already {effort})")
+            else:
+                new_values.append(nv)
+                report.append(f"{v} -> {nv}")
+                changed = True
+        if changed:
+            rewritten += 1
+            lines[e.lineno - 1] = format_line(e.key, new_values if e.is_list else new_values[0], e.comment)
+        print(f"{e.key}: " + ", ".join(report))
+    if rewritten:
+        write_file(path, lines)
+    print(f"rewrote {rewritten} role line(s) to effort {effort}")
+    return 0
+
+
+def cmd_set(path: Path, role: str, raw: str, defaults: Defaults) -> int:
+    if role == "budget":
+        return cmd_budget(path, raw, defaults)
+    if role not in defaults.by_key:
+        return unknown_role(role, defaults)
+    # The chosen host's default, so a Codex fix line never names a Claude model.
+    default = lookup([], role, defaults, TABLE)[0]
+    keep_default = f"or {PREFIX} unset {role} to use the default ({display(default)})"
+    if defaults.by_key[role].is_list:
+        value = [x.strip() for x in raw.split(",") if x.strip()]
+        if not value:
+            die(f"{role} needs at least one value", 2, "a list role runs one subagent per entry, so an empty list runs none",
+                f"{PREFIX} set {role} {','.join(as_list(default))}  (comma-separated), {keep_default}", op=True)
+    else:
+        value = raw.strip()
+        if not value:
+            die(f"{role} needs a value", 2, "a spawn on this role needs a model name",
+                f"{PREFIX} set {role} {default}, {keep_default}", op=True)
+        if "," in value:
+            die(f"{role} takes one value, not a list", 2, "this role runs on one model",
+                f"{PREFIX} set {role} {value.split(',')[0].strip() or default}", op=True)
+    if any(CONTROL_CHAR.search(x) for x in as_list(value)):
+        die(f"{role}: a value cannot hold a newline or another control character", 2,
+            "the file holds one role per line, so the value would break the file",
+            f"retype the value as one plain line: {PREFIX} set {role} <value>", op=True)
+    if TABLE == "":
+        warn_unknown_names(role, value)
+    set_entry(path, role, value, defaults, TABLE)
+    print(f"{'[' + TABLE + '] ' if TABLE else ''}{role} = {display(value)}  ({path})")
+    return 0
+
+
+def cmd_unset(path: Path, role: str, defaults: Defaults) -> int:
+    if role not in defaults.by_key:
+        return unknown_role(role, defaults)
+    table = table_of(role)
+    default = default_text(role, defaults, table)
+    where = f"the [{table}] table of {path}" if table else f"{path}"
+    if not path.exists():
+        print(f"models file missing: {path}; nothing to remove, the default applies ({default})", file=sys.stderr)
+        return 0
+    lines, entries = read_file(path)
+    hits = [e for e in entries if e.table == table and e.key == role]
+    if not hits:
+        print(f"{role} has no line in {where}; the default applies already ({default})", file=sys.stderr)
+        return 0
+    drop = {e.lineno for e in hits}
+    write_file(path, [l for n, l in enumerate(lines, 1) if n not in drop])
+    print(f"removed {role} from {where}; the default applies: {default}")
+    return 0
+
+
+def closest_allowed(name: str, allow: list):
+    """The allowed name to propose for <name>: the closest one of the same family, else the first. Also the reason."""
+    fam = family(name)
+    same = [a for a in allow if a not in ALIASES and family(a) == fam]
+    if same:
+        return max(same, key=lambda a: (closeness(a, name), -same.index(a))), f"closest allowed name of family {fam}"
+    real = [a for a in allow if a not in ALIASES]
+    if real:
+        return real[0], f"no allowed name of family {fam}; first allowed name"
+    return "inherit-parent", "no real name allowed; runs on the parent model"
+
+
+def missing_file(path: Path, cmd: str) -> int:
+    print(f"models file missing: {path}  ({cmd} needs a file; with none, every role uses its default)")
+    print(f"{tag('fix', True)} {PREFIX} init --budget large")
+    return 1
+
+
+def cmd_validate(path: Path, defaults: Defaults, allow) -> int:
+    if not path.exists():
+        return missing_file(path, "validate")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        explain(f"cannot read {path}: {e}", "the role values are read from it",
+                "point at a readable models file: ctlhq-models --file <path to models.toml> validate", sys.stdout)
+        return 1
+    lines = text.split("\n")
+    problems: list = []  # (what and why, fix)
+    entries = []
+    table = ""
+    for n, raw in enumerate(lines, 1):
+        name = table_header(raw)
+        if name is not None:
+            if name not in HOST_TABLE.values():
+                problems.append((f"{unknown_table(name, n)} (the tool cannot read this file until it is gone)",
+                                 f"rename line {n} of {path} to [codex], or delete the table"))
+            table = name
+            continue
+        try:
+            e = parse_line(raw, n)
+        except TomlError as err:
+            problems.append((f"{err} (the tool cannot read this line)",
+                             f"rewrite line {n} of {path} as {SHAPE}, or delete it so the default applies"))
+            continue
+        if e is None or table not in HOST_TABLE.values():
+            continue
+        e.table = table
+        if e.table and e.key == "budget":
+            problems.append((f"line {e.lineno}: budget inside [{e.table}] (both hosts share the top budget line, "
+                             "so no skill reads this one)", f"{PREFIX} prune"))
+        elif is_retired(e, defaults):
+            problems.append((f"line {e.lineno}: retired role {table_label(e)} (not in the defaults, so no skill reads it)",
+                             f"{PREFIX} prune"))
+        else:
+            entries.append(e)
+    first_line: dict = {}  # (table, role) -> first line number
+    for e in entries:
+        key = (e.table, e.key)
+        label = table_label(e)
+        pre = prefix_for(e.table)
+        if key in first_line:
+            problems.append((f"line {e.lineno}: {label} appears more than once (only line {first_line[key]} is read)",
+                             f"delete line {e.lineno} or line {first_line[key]} of {path}"))
+        else:
+            first_line[key] = e.lineno
+        d = defaults.by_key[e.key]
+        if e.key == "budget":
+            if e.is_list or e.value not in BUDGETS:
+                problems.append((f"line {e.lineno}: budget must be one of {', '.join(BUDGETS)}, "
+                                 f"got {display(e.value)!r} ({BUDGET_WHY})", f"{PREFIX} budget large"))
+            continue
+        values = e.value if e.is_list else [e.value]
+        if d.is_list and not e.is_list:
+            problems.append((f"line {e.lineno}: {label} takes a list, got a single value "
+                             "(a list role runs one subagent per entry)",
+                             f"{pre} set {e.key} {e.value}  (it writes a list; add entries as a,b)"))
+        elif not d.is_list and e.is_list:
+            problems.append((f"line {e.lineno}: {label} takes a single value, got a list (this role runs on one model)",
+                             f"{pre} set {e.key} {(values[0] if values and values[0].strip() else lookup([], e.key, defaults, e.table)[0])}"))
+        if not values or any(not v.strip() for v in values):
+            problems.append((f"line {e.lineno}: {label} has an empty value (a spawn needs a model name)",
+                             f"{pre} unset {e.key}  (the default {default_text(e.key, defaults, e.table)} applies), "
+                             f"or {pre} set {e.key} <value>"))
+            continue
+        if allow is not None and e.table == TABLE:
+            bad = [v for v in values if v not in ALIASES and v not in allow]
+            if bad:
+                fixed = []
+                reasons = []
+                for v in values:
+                    if v in bad:
+                        new, reason = closest_allowed(v, allow)
+                        fixed.append(new)
+                        reasons.append(f"{v} -> {new}: {reason}")
+                    else:
+                        fixed.append(v)
+                for v in bad:
+                    problems.append((f"line {e.lineno}: {label} = {v!r} is not in --allow "
+                                     "(the host's model names), so a spawn on it fails", None))
+                value = ",".join(fixed) if d.is_list else fixed[0]
+                problems[-1] = (problems[-1][0],
+                                f"{pre} set {e.key} {value}  ({'; '.join(reasons)}. "
+                                f"Allowed: {', '.join(allow)}; inherit-parent and auto always pass)")
+        elif allow is None and e.table == "":
+            warn_unknown_names(e.key, e.value)
+    for what, fix in problems:
+        print(f"problem: {what}")
+        if fix:
+            print(f"{tag('fix', True)} {fix}")
+    if problems:
+        again = f" --allow {','.join(allow)}" if allow is not None else ""
+        print(f"next: once the operator has applied each fix, check again: {PREFIX} validate{again}")
+        return 1
+    seen = {k for t, k in first_line if t == ""}
+    budget = next((e.value for e in entries if e.table == "" and e.key == "budget"), None)
+    budget_text = budget_display(budget) if budget is not None else "missing (large applies)"
+    missing = [r for r in defaults.roles if r not in seen]
+    note = f", {len(missing)} role line(s) missing (defaults apply)" if missing else ""
+    allowed = f", every real value in --allow ({len(allow)} names)" if allow is not None else ""
+    if TABLE:
+        note += f", {sum(1 for t, _ in first_line if t == TABLE)} [{TABLE}] role(s) set"
+    print(f"ok: {path}  {len(seen - {'budget'})} roles set, budget {budget_text}{note}{allowed}")
+    return 0
+
+
+def cmd_prune(path: Path, defaults: Defaults) -> int:
+    if not path.exists():
+        return missing_file(path, "prune")
+    lines, entries = read_file(path)
+    retired = [e for e in entries if is_retired(e, defaults)]
+    if not retired:
+        print(f"nothing to prune: {path} has no retired role line")
+        return 0
+    dropped = {e.lineno for e in retired}
+    for e in retired:
+        print(f"retired role dropped: line {e.lineno}: {lines[e.lineno - 1].strip()}")
+    write_file(path, [l for n, l in enumerate(lines, 1) if n not in dropped])
+    print(f"pruned {len(retired)} line(s) from {path}")
+    return 0
+
+
+def cmd_fallback(path: Path, role: str, rejected: str, valid, defaults: Defaults) -> int:
+    if role == "budget":
+        return not_a_model_role("fallback")
+    if role not in defaults.by_key:
+        return unknown_role(role, defaults)
+    if rejected in ALIASES:
+        die(f"{rejected!r} is an alias (the parent model), never a rejected model", 2,
+            "an alias entry is never sent to the host as a model name, so the host cannot reject it",
+            "omit the subagent tool's model parameter for this entry; it then runs on the parent model")
+    retry = f"{PREFIX} fallback {role} {rejected} --valid <the host's model names from its error message, comma-separated>"
+    starting = as_list(lookup([], role, defaults, TABLE)[0])
+    fam = family(rejected)
+    how = f"{rejected} is family {fam} by its vendor prefix"
+    if fam and valid:
+        same = [v for v in valid if family(v) == fam and v != rejected]
+        if same:
+            best = max(same, key=lambda v: (closeness(v, rejected), -same.index(v)))
+            print(best)
+            print(f"rule: {how}; closest --valid model of family {fam}")
+            alias_notes(best)
+            return 0
+    only_rejected = False
+    if fam:
+        for i, s in enumerate(starting):
+            if family(s) != fam:
+                continue
+            if s == rejected or (valid and s not in valid):
+                only_rejected = True
+                continue
+            print(s)
+            print(f"rule: {how}; starting value {i + 1} of {role} shares the family")
+            if not valid:
+                print(f"next: if the host rejects {s} too, rerun: {retry}")
+            alias_notes(s)
+            return 0
+    first = starting[0]
+    print(first)
+    if only_rejected:
+        why = "every starting value of that family is the rejected model itself" + (" or not in --valid" if valid else "")
+        print(f"rule: {how}; {why}; printing the first starting value of {role}")
+    else:
+        extra = " (not in --valid)" if valid and first not in valid else ""
+        print(f"rule: no family match: {how}; printing the first starting value of {role}{extra}")
+    if valid:
+        print("next: no --valid name fits the rule; say so, and report the model-name issue to the operator")
+        print(f"{tag('next', True)} set the role to a --valid name: {PREFIX} set {role} <a --valid name>")
+    else:
+        print(f"next: {first} matches no family rule; if the host rejects it too, rerun: {retry}")
+    alias_notes(first)
+    return 1
+
+
+def cmd_pick(path: Path, role: str, model: str, defaults: Defaults) -> int:
+    if role == "budget":
+        return not_a_model_role("pick")
+    if role not in defaults.by_key:
+        return unknown_role(role, defaults)
+    values = as_list(current_value(path, role, defaults))
+    target = family(model)
+    if target is None:
+        print(values[0])
+        print(f"rule: {model} is an alias, so its family is unknown; printing the first entry of {role}")
+        print(f"next: rerun with the parent's real model name: {PREFIX} pick {role} --not-family <that name>")
+        alias_notes(values[0])
+        return 1
+    for i, v in enumerate(values):
+        fam = family(v)
+        if fam is None or fam == target:
+            continue
+        print(v)
+        print(f"rule: entry {i + 1} of {role} is family {fam}, which differs from {model} ({target})")
+        return 0
+    print(values[0])
+    print(f"rule: every entry of {role} ({display(values)}) is family {target} or an alias; printing the first entry")
+    print(f'next: use {values[0]} and say "same-family review ({target})" in the reply')
+    print(f"{tag('next', True)} add a model of another family: {PREFIX} set {role} {','.join(values)},<model of another family>")
+    alias_notes(values[0])
+    return 1
+
+
+def cmd_known_values() -> int:
+    print("Claude Code model names: " + ", ".join(KNOWN_NAMES))
+    print("aliases (the role runs on the parent chat model): " + ", ".join(ALIASES))
+    print("budgets: " + ", ".join(f"{k} (effort {v})" for k, v in BUDGETS.items()))
+    print("Codex accepts other names. Write only a name you have confirmed in this session.")
+    return 0
+
+
+def usage_line(cmd: str) -> str:
+    """The --help usage line of one command, for a fix line."""
+    for line in __doc__.splitlines():
+        # A usage line is the command, then two or more spaces, then its description.
+        usage = re.split(r"\s{2,}", line.strip())[0].replace("[--file PATH] ", "")
+        parts = usage.split()
+        if len(parts) >= 2 and parts[0] == "ctlhq-models" and parts[1] == cmd:
+            return " ".join([PREFIX] + parts[1:])
+    return f"{PREFIX} --help"
+
+
+OPTION_EXAMPLES = {
+    "--allow": "validate --allow <the host's model names, comma-separated>",
+    "--valid": "fallback <role> <rejected-model> --valid <the host's model names, comma-separated>",
+    "--not-family": "pick <role> --not-family <the model to differ from>",
+}
+
+
+def usage(code: int) -> int:
+    stream = sys.stdout if code == 0 else sys.stderr
+    print(__doc__.strip(), file=stream)
+    return code
+
+
+def take_option(args: list, name: str, split: bool):
+    """Remove `name value` or `name=value` from args. Return the value (a list when split) or None."""
+    value = None
+    rest = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == name:
+            i += 1
+            if i >= len(args):
+                die(f"{name} needs a value", 2, "it was the last argument", f"{PREFIX} {OPTION_EXAMPLES[name]}")
+            value = args[i]
+        elif a.startswith(name + "="):
+            value = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+        i += 1
+    if value is not None and split:
+        value = [x.strip() for x in value.split(",") if x.strip()]
+        if not value:
+            die(f"{name} needs at least one name", 2, "the value held no name between the commas",
+                f"{PREFIX} {OPTION_EXAMPLES[name]}")
+    args[:] = rest
+    return value
+
+
+def take_flag(args: list, name: str) -> bool:
+    present = name in args
+    args[:] = [a for a in args if a != name]
+    return present
+
+
+def main(argv: list) -> int:
+    global PREFIX, BASE_PREFIX, MODELS_PATH, HOST, TABLE, HOST_CHOSEN
+    file_arg = None
+    host_arg = None
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            return usage(0)
+        if a in ("--file", "-f"):
+            i += 1
+            if i >= len(argv):
+                explain("--file needs a path", "it was the last argument",
+                        "ctlhq-models --file <path to models.toml> <command>")
+                return 2
+            file_arg = argv[i]
+        elif a.startswith("--file="):
+            file_arg = a.split("=", 1)[1]
+        elif a == "--host":
+            i += 1
+            if i >= len(argv):
+                explain("--host needs a value", "it was the last argument", "ctlhq-models --host codex <command>")
+                return 2
+            host_arg = argv[i]
+        elif a.startswith("--host="):
+            host_arg = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+        i += 1
+    if file_arg is not None and not file_arg.strip():
+        explain("--file needs a path (got an empty value)",
+                "an empty value never falls back to CTLHQ_MODELS or ~/.ctlhq/models.toml",
+                "pass a real path, or drop --file to use the default file")
+        return 2
+    env_host = os.environ.get("CTLHQ_HOST", "")
+    host = host_arg if host_arg is not None else (env_host or "claude")
+    if host not in HOST_TABLE:
+        source = "--host" if host_arg is not None else "CTLHQ_HOST"
+        explain(f"{source} must be claude or codex, got {host!r}",
+                "Claude Code reads the top-level role lines and Codex reads the [codex] table",
+                "ctlhq-models --host codex <command>" if host_arg is not None
+                else "unset CTLHQ_HOST, or set it to claude or codex")
+        return 2
+    HOST, TABLE, HOST_CHOSEN = host, HOST_TABLE[host], host_arg is not None or bool(env_host)
+    if file_arg is not None:
+        PREFIX = f"ctlhq-models --file {shlex.quote(file_arg)}"
+    BASE_PREFIX = PREFIX
+    if HOST_CHOSEN:
+        PREFIX = f"{PREFIX} --host {HOST}"
+    if not rest:
+        return usage(2)
+    cmd, args = rest[0], rest[1:]
+
+    def need(count: int) -> bool:
+        if len(args) != count:
+            explain(f"{cmd} takes {count} argument(s), got {len(args)}",
+                    "extra or missing arguments are never guessed at",
+                    usage_line(cmd), op=cmd in WRITERS)
+            return False
+        return True
+
+    if cmd == "known-values":
+        return cmd_known_values() if need(0) else 2
+    defaults = Defaults()
+    path = resolve_file(file_arg)
+    MODELS_PATH = path
+    if cmd == "show":
+        return cmd_show(path, defaults) if need(0) else 2
+    if cmd == "init":
+        budget = "large"
+        force = False
+        j = 0
+        while j < len(args):
+            a = args[j]
+            if a == "--force":
+                force = True
+            elif a == "--budget":
+                j += 1
+                if j >= len(args):
+                    explain("--budget needs a label", BUDGET_WHY, f"{PREFIX} init --budget large", op=True)
+                    return 2
+                budget = args[j]
+            elif a.startswith("--budget="):
+                budget = a.split("=", 1)[1]
+            else:
+                explain(f"unknown init option {a}", "init takes only --budget <label> and --force",
+                        usage_line("init"), op=True)
+                return 2
+            j += 1
+        if budget not in BUDGETS:
+            explain("budget must be one of: " + ", ".join(BUDGETS), f"got {budget!r}; {BUDGET_WHY}",
+                    f"{PREFIX} init --budget large", op=True)
+            return 2
+        return cmd_init(path, budget, force, defaults)
+    if cmd == "get":
+        return cmd_get(path, args[0], defaults) if need(1) else 2
+    if cmd == "set":
+        return cmd_set(path, args[0], args[1], defaults) if need(2) else 2
+    if cmd == "unset":
+        return cmd_unset(path, args[0], defaults) if need(1) else 2
+    if cmd == "budget":
+        rewrite = take_flag(args, "--rewrite-names")
+        return cmd_budget(path, args[0], defaults, rewrite) if need(1) else 2
+    if cmd == "validate":
+        allow = take_option(args, "--allow", split=True)
+        return cmd_validate(path, defaults, allow) if need(0) else 2
+    if cmd == "prune":
+        return cmd_prune(path, defaults) if need(0) else 2
+    if cmd == "fallback":
+        valid = take_option(args, "--valid", split=True)
+        return cmd_fallback(path, args[0], args[1], valid, defaults) if need(2) else 2
+    if cmd == "pick":
+        model = take_option(args, "--not-family", split=False)
+        if model is None:
+            explain("pick needs --not-family <model>",
+                    "pick returns an entry whose vendor family differs from that model",
+                    f"{PREFIX} {OPTION_EXAMPLES['--not-family']}")
+            return 2
+        return cmd_pick(path, args[0], model, defaults) if need(1) else 2
+    commands = ["show", "init", "get", "set", "unset", "budget", "validate", "prune", "fallback", "pick",
+                "known-values"]
+    close = difflib.get_close_matches(cmd, commands, n=1)
+    explain(f"unknown command {cmd!r}", "the commands are: " + ", ".join(commands),
+            (f"did you mean {usage_line(close[0])}? " if close else "") + "ctlhq-models --help describes each one",
+            op=bool(close) and close[0] in WRITERS)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

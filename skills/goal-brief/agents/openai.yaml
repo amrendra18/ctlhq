@@ -1,0 +1,4 @@
+interface:
+  display_name: "Goal Brief"
+  short_description: "Write GOAL.md with a pre-flight audit before a goal run"
+  default_prompt: "Use $goal-brief to read the repository and write GOAL.md with the goal, checklist and pre-flight audit."

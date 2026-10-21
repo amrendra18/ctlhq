@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""ctlhq-gallery: write an evidence folder's index.html showing every screenshot, with the ones that changed since the previous run marked.
+
+Usage:
+  ctlhq-gallery DIR [--previous DIR] [--title TEXT]
+
+Reads every image under DIR/screens/ (.png, .jpg, .jpeg, .gif, .webp, .svg, in any
+subfolder), in name order, and writes DIR/index.html: one card per image with its name
+(the path under screens/). With --previous, each image is compared byte for byte with the
+image of the same name under the previous DIR/screens/ and marked "changed" or "new";
+images that match are marked "same", and names only the previous run had are listed as
+"removed". Without --previous, nothing is marked. --title sets the page heading (default:
+the name of DIR).
+
+The page is static HTML: no scripts, nothing loaded from the network, images linked by
+relative path, light and dark colours that follow the system setting.
+
+Prints one line: wrote DIR/index.html: N images, C changed, W new, S same, R removed.
+
+Exit codes: 0 written; 1 no image under DIR/screens/ (the page is still written and says
+so); 2 usage error (DIR or the previous DIR is not a folder).
+"""
+from __future__ import annotations
+
+import hashlib
+import html
+import sys
+import urllib.parse
+from pathlib import Path
+
+EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+USAGE = "usage: ctlhq-gallery DIR [--previous DIR] [--title TEXT]"
+
+CSS = """
+:root { color-scheme: light dark; --bg: #f7f7f5; --card: #ffffff; --text: #1d1d1f; --muted: #5f6368;
+  --line: #d9d9d6; --changed: #b3261e; --changed-bg: #fde7e4; --new: #0b6bcb; --new-bg: #e3effc;
+  --same: #4d5156; --same-bg: #ececea; }
+@media (prefers-color-scheme: dark) { :root { --bg: #141416; --card: #1f1f22; --text: #ececee;
+  --muted: #a3a3a8; --line: #3a3a3f; --changed: #ff8a80; --changed-bg: #4a1f1c; --new: #8ab4f8;
+  --new-bg: #1c2d47; --same: #b8b8bd; --same-bg: #2c2c30; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--text);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1200px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.summary { color: var(--muted); margin: 0 0 20px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+figure { margin: 0; background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+figure.changed { border: 2px solid var(--changed); }
+figure.new { border: 2px solid var(--new); }
+figure a { display: block; background: var(--line); }
+figure img { display: block; width: 100%; height: auto; }
+figcaption { padding: 8px 10px; display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+.name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; overflow-wrap: anywhere; }
+.badge { flex: none; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
+.badge.changed { color: var(--changed); background: var(--changed-bg); }
+.badge.new { color: var(--new); background: var(--new-bg); }
+.badge.same { color: var(--same); background: var(--same-bg); }
+.removed { margin-top: 24px; color: var(--muted); }
+.removed li { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+"""
+
+
+def digest(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def images(screens: Path) -> dict:
+    if not screens.is_dir():
+        return {}
+    return {p.relative_to(screens).as_posix(): p for p in sorted(screens.rglob("*"))
+            if p.is_file() and p.suffix.lower() in EXTS and not any(part.startswith(".") for part in p.relative_to(screens).parts)}
+
+
+def main(argv: list) -> int:
+    run_dir = prev_dir = title = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a in ("--previous", "--title"):
+            if i + 1 >= len(argv):
+                return usage(f"{a} needs a value")
+            if a == "--previous":
+                prev_dir = Path(argv[i + 1])
+            else:
+                title = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("-"):
+            return usage(f"unknown option {a!r}")
+        if run_dir is not None:
+            return usage("give one DIR")
+        run_dir = Path(a)
+        i += 1
+    if run_dir is None:
+        return usage("no DIR")
+    if not run_dir.is_dir():
+        return usage(f"not a folder: {run_dir}")
+    if prev_dir is not None and not prev_dir.is_dir():
+        return usage(f"--previous is not a folder: {prev_dir}")
+    if prev_dir is not None and prev_dir.resolve() == run_dir.resolve():
+        return usage("--previous is the same folder as DIR")
+
+    cur = images(run_dir / "screens")
+    prev = images(prev_dir / "screens") if prev_dir is not None else None
+    states = {}
+    for name, p in cur.items():
+        if prev is None:
+            states[name] = ""
+        elif name not in prev:
+            states[name] = "new"
+        elif p.stat().st_size != prev[name].stat().st_size or digest(p) != digest(prev[name]):
+            states[name] = "changed"
+        else:
+            states[name] = "same"
+    removed = sorted(set(prev) - set(cur)) if prev is not None else []
+    count = {k: sum(1 for s in states.values() if s == k) for k in ("changed", "new", "same")}
+
+    heading = title or run_dir.resolve().name
+    if not cur:
+        summary = "No screenshots under screens/."
+    elif prev is None:
+        summary = f"{len(cur)} screenshot{'s' if len(cur) != 1 else ''}. No previous run given, so nothing is marked."
+    else:
+        summary = (f"{len(cur)} screenshot{'s' if len(cur) != 1 else ''}: {count['changed']} changed, {count['new']} new, "
+                   f"{count['same']} same, {len(removed)} removed since {html.escape(prev_dir.resolve().name)}.")
+    cards = []
+    for name in cur:
+        st = states[name]
+        src = html.escape("screens/" + urllib.parse.quote(name), quote=True)
+        label = html.escape(name)
+        badge = f'<span class="badge {st}">{st}</span>' if st else ""
+        cards.append(f'<figure class="shot {st}" data-state="{st or "unmarked"}"><a href="{src}"><img src="{src}" alt="{label}" loading="lazy"></a>'
+                     f'<figcaption><span class="name">{label}</span>{badge}</figcaption></figure>')
+    removed_html = ""
+    if removed:
+        items = "".join(f'<li data-state="removed">{html.escape(n)}</li>' for n in removed)
+        removed_html = f'<section class="removed"><h2>Removed since the previous run</h2><ul>{items}</ul></section>'
+    page = (
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        f"<title>{html.escape(heading)}</title><style>{CSS}</style></head>\n<body><main>"
+        f"<h1>{html.escape(heading)}</h1><p class=\"summary\">{summary}</p>"
+        f"<div class=\"grid\">{''.join(cards)}</div>{removed_html}</main></body></html>\n"
+    )
+    out = run_dir / "index.html"
+    out.write_text(page, encoding="utf-8")
+    print(f"wrote {out}: {len(cur)} images, {count['changed']} changed, {count['new']} new, "
+          f"{count['same']} same, {len(removed)} removed")
+    return 0 if cur else 1
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-gallery: {msg}", file=sys.stderr)
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

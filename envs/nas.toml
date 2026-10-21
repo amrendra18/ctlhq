@@ -1,0 +1,30 @@
+# Recipe for bin/ctlhq-env. Keys: see `bin/ctlhq-env --help`, section "Recipes".
+name = "nas"
+summary = "Linux file server sharing /srv/share over Samba (SMB) and NFS"
+provider = "tart"
+guest = "linux"
+image = "ghcr.io/cirruslabs/ubuntu:latest"
+cpu = 2
+memory_mb = 2048
+disk_gb = 40
+network = "shared"
+user = "admin"
+root = true
+snapshot_before_risky = true
+services = ["smb:445", "nfs:2049"]
+provision = [
+  "sudo -n true",
+  "sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -q",
+  "sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -q samba nfs-kernel-server",
+  "sudo -n mkdir -p /srv/share && sudo -n chmod 0777 /srv/share",
+  "printf '[share]\\n   path = /srv/share\\n   guest ok = yes\\n   read only = no\\n' | sudo -n tee -a /etc/samba/smb.conf >/dev/null && sudo -n systemctl restart smbd",
+  "echo '/srv/share *(rw,sync,no_subtree_check,insecure)' | sudo -n tee -a /etc/exports >/dev/null && sudo -n exportfs -ra",
+]
+not_covered = [
+  "real NAS systems such as Synology DSM or TrueNAS, and their web pages",
+  "ZFS, RAID, disk failures, and quotas",
+  "AFP, Time Machine, and Bonjour discovery",
+  "Active Directory or Kerberos sign-in: the share allows guests",
+  "network speed: the machine shares the host's virtual network",
+]
+notes = "The share is //<ip>/share for SMB and <ip>:/srv/share for NFS. `up` installs the packages, so the first `up` needs network access in the guest."

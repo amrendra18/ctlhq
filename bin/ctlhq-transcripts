@@ -1,0 +1,993 @@
+#!/usr/bin/env python3
+"""ctlhq-transcripts: find, list, and read this workspace's agent transcripts.
+
+Usage:
+  ctlhq-transcripts dir         [--host claude|codex] [--workspace PATH]
+  ctlhq-transcripts list        [--host H] [--workspace PATH] [--all-workspaces] [--subagents]
+                                 [--since 7d|ISO] [--grep WORD ...] [--exclude-current] [--json]
+  ctlhq-transcripts current     [--host H] [--workspace PATH] [--match TEXT]
+  ctlhq-transcripts turns       <path> [--role operator|assistant|all] [--text-only] [--index] [--json]
+  ctlhq-transcripts tail        <path> [-n 20] [--role operator|assistant|all]
+  ctlhq-transcripts files       <path> [--skills]
+  ctlhq-transcripts skills-used <path> [--skills-dir DIR]
+  ctlhq-transcripts grep        <PATTERN> [-i] [--host H] [--workspace PATH] [--all-workspaces]
+                                 [--subagents] [--since 7d|ISO]
+  ctlhq-transcripts slice       --slices N [--by bytes|mtime]        (reads list rows on stdin)
+  ctlhq-transcripts export      --out DIR [--host H] [--workspace PATH] [--all-workspaces]
+                                 [--since 7d|ISO] [--role operator|assistant|all]
+
+Hosts and folders
+  claude (default)  ~/.claude/projects/<slug>/<session-id>.jsonl, where <slug> is the workspace
+                    path with every "/" turned into "-". Subagent transcripts sit next to the
+                    session file in <session-id>/subagents/agent-*.jsonl; list and grep include
+                    them only with --subagents.
+  codex             ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl. Sessions are filed by date, so
+                    the workspace comes from each file's first line (session_meta.cwd). Sub-agent
+                    threads (parent_thread_id set) count as subagents.
+  --root DIR replaces the host folder above. Setting HOME points the tool at another home.
+
+Scope
+  Transcripts are private chats. Every command reads the current workspace only (the working
+  directory, or --workspace PATH). list, grep, and export leave it only with --all-workspaces.
+  dir prints the folder the tool would read.
+
+Columns and roles
+  list / index.tsv  path, workspace, started, ended, turns, operator_turns, bytes, first operator
+                    prompt (80 chars, newlines as spaces). Tab separated, no header on stdout;
+                    index.tsv has one. turns counts operator plus assistant turns.
+  turns             ts<TAB>role<TAB>text, one turn per line; newlines and tabs inside the text are
+                    written as \\n and \\t. Roles: operator (the human typed it), assistant, tool (a
+                    tool result), system (injected context, slash-command output, hook notes), and
+                    parent (the prompt a parent agent gave a subagent). A tool call shows as
+                    [tool: Name] and a tool result as [tool-result]; --text-only drops both and
+                    skips turns left empty. --index prepends the 1-based turn index that
+                    skills-used reports. Consecutive assistant blocks of one reply form one turn.
+  files             count<TAB>ops<TAB>path from tool calls: Read, Edit, Write, NotebookEdit, Codex
+                    apply_patch, and path-like tokens in Bash or exec commands (best effort).
+                    --skills keeps paths ending in SKILL.md.
+  skills-used       name<TAB>how<TAB>turn. how is skill-tool (a Claude Code Skill tool call
+                    loaded the skill; the name is printed as given, such as "plugin:name"), slash
+                    (a Claude Code user turn holds <command-name>/<name></command-name>, the record
+                    of a typed /<name> that expanded the skill; only when --skills-dir holds
+                    <name>/SKILL.md, so /loop or /clear give no row), read
+                    (a Read-type tool call opened its SKILL.md), shell-read (a shell or exec
+                    command names its SKILL.md path), agent-prompt (a subagent prompt names
+                    skills/<name>/), or tool-call (a command runs a file under skills/<name>/bin/;
+                    the tool names come from --skills-dir, default the skills/ folder next to
+                    this tool's bin/). skill-tool, slash, and read rows are strong evidence of a load;
+                    shell-read rows are weak (a path parsed from a command line). One row per
+                    name and how, at the first turn where it happened. A SKILL.md path is
+                    normalized first, so skills/a/../b/SKILL.md counts as b.
+  grep              mtime<TAB>matches<TAB>path, newest first. PATTERN is a Python regular
+                    expression; -i ignores case. It searches every turn's text plus the strings
+                    inside tool calls.
+  slice             one line per slice: bytes<TAB>path... It reads list rows (TSV, header allowed)
+                    on stdin. --by bytes (default) balances total bytes across slices; --by mtime
+                    cuts the input order into runs of equal count.
+  export            writes <DIR>/<host>/<slug>/<session-id>.txt (ts<TAB>role<TAB>text per turn)
+                    and <DIR>/index.tsv, then prints sessions, turns, and bytes written. --role
+                    defaults to operator. A session with no matching turn is skipped.
+
+--since takes 7d, 12h, 2w, or an ISO date or datetime (UTC when no zone is given) and keeps
+sessions whose last turn is at or after it. Output is deterministic for the same files, except:
+current picks by file modification time, list and grep order by it, and --since uses the clock.
+
+Exit 0 success, 1 nothing found (missing folder or file, empty list, no match, fewer sessions
+than slices, nothing exported), 2 usage error, 3 transcript format not supported.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+HOSTS = ("claude", "codex")
+ROLES = ("operator", "assistant", "all")
+LIST_COLUMNS = ("path", "workspace", "started", "ended", "turns", "operator_turns", "bytes", "first_prompt")
+
+CLAUDE_LINE_RE = re.compile(r'"type":\s*"(?:user|assistant)"')
+CODEX_LINE_RE = re.compile(r'"type":\s*"(?:session_meta|response_item|event_msg)"')
+CODEX_SKIP_RE = re.compile(r'"type":\s*"(?:reasoning|token_count|task_started|task_complete|thread_settings_applied)"')
+CODEX_EVENT_RE = re.compile(r'"(?:UserMessage|user_message)"')
+
+LEADING_TAG_RE = re.compile(r"^\s*<([A-Za-z_][\w-]*)[\s>]")
+SYSTEM_REMINDER_RE = re.compile(r"\s*<system-reminder>.*?</system-reminder>\s*", re.DOTALL)
+COMMAND_NAME_RE = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
+COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+SKILL_MD_RE = re.compile(r"(?:^|/)skills/([A-Za-z0-9._-]+)/SKILL\.md$")
+SKILL_PATH_RE = re.compile(r"(?<![\w-])skills/([A-Za-z0-9._-]+)/")
+SKILL_BIN_RE = re.compile(r"(?<![\w-])skills/([A-Za-z0-9._-]+)/bin/")
+PATH_TOKEN_RE = re.compile(
+    r"(?<![\w:@.-])((?:~|\.{1,2})?/[^\s'\"`;|&<>()\[\]{}$*?,]+|[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+%-]+)+)"
+)
+
+OPERATOR_TAGS = {"command-name", "command-message", "pasted_content", "bash-input"}
+CODEX_PLAIN_OK = set()
+AGENT_TOOLS = {"agent", "task", "sendmessage", "spawn_agent", "send_message", "followup_task"}
+PATH_KEYS = ("file_path", "path", "notebook_path", "target_file", "filePath", "targetFile")
+COMMAND_KEYS = ("command", "cmd", "script")
+
+
+def err(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def short_ts(ts: str) -> str:
+    return re.sub(r"\.\d+", "", ts or "")
+
+
+def parse_ts(ts: str):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(re.sub(r"\.\d+", "", ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def parse_since(spec: str):
+    m = re.fullmatch(r"(\d+)([dhw])", spec)
+    if m:
+        n = int(m.group(1))
+        delta = {"d": timedelta(days=n), "h": timedelta(hours=n), "w": timedelta(weeks=n)}[m.group(2)]
+        return datetime.now(timezone.utc) - delta
+    return parse_ts(spec)
+
+
+def esc(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\r", "\\r").replace("\n", "\\n")
+
+
+def one_line(text: str, limit: int = 80) -> str:
+    return " ".join(text.split())[:limit]
+
+
+def slug_of(ws: str) -> str:
+    return ws.replace("/", "-")
+
+
+def same_path(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    if a.rstrip("/") == b.rstrip("/"):
+        return True
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:
+        return False
+
+
+def iter_jsonl(path: Path, keep: re.Pattern = None, skip: re.Pattern = None):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if keep and not keep.search(line):
+                continue
+            if skip and skip.search(line):
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except ValueError:
+                continue
+
+
+def leading_tag(text: str):
+    m = LEADING_TAG_RE.match(text or "")
+    return m.group(1) if m else None
+
+
+def new_turn(role: str, ts: str, text: str, text_only: str, tools: list = None) -> dict:
+    return {"role": role, "ts": ts or "", "text": text, "text_only": text_only, "tools": tools or []}
+
+
+def render_blocks(content):
+    """Return (text with markers, text only, tool calls, block kinds)."""
+    if isinstance(content, str):
+        return content, content, [], set()
+    text, plain, tools, kinds = [], [], [], set()
+    if not isinstance(content, list):
+        return "", "", [], kinds
+    for b in content:
+        if not isinstance(b, dict):
+            continue
+        kind = b.get("type")
+        kinds.add(kind)
+        if kind in ("text", "input_text", "output_text", "Text"):
+            t = b.get("text") or ""
+            text.append(t)
+            plain.append(t)
+        elif kind == "tool_use":
+            text.append(f"[tool: {b.get('name') or 'tool'}]")
+            tools.append({"name": b.get("name") or "tool", "input": b.get("input")})
+        elif kind == "tool_result":
+            text.append("[tool-result]")
+        elif kind == "image":
+            text.append("[image]")
+    return "\n".join(text), "\n".join(plain), tools, kinds
+
+
+def operator_text(text: str) -> str:
+    text = SYSTEM_REMINDER_RE.sub("\n", text).strip()
+    m = COMMAND_NAME_RE.search(text)
+    if m:
+        name = m.group(1).strip()
+        args = COMMAND_ARGS_RE.search(text)
+        name = name if name.startswith("/") else "/" + name
+        return (name + " " + args.group(1).strip()).strip() if args else name
+    return text
+
+
+def classify_claude_user(o: dict, content, sidechain: bool):
+    text, plain, tools, kinds = render_blocks(content)
+    if kinds and kinds <= {"tool_result"}:
+        return new_turn("tool", o.get("timestamp"), text, "", [])
+    origin = o.get("origin")
+    okind = origin.get("kind") if isinstance(origin, dict) else None
+    injected = (
+        o.get("isMeta") is True
+        or o.get("promptSource") == "system"
+        or o.get("turnOrigin") == "peer"
+        or (okind is not None and okind != "human")
+    )
+    tag = leading_tag(plain)
+    if injected or (tag is not None and tag not in OPERATOR_TAGS):
+        return new_turn("system", o.get("timestamp"), text, plain, tools)
+    if sidechain:
+        return new_turn("parent", o.get("timestamp"), text, plain, tools)
+    cleaned = operator_text(plain)
+    return new_turn("operator", o.get("timestamp"), cleaned, cleaned, tools)
+
+
+def slash_command(content) -> str:
+    """The /name a Claude Code user message records in <command-name>, without the slash, or ""."""
+    _, plain, _, _ = render_blocks(content)
+    m = COMMAND_NAME_RE.search(SYSTEM_REMINDER_RE.sub("\n", plain or ""))
+    return m.group(1).strip().lstrip("/").split()[0] if m and m.group(1).strip().lstrip("/") else ""
+
+
+def merge_into(turns: list, turn: dict, group, last_group: list) -> None:
+    if turns and turn["role"] == "assistant" and turns[-1]["role"] == "assistant" and (
+        group is None or group == last_group[0]
+    ):
+        prev = turns[-1]
+        prev["text"] = "\n".join(x for x in (prev["text"], turn["text"]) if x)
+        prev["text_only"] = "\n".join(x for x in (prev["text_only"], turn["text_only"]) if x)
+        prev["tools"].extend(turn["tools"])
+        return
+    turns.append(turn)
+    last_group[0] = group
+
+
+def parse_claude(path: Path, slug: str = None) -> dict:
+    turns: list = []
+    last_group = [None]
+    first_cwd = None
+    for o in iter_jsonl(path, CLAUDE_LINE_RE):
+        t = o.get("type")
+        if t not in ("user", "assistant"):
+            continue
+        msg = o.get("message")
+        if not isinstance(msg, dict):
+            continue
+        if first_cwd is None and o.get("cwd"):
+            first_cwd = o["cwd"]
+        if t == "assistant":
+            text, plain, tools, _ = render_blocks(msg.get("content"))
+            merge_into(turns, new_turn("assistant", o.get("timestamp"), text, plain, tools), msg.get("id"), last_group)
+        else:
+            turn = classify_claude_user(o, msg.get("content"), bool(o.get("isSidechain")))
+            turn["command"] = slash_command(msg.get("content"))
+            merge_into(turns, turn, None, last_group)
+    if slug is None:
+        slug = path.parents[2].name if path.parent.name == "subagents" else path.parent.name
+    return finish_session(path, "claude", turns, first_cwd or slug, slug, path.stem, path.parent.name == "subagents")
+
+
+def read_codex_meta(path: Path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for _ in range(3):
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(o, dict) and o.get("type") == "session_meta" and isinstance(o.get("payload"), dict):
+                    return o["payload"]
+    except OSError:
+        return None
+    return None
+
+
+def try_json(value):
+    if isinstance(value, str):
+        s = value.strip()
+        if s[:1] in ("{", "["):
+            try:
+                return json.loads(s)
+            except ValueError:
+                return value
+    return value
+
+
+def parse_codex(path: Path) -> dict:
+    turns: list = []
+    last_group = [None]
+    meta: dict = {}
+    pending_user: list = []
+    have_event_user = False
+    for o in iter_jsonl(path, CODEX_LINE_RE, CODEX_SKIP_RE):
+        t = o.get("type")
+        pl = o.get("payload")
+        if not isinstance(pl, dict):
+            continue
+        ts = o.get("timestamp") or ""
+        if t == "session_meta":
+            meta = pl
+            continue
+        if t == "event_msg":
+            pt = pl.get("type")
+            text = None
+            if pt == "item_completed":
+                item = pl.get("item") or {}
+                if isinstance(item, dict) and item.get("type") == "UserMessage":
+                    text = render_blocks(item.get("content"))[1]
+            elif pt == "user_message":
+                text = pl.get("message") if isinstance(pl.get("message"), str) else render_blocks(pl.get("content"))[1]
+            if text is not None:
+                have_event_user = True
+                merge_into(turns, new_turn("operator", ts, text, text, []), None, last_group)
+            continue
+        if t != "response_item":
+            continue
+        pt = pl.get("type")
+        if pt == "message":
+            text, plain, _, _ = render_blocks(pl.get("content"))
+            role = pl.get("role")
+            if role == "assistant":
+                merge_into(turns, new_turn("assistant", ts, text, plain, []), None, last_group)
+            elif role == "user":
+                turn = new_turn("system" if leading_tag(plain) else "_user", ts, text, plain, [])
+                turns.append(turn)
+                last_group[0] = None
+                if turn["role"] == "_user":
+                    pending_user.append(turn)
+            else:
+                merge_into(turns, new_turn("system", ts, text, plain, []), None, last_group)
+        elif pt in ("custom_tool_call", "function_call"):
+            name = pl.get("name") or pt
+            inp = try_json(pl.get("input") if pt == "custom_tool_call" else pl.get("arguments"))
+            merge_into(turns, new_turn("assistant", ts, f"[tool: {name}]", "", [{"name": name, "input": inp}]), None, last_group)
+        elif pt in ("custom_tool_call_output", "function_call_output"):
+            turns.append(new_turn("tool", ts, "[tool-result]", "", []))
+            last_group[0] = None
+    is_sub = bool(meta.get("parent_thread_id"))
+    if have_event_user:
+        turns = [x for x in turns if x["role"] != "_user"]
+    else:
+        for x in pending_user:
+            x["role"] = "parent" if is_sub else "operator"
+    cwd = meta.get("cwd") or ""
+    sid = str(meta.get("id") or path.stem)
+    return finish_session(path, "codex", turns, cwd, slug_of(cwd) if cwd else "unknown", sid, is_sub)
+
+
+def finish_session(path: Path, host: str, turns: list, workspace: str, slug: str, sid: str, is_sub: bool) -> dict:
+    for i, t in enumerate(turns, 1):
+        t["index"] = i
+    st = path.stat()
+    conv = [t for t in turns if t["role"] in ("operator", "assistant")]
+    ops = [t for t in turns if t["role"] == "operator"]
+    stamps = [t["ts"] for t in turns if t["ts"]]
+    return {
+        "path": str(path),
+        "host": host,
+        "workspace": workspace,
+        "slug": slug,
+        "session_id": sid,
+        "subagent": is_sub,
+        "started": short_ts(stamps[0]) if stamps else "",
+        "ended": short_ts(stamps[-1]) if stamps else "",
+        "turns": len(conv),
+        "operator_turns": len(ops),
+        "bytes": st.st_size,
+        "mtime": st.st_mtime,
+        "first_prompt": one_line(ops[0]["text"]) if ops else "",
+        "all_turns": turns,
+    }
+
+
+def detect_host(path: Path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for _ in range(5):
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    return None
+                if not isinstance(o, dict):
+                    return None
+                if isinstance(o.get("payload"), dict) and o.get("type") in ("session_meta", "response_item", "event_msg", "turn_context"):
+                    return "codex"
+                if "sessionId" in o or "parentUuid" in o or o.get("type") in ("user", "assistant", "summary", "attachment"):
+                    return "claude"
+    except OSError:
+        return None
+    return None
+
+
+def load_session(path_arg: str):
+    """Return (session, exit code). exit code 0 on success."""
+    path = Path(path_arg)
+    if not path.is_file():
+        err(f"no such file: {path}")
+        return None, 1
+    host = detect_host(path)
+    if host == "claude":
+        return parse_claude(path), 0
+    if host == "codex":
+        return parse_codex(path), 0
+    err(f"format not supported: {path} is not a Claude Code or Codex transcript")
+    return None, 3
+
+
+def tool_strings(value) -> list:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in tool_strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in tool_strings(v)]
+    return []
+
+
+def session_text(sess: dict) -> str:
+    parts = []
+    for t in sess["all_turns"]:
+        parts.append(t["text"])
+        for call in t["tools"]:
+            parts.extend(tool_strings(call["input"]))
+    return "\n".join(parts)
+
+
+def workspace_of(args) -> str:
+    return os.path.abspath(args.workspace) if getattr(args, "workspace", None) else os.getcwd()
+
+
+def host_root(args, host: str) -> Path:
+    if getattr(args, "root", None):
+        return Path(args.root)
+    return Path.home() / (".claude/projects" if host == "claude" else ".codex/sessions")
+
+
+def claude_dir(root: Path, ws: str) -> Path:
+    d = root / slug_of(ws)
+    if d.is_dir():
+        return d
+    for alt in (root / re.sub(r"[/._]", "-", ws), root / slug_of(os.path.realpath(ws))):
+        if alt.is_dir():
+            return alt
+    return d
+
+
+def candidates(args, host: str, want_subagents: bool):
+    """Yield (path, slug, is_subagent) for every transcript in scope, sorted by path."""
+    root = host_root(args, host)
+    ws = workspace_of(args)
+    if host == "claude":
+        if getattr(args, "all_workspaces", False):
+            dirs = sorted(d for d in root.iterdir() if d.is_dir()) if root.is_dir() else []
+        else:
+            d = claude_dir(root, ws)
+            dirs = [d] if d.is_dir() else []
+        for d in dirs:
+            for f in sorted(d.glob("*.jsonl")):
+                yield f, d.name, False
+            if want_subagents:
+                for f in sorted(d.glob("*/subagents/*.jsonl")):
+                    yield f, d.name, True
+        return
+    if not root.is_dir():
+        return
+    for f in sorted(root.rglob("*.jsonl")):
+        meta = read_codex_meta(f)
+        if meta is None:
+            continue
+        is_sub = bool(meta.get("parent_thread_id"))
+        if is_sub and not want_subagents:
+            continue
+        if not getattr(args, "all_workspaces", False) and not same_path(str(meta.get("cwd") or ""), ws):
+            continue
+        yield f, slug_of(str(meta.get("cwd") or "")), is_sub
+
+
+def parse_any(path: Path, host: str, slug: str) -> dict:
+    return parse_claude(path, slug) if host == "claude" else parse_codex(path)
+
+
+def sessions_in_scope(args, host: str, want_subagents: bool, since):
+    for f, slug, _ in candidates(args, host, want_subagents):
+        if since is not None and datetime.fromtimestamp(f.stat().st_mtime, timezone.utc) < since:
+            continue
+        sess = parse_any(f, host, slug)
+        if since is not None:
+            ended = parse_ts(sess["ended"]) or datetime.fromtimestamp(sess["mtime"], timezone.utc)
+            if ended < since:
+                continue
+        yield sess
+
+
+def current_path(args, host: str, match: str = None):
+    files = [f for f, _, _ in candidates(args, host, False)]
+    if match is not None:
+        want = match.lower()
+        files = [f for f in files if want in parse_any(f, host, None)["first_prompt"].lower()
+                 or want in one_line(first_operator_text(parse_any(f, host, None)), 10 ** 9).lower()]
+    if not files:
+        return None
+    return max(files, key=lambda f: (f.stat().st_mtime, str(f)))
+
+
+def first_operator_text(sess: dict) -> str:
+    for t in sess["all_turns"]:
+        if t["role"] == "operator":
+            return t["text"]
+    return ""
+
+
+def list_row(sess: dict) -> list:
+    return [sess["path"], sess["workspace"], sess["started"], sess["ended"], str(sess["turns"]),
+            str(sess["operator_turns"]), str(sess["bytes"]), one_line(sess["first_prompt"])]
+
+
+def cmd_dir(args) -> int:
+    root = host_root(args, args.host)
+    if args.host == "codex":
+        print(root)
+        if root.is_dir():
+            return 0
+        err("no Codex sessions folder")
+        return 1
+    d = claude_dir(root, workspace_of(args))
+    print(d)
+    if d.is_dir():
+        return 0
+    err(f"no transcript folder for workspace {workspace_of(args)}")
+    return 1
+
+
+def resolve_since(args):
+    spec = getattr(args, "since", None)
+    if not spec:
+        return None, 0
+    since = parse_since(spec)
+    if since is None:
+        err(f"--since needs 7d, 12h, 2w, or an ISO date, not {spec!r}")
+        return None, 2
+    return since, 0
+
+
+def cmd_list(args) -> int:
+    since, code = resolve_since(args)
+    if code:
+        return code
+    words = [w.lower() for w in args.grep]
+    skip = str(current_path(args, args.host)) if args.exclude_current else None
+    rows = []
+    for sess in sessions_in_scope(args, args.host, args.subagents, since):
+        if skip and sess["path"] == skip:
+            continue
+        if words:
+            text = session_text(sess).lower()
+            if not all(w in text for w in words):
+                continue
+        rows.append(sess)
+    rows.sort(key=lambda s: (-s["mtime"], s["path"]))
+    if args.json:
+        out = []
+        for s in rows:
+            o = {k: s[k] for k in LIST_COLUMNS}
+            o.update(host=s["host"], session_id=s["session_id"], slug=s["slug"], subagent=s["subagent"],
+                     mtime=datetime.fromtimestamp(s["mtime"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            out.append(o)
+        print(json.dumps(out, indent=2))
+    else:
+        for s in rows:
+            print("\t".join(list_row(s)))
+    if not rows:
+        err("no sessions found")
+        return 1
+    return 0
+
+
+def cmd_current(args) -> int:
+    p = current_path(args, args.host, args.match)
+    if p is None:
+        err("no session found")
+        return 1
+    print(p)
+    return 0
+
+
+def select_turns(sess: dict, role: str, text_only: bool) -> list:
+    out = []
+    for t in sess["all_turns"]:
+        if role != "all" and t["role"] != role:
+            continue
+        text = t["text_only"] if text_only else t["text"]
+        if text_only and not text.strip():
+            continue
+        out.append((t, text))
+    return out
+
+
+def cmd_turns(args) -> int:
+    sess, code = load_session(args.path)
+    if code:
+        return code
+    rows = select_turns(sess, args.role, args.text_only)
+    if args.json:
+        print(json.dumps([{"index": t["index"], "ts": short_ts(t["ts"]), "role": t["role"], "text": text,
+                           "tools": [c["name"] for c in t["tools"]]} for t, text in rows], indent=2))
+    else:
+        for t, text in rows:
+            cols = [short_ts(t["ts"]), t["role"], esc(text)]
+            if args.index:
+                cols.insert(0, str(t["index"]))
+            print("\t".join(cols))
+    return 0 if rows else 1
+
+
+def cmd_tail(args) -> int:
+    sess, code = load_session(args.path)
+    if code:
+        return code
+    if args.n < 1:
+        err("-n needs a number of 1 or more")
+        return 2
+    for t, text in select_turns(sess, args.role, False)[-args.n:]:
+        print(f"--- {short_ts(t['ts'])} {t['role']} ---")
+        print(text)
+    return 0
+
+
+def paths_in_command(cmd) -> list:
+    text = " ".join(tool_strings(cmd)) if not isinstance(cmd, str) else cmd
+    out = []
+    for m in PATH_TOKEN_RE.finditer(text):
+        tok = m.group(1).rstrip(".,:;")
+        if "://" in tok or tok.startswith("/dev/") or not re.search(r"[A-Za-z]", tok):
+            continue
+        out.append(tok)
+    return out
+
+
+def file_ops(call: dict) -> list:
+    """Return (path, op) pairs for one tool call."""
+    name = (call.get("name") or "").lower()
+    inp = call.get("input")
+    pairs = []
+    if name in ("read", "view", "open_file", "read_file"):
+        op = "read"
+    elif name in ("edit", "multiedit", "notebookedit", "apply_patch", "str_replace_editor", "edit_file", "search_replace"):
+        op = "edit"
+    elif name in ("write", "create_file", "write_file"):
+        op = "write"
+    elif name in ("bash", "exec", "shell", "shell_command", "run_terminal_cmd", "run_command"):
+        op = "bash"
+    else:
+        op = None
+    if isinstance(inp, dict):
+        for k in PATH_KEYS:
+            v = inp.get(k)
+            if isinstance(v, str) and v:
+                pairs.append((v, op or "read"))
+        for k in COMMAND_KEYS:
+            if k in inp:
+                pairs.extend((p, "bash") for p in paths_in_command(inp[k]))
+        if name == "apply_patch":
+            for v in inp.values():
+                if isinstance(v, str):
+                    pairs.extend((p, "edit") for p in patch_paths(v))
+    elif isinstance(inp, str) and op in ("bash", "edit"):
+        if name == "apply_patch":
+            pairs.extend((p, "edit") for p in patch_paths(inp))
+        else:
+            pairs.extend((p, "bash") for p in paths_in_command(inp))
+    return pairs
+
+
+def patch_paths(text: str) -> list:
+    return re.findall(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", text, re.MULTILINE)
+
+
+def cmd_files(args) -> int:
+    sess, code = load_session(args.path)
+    if code:
+        return code
+    counts: dict = {}
+    for t in sess["all_turns"]:
+        for call in t["tools"]:
+            for p, op in file_ops(call):
+                if args.skills and not p.endswith("SKILL.md"):
+                    continue
+                counts.setdefault(p, {}).setdefault(op, 0)
+                counts[p][op] += 1
+    rows = sorted(counts.items(), key=lambda kv: (-sum(kv[1].values()), kv[0]))
+    for p, ops in rows:
+        total = sum(ops.values())
+        print(f"{total}\t{','.join(f'{k}={v}' for k, v in sorted(ops.items()))}\t{p}")
+    return 0 if rows else 1
+
+
+def skill_bins(skills_dir: Path) -> dict:
+    out = {}
+    if skills_dir.is_dir():
+        for d in sorted(skills_dir.iterdir()):
+            b = d / "bin"
+            if d.is_dir() and b.is_dir():
+                for t in b.iterdir():
+                    if t.is_file():
+                        out[t.name] = d.name
+    return out
+
+
+def skill_tool_name(inp) -> str:
+    """The skill a Claude Code Skill tool call loads: input "skill" (current), or "command" (older builds)."""
+    if isinstance(inp, str):
+        inp = try_json(inp)
+    if not isinstance(inp, dict):
+        return ""
+    for key in ("skill", "command", "name"):
+        v = inp.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip().lstrip("/").split()[0]
+    return ""
+
+
+def cmd_skills_used(args) -> int:
+    sess, code = load_session(args.path)
+    if code:
+        return code
+    skills_dir = Path(args.skills_dir) if args.skills_dir else ROOT / "skills"
+    bins = skill_bins(skills_dir)
+    bin_re = re.compile(
+        r"(?:^|[\s;&|(`'\"=])(?:[\w./~+-]*/)?(" + "|".join(re.escape(b) for b in sorted(bins, key=len, reverse=True)) + r")(?=$|[\s;&|)`'\"])"
+    ) if bins else None
+    found: dict = {}
+
+    def note(name: str, how: str, idx: int) -> None:
+        found.setdefault((name, how), idx)
+
+    for t in sess["all_turns"]:
+        cmd = t.get("command")
+        if cmd and (skills_dir / cmd.rsplit(":", 1)[-1] / "SKILL.md").is_file():
+            note(cmd, "slash", t["index"])
+        for call in t["tools"]:
+            name = (call.get("name") or "").lower()
+            inp = call.get("input")
+            if name == "skill":
+                loaded = skill_tool_name(inp)
+                if loaded:
+                    note(loaded, "skill-tool", t["index"])
+                continue
+            for p, op in file_ops(call):
+                m = SKILL_MD_RE.search(os.path.normpath(p))  # skills/a/../b/SKILL.md is b
+                if m and op in ("read", "bash"):
+                    note(m.group(1), "read" if op == "read" else "shell-read", t["index"])
+            if name in AGENT_TOOLS:
+                for s in tool_strings(inp):
+                    for m in SKILL_PATH_RE.finditer(s):
+                        note(m.group(1), "agent-prompt", t["index"])
+            cmds = []
+            if isinstance(inp, dict):
+                cmds = [inp[k] for k in COMMAND_KEYS if k in inp]
+            elif isinstance(inp, str) and name in ("bash", "exec", "shell", "shell_command", "run_terminal_cmd", "run_command"):
+                cmds = [inp]
+            for c in cmds:
+                text = " ".join(tool_strings(c))
+                for m in SKILL_BIN_RE.finditer(text):
+                    note(m.group(1), "tool-call", t["index"])
+                if bin_re:
+                    for m in bin_re.finditer(text):
+                        note(bins[m.group(1)], "tool-call", t["index"])
+    rows = sorted(found.items(), key=lambda kv: (kv[1], kv[0]))
+    for (name, how), idx in rows:
+        print(f"{name}\t{how}\t{idx}")
+    return 0 if rows else 1
+
+
+def cmd_grep(args) -> int:
+    since, code = resolve_since(args)
+    if code:
+        return code
+    try:
+        rx = re.compile(args.pattern, re.IGNORECASE if args.ignore_case else 0)
+    except re.error as e:
+        err(f"bad pattern: {e}")
+        return 2
+    hits = []
+    for sess in sessions_in_scope(args, args.host, args.subagents, since):
+        n = len(rx.findall(session_text(sess)))
+        if n:
+            hits.append((sess["mtime"], n, sess["path"]))
+    hits.sort(key=lambda h: (-h[0], h[2]))
+    for mtime, n, path in hits:
+        print(f"{datetime.fromtimestamp(mtime, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\t{n}\t{path}")
+    if not hits:
+        err("no session matches")
+        return 1
+    return 0
+
+
+def cmd_slice(args) -> int:
+    if args.slices < 1:
+        err("--slices needs a number of 1 or more")
+        return 2
+    rows = []
+    for line in sys.stdin.read().split("\n"):
+        if not line.strip():
+            continue
+        cols = line.split("\t")
+        if cols[0] == "path":
+            continue
+        if len(cols) < 7:
+            err(f"not a list row (needs 7 or more columns): {line[:80]}")
+            return 2
+        try:
+            rows.append((cols[0], int(cols[6])))
+        except ValueError:
+            err(f"bytes column is not a number: {line[:80]}")
+            return 2
+    if len(rows) < args.slices:
+        err(f"{len(rows)} session(s) is fewer than {args.slices} slices")
+        return 1
+    slices = [[] for _ in range(args.slices)]
+    if args.by == "mtime":
+        base, extra = divmod(len(rows), args.slices)
+        pos = 0
+        for i in range(args.slices):
+            n = base + (1 if i < extra else 0)
+            slices[i] = rows[pos:pos + n]
+            pos += n
+    else:
+        totals = [0] * args.slices
+        for row in sorted(rows, key=lambda r: (-r[1], r[0])):
+            i = min(range(args.slices), key=lambda k: (totals[k], k))
+            slices[i].append(row)
+            totals[i] += row[1]
+        order = {r[0]: n for n, r in enumerate(rows)}
+        for s in slices:
+            s.sort(key=lambda r: order[r[0]])
+    for s in slices:
+        print("\t".join([str(sum(b for _, b in s))] + [p for p, _ in s]))
+    return 0
+
+
+def cmd_export(args) -> int:
+    since, code = resolve_since(args)
+    if code:
+        return code
+    out = Path(args.out)
+    index_rows = []
+    n_turns = 0
+    n_bytes = 0
+    for sess in sessions_in_scope(args, args.host, args.subagents, since):
+        rows = select_turns(sess, args.role, False)
+        if not rows:
+            continue
+        target = out / sess["host"] / sess["slug"] / f"{sess['session_id']}.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        body = "".join(f"{short_ts(t['ts'])}\t{t['role']}\t{esc(text)}\n" for t, text in rows)
+        target.write_text(body, encoding="utf-8")
+        n_turns += len(rows)
+        n_bytes += len(body.encode("utf-8"))
+        index_rows.append((sess["mtime"], list_row(sess)))
+    if not index_rows:
+        err("nothing exported")
+        return 1
+    index_rows.sort(key=lambda r: (-r[0], r[1][0]))
+    out.mkdir(parents=True, exist_ok=True)
+    index = out / "index.tsv"
+    index.write_text("\t".join(LIST_COLUMNS) + "\n" + "".join("\t".join(r) + "\n" for _, r in index_rows), encoding="utf-8")
+    print(f"sessions\t{len(index_rows)}")
+    print(f"turns\t{n_turns}")
+    print(f"bytes\t{n_bytes}")
+    print(f"index\t{index}")
+    return 0
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        err(f"{message}. Run --help.")
+        sys.exit(2)
+
+
+def build_parser() -> Parser:
+    p = Parser(prog="ctlhq-transcripts", add_help=False)
+    sub = p.add_subparsers(dest="cmd")
+
+    def scoped(name: str, wide: bool):
+        sp = sub.add_parser(name, add_help=False)
+        sp.add_argument("--host", choices=HOSTS, default="claude")
+        sp.add_argument("--workspace")
+        sp.add_argument("--root")
+        if wide:
+            sp.add_argument("--all-workspaces", action="store_true")
+            sp.add_argument("--subagents", action="store_true")
+            sp.add_argument("--since")
+        return sp
+
+    scoped("dir", False)
+    sp = scoped("list", True)
+    sp.add_argument("--grep", nargs="+", default=[])
+    sp.add_argument("--exclude-current", action="store_true")
+    sp.add_argument("--json", action="store_true")
+    sp = scoped("current", False)
+    sp.add_argument("--match")
+    sp = sub.add_parser("turns", add_help=False)
+    sp.add_argument("path")
+    sp.add_argument("--role", choices=ROLES, default="all")
+    sp.add_argument("--text-only", action="store_true")
+    sp.add_argument("--index", action="store_true")
+    sp.add_argument("--json", action="store_true")
+    sp = sub.add_parser("tail", add_help=False)
+    sp.add_argument("path")
+    sp.add_argument("-n", type=int, default=20)
+    sp.add_argument("--role", choices=ROLES, default="all")
+    sp = sub.add_parser("files", add_help=False)
+    sp.add_argument("path")
+    sp.add_argument("--skills", action="store_true")
+    sp = sub.add_parser("skills-used", add_help=False)
+    sp.add_argument("path")
+    sp.add_argument("--skills-dir")
+    sp = scoped("grep", True)
+    sp.add_argument("pattern")
+    sp.add_argument("-i", dest="ignore_case", action="store_true")
+    sp = sub.add_parser("slice", add_help=False)
+    sp.add_argument("--slices", type=int, required=True)
+    sp.add_argument("--by", choices=("bytes", "mtime"), default="bytes")
+    sp = scoped("export", True)
+    sp.add_argument("--out", required=True)
+    sp.add_argument("--role", choices=ROLES, default="operator")
+    return p
+
+
+COMMANDS = {
+    "dir": cmd_dir, "list": cmd_list, "current": cmd_current, "turns": cmd_turns, "tail": cmd_tail,
+    "files": cmd_files, "skills-used": cmd_skills_used, "grep": cmd_grep, "slice": cmd_slice, "export": cmd_export,
+}
+
+
+def main(argv: list) -> int:
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip())
+        return 0
+    if not argv:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    args = build_parser().parse_args(argv)
+    if args.cmd not in COMMANDS:
+        err(f"unknown command {args.cmd!r}. Run --help.")
+        return 2
+    try:
+        return COMMANDS[args.cmd](args)
+    except BrokenPipeError:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

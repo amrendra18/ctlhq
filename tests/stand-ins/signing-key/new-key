@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# new-key: make a throwaway ed25519 signing key in a private ssh-agent for test repositories.
+#
+# Usage: new-key [--parent DIR]
+#
+# 1. Makes a new folder DIR/fake-signing.XXXXXX (DIR defaults to $TMPDIR, else /tmp).
+# 2. Makes an ed25519 key with no passphrase in it: key and key.pub.
+# 3. Starts a private ssh-agent on the socket agent.sock in that folder.
+# 4. Loads the key into that agent only. SSH_AUTH_SOCK is set for that one ssh-add call.
+# 5. Writes allowed_signers (for gpg.ssh.allowedSignersFile) and env, a file to source:
+#      SSH_AUTH_SOCK, SSH_AGENT_PID, FAKE_SIGNING_DIR, FAKE_SIGNING_KEY (the private key),
+#      FAKE_SIGNING_PUB (the public key; use it as user.signingkey), FAKE_SIGNING_EMAIL.
+# 6. Prints the folder on line 1, then how to use and stop it.
+#
+# Stop it with: tests/stand-ins/signing-key/stop <folder>. That kills only this agent and deletes
+# the folder. Source env only inside a subshell or a test; it replaces SSH_AUTH_SOCK there.
+# It never reads or changes the agent named by your own SSH_AUTH_SOCK.
+#
+# Not covered: GPG keys, hardware keys, passphrases, and signing a push or a tag on a real host.
+#
+# Exit 0 made and loaded; 1 a step failed (anything made so far is removed); 2 usage error.
+set -u
+usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; }
+parent="${TMPDIR:-/tmp}"
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-h|--help) usage; exit 0 ;;
+	--parent) [ $# -ge 2 ] || { echo "new-key: --parent needs a folder" >&2; exit 2; }; parent="$2"; shift ;;
+	*) echo "new-key: unknown argument $1 (usage: new-key [--parent DIR])" >&2; exit 2 ;;
+	esac
+	shift
+done
+[ -d "$parent" ] || { echo "new-key: no such folder: $parent" >&2; exit 2; }
+dir="$(mktemp -d "${parent%/}/fake-signing.XXXXXX")" || { echo "new-key: cannot make a folder in $parent" >&2; exit 1; }
+dir="$(cd "$dir" && pwd -P)"
+sock="$dir/agent.sock"
+pid=""
+cleanup_fail() {
+	[ -n "$pid" ] && kill "$pid" 2>/dev/null
+	rm -rf "$dir"
+	echo "new-key: $1" >&2
+	exit 1
+}
+# A Unix socket path on macOS holds at most 104 bytes.
+[ "${#sock}" -le 100 ] || cleanup_fail "socket path is too long (${#sock} bytes): $sock; use --parent with a shorter folder"
+: > "$dir/.fake-signing-key"
+email="throwaway-signing@example.invalid"
+ssh-keygen -q -t ed25519 -N '' -C "$email" -f "$dir/key" </dev/null >/dev/null 2>&1 || cleanup_fail "ssh-keygen failed"
+out="$(ssh-agent -a "$sock" -s 2>&1)" || cleanup_fail "ssh-agent failed: $out"
+pid="$(printf '%s\n' "$out" | sed -n 's/^SSH_AGENT_PID=\([0-9][0-9]*\);.*/\1/p')"
+[ -n "$pid" ] || cleanup_fail "ssh-agent printed no pid: $out"
+SSH_AUTH_SOCK="$sock" ssh-add -q "$dir/key" </dev/null >/dev/null 2>&1 || cleanup_fail "ssh-add into the private agent failed"
+printf '%s namespaces="git" %s\n' "$email" "$(cut -d' ' -f1,2 "$dir/key.pub")" > "$dir/allowed_signers"
+{
+	printf "export SSH_AUTH_SOCK='%s'\n" "$sock"
+	printf "export SSH_AGENT_PID='%s'\n" "$pid"
+	printf "export FAKE_SIGNING_DIR='%s'\n" "$dir"
+	printf "export FAKE_SIGNING_KEY='%s'\n" "$dir/key"
+	printf "export FAKE_SIGNING_PUB='%s'\n" "$dir/key.pub"
+	printf "export FAKE_SIGNING_EMAIL='%s'\n" "$email"
+} > "$dir/env"
+here="$(cd "$(dirname "$0")" && pwd)"
+echo "$dir"
+echo "private ssh-agent pid $pid on $sock, holding one throwaway key"
+echo "use in a subshell: . $dir/env"
+echo "git config (local to the scratch repo): gpg.format ssh, user.signingkey $dir/key.pub, gpg.ssh.allowedSignersFile $dir/allowed_signers"
+echo "stop: $here/stop $dir"

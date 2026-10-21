@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""ctlhq-principles: print the coding principles index, or one coding principle in full.
+
+Usage:
+  ctlhq-principles                 the index: a group heading, then name: description per coding principle
+  ctlhq-principles <name>          one coding principle's SKILL.md body in full (principle- prefix optional)
+  ctlhq-principles --all           every coding principle's body, in index order
+  ctlhq-principles check <SKILL.md>
+                                    verify that the Coding principles section of the given skill
+                                    names exactly one entry per skills/principle-<name>/ folder
+
+The 24 coding principles, their five groups (core, architecture, verification,
+delegation, meta), and their order come from the Coding principles section of
+skills/ctlhq-mode/SKILL.md, resolved from this tool's own real path. ctlhq-catalog reads
+the list through this tool, so the list lives in one place. The section holds a bold
+group heading per group (**Core**), then one bullet per principle (- **Title.** ...). A
+title becomes its name in kebab case (hyphens kept, other punctuation dropped) unless the
+bullet gives the name as (**principle-<name>**). A group's entries stay together, and a
+name appears once.
+
+Descriptions and bodies are read from skills/principle-<name>/SKILL.md. A principle whose
+file is not ported yet is listed as (not ported yet); asking for its body exits 1.
+check prints every difference as one line.
+
+Exit 0 on success, 1 when the section is missing or malformed, a body is not ported, or
+check finds a difference, 2 on a usage error or an unknown name.
+"""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+MODE = ROOT / "skills" / "ctlhq-mode" / "SKILL.md"
+KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+GROUP_HEADING = re.compile(r"^\*\*([^*]+)\*\*\s*$")
+BULLET = re.compile(r"^- \*\*(.+?)\*\*(?:\s*\(\*\*(principle-[a-z0-9-]+)\*\*\))?")
+
+
+def load_groups(path: Path = MODE) -> list:
+    """Return [(group, [name, ...]), ...] from the Coding principles section; exit 1 when it is unusable."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"cannot read {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+    entries = index_entries(text)
+    if not entries:
+        print(f"{path}: no '## Coding principles' section with bullet entries found", file=sys.stderr)
+        sys.exit(1)
+    groups: list = []
+    seen: set = set()
+    for group, name in entries:
+        if not group:
+            print(f"{path}: {name} has no bold group heading above it", file=sys.stderr)
+            sys.exit(1)
+        if name in seen:
+            print(f"{path}: {name} appears twice", file=sys.stderr)
+            sys.exit(1)
+        seen.add(name)
+        if groups and groups[-1][0] == group:
+            groups[-1][1].append(name)
+        elif any(g == group for g, _ in groups):
+            print(f"{path}: group {group} is split; keep each group's entries together", file=sys.stderr)
+            sys.exit(1)
+        else:
+            groups.append((group, [name]))
+    return groups
+
+
+def skill_path(name: str) -> Path:
+    return ROOT / "skills" / f"principle-{name}" / "SKILL.md"
+
+
+def split(text: str):
+    """Return (frontmatter dict, body) for a SKILL.md."""
+    lines = text.split("\n")
+    fm: dict = {}
+    if not lines or lines[0].strip() != "---":
+        return fm, text
+    end = None
+    key = None
+    for i in range(1, len(lines)):
+        line = lines[i]
+        if line.strip() == "---":
+            end = i
+            break
+        if key is not None and line[:1] in (" ", "\t") and line.strip():
+            fm[key] = (fm[key] + " " + line.strip()).strip()
+            continue
+        m = KEY_RE.match(line)
+        if m:
+            key, val = m.group(1), m.group(2).strip()
+            if val in (">", ">-", "|", "|-"):
+                fm[key] = ""
+            else:
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                    val = val[1:-1].replace('\\"', '"')
+                fm[key] = val
+    if end is None:
+        return fm, text
+    return fm, "\n".join(lines[end + 1:]).lstrip("\n")
+
+
+def read(name: str):
+    try:
+        return split(skill_path(name).read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def cmd_index(groups: list) -> int:
+    for group, names in groups:
+        print(group)
+        for n in names:
+            parsed = read(n)
+            if parsed is None:
+                print(f"  {n}: (not ported yet)")
+                continue
+            desc = " ".join(str(parsed[0].get("description", "")).split())
+            print(f"  {n}: {desc}" if desc else f"  {n}: (no description in front matter)")
+    return 0
+
+
+def cmd_leaf(name: str, header: bool) -> int:
+    parsed = read(name)
+    rel = skill_path(name).relative_to(ROOT).as_posix()
+    if parsed is None:
+        print(f"{name}: (not ported yet) expected at {rel}", file=sys.stderr)
+        return 1
+    if header:
+        print(f"==== principle-{name}  ({rel})")
+    body = parsed[1].rstrip("\n")
+    print(body)
+    return 0
+
+
+def kebab(title: str) -> str:
+    """'Test Behavior, Not Implementation.' -> 'test-behavior-not-implementation'."""
+    words = re.sub(r"[^A-Za-z0-9\s-]", "", title).lower().split()
+    return "-".join(words)
+
+
+def index_entries(text: str) -> list:
+    """[(group, name), ...] from the Coding principles section of a SKILL.md."""
+    lines = text.split("\n")
+    start = next((i for i, l in enumerate(lines) if re.match(r"^##\s+Coding principles\s*$", l)), None)
+    if start is None:
+        return []
+    out: list = []
+    group = ""
+    for line in lines[start + 1:]:
+        if line.startswith("## "):
+            break
+        g = GROUP_HEADING.match(line.strip())
+        if g:
+            group = g.group(1).strip().lower()
+            continue
+        b = BULLET.match(line)
+        if b:
+            name = b.group(2)[len("principle-"):] if b.group(2) else kebab(b.group(1))
+            out.append((group, name))
+    return out
+
+
+def cmd_check(skill_file: Path) -> int:
+    groups = load_groups(skill_file)
+    names = [n for _, ns in groups for n in ns]
+    folders = sorted(d.name[len("principle-"):] for d in (ROOT / "skills").glob("principle-*") if (d / "SKILL.md").is_file())
+    problems = [f"index entry without a folder: {n} (expected skills/principle-{n}/SKILL.md)" for n in names if n not in folders]
+    problems += [f"folder without an index entry: skills/principle-{f}" for f in folders if f not in names]
+    for p in problems:
+        print(p)
+    if problems:
+        print(f"{len(problems)} difference(s): {len(names)} index entries vs {len(folders)} folders")
+        return 1
+    print(f"ok: {len(names)} principles in {len(groups)} groups; folders and {skill_file} agree")
+    return 0
+
+
+def main(argv: list) -> int:
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if argv and argv[0] == "check":
+        if len(argv) != 2:
+            print("check takes exactly one SKILL.md path. Run --help.", file=sys.stderr)
+            return 2
+        return cmd_check(Path(argv[1]))
+    groups = load_groups()
+    names = [n for _, ns in groups for n in ns]
+    if not argv:
+        return cmd_index(groups)
+    if len(argv) != 1:
+        print("give at most one name, or --all. Run --help.", file=sys.stderr)
+        return 2
+    a = argv[0]
+    if a == "--all":
+        rc = 0
+        for i, n in enumerate(names):
+            if i:
+                print()
+            rc = max(rc, cmd_leaf(n, header=True))
+        return rc
+    if a.startswith("-"):
+        print(f"unknown option {a}", file=sys.stderr)
+        return 2
+    name = a[len("principle-"):] if a.startswith("principle-") else a
+    if name not in names:
+        print(f"unknown principle {a!r}. Valid names:", file=sys.stderr)
+        for group, ns in groups:
+            print(f"  {group}: " + ", ".join(ns), file=sys.stderr)
+        return 2
+    return cmd_leaf(name, header=False)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

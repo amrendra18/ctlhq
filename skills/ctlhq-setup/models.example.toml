@@ -1,0 +1,31 @@
+# ctlhq model configuration. One line per role. Delete a line to fall back to the default.
+# The value on a role line is the role's starting value, the `default` column of `ctlhq-models show`.
+# `inherit-parent` or `auto` as a value: the role runs on the parent chat model (omit the subagent tool's `model`).
+# List roles run one subagent per entry; alias entries still count toward the fan-out.
+budget = "large"  # unlimited | large | medium | small  ->  effort max | xhigh | high | medium
+feature-refactoring = "sonnet"
+bug-fix = "sonnet"
+perf-issue = "sonnet"
+hillclimb = "sonnet"
+judgment-and-prose = "opus"
+hardest-tasks = "opus"
+how-explorer = "sonnet"
+how-explainer = "opus"
+why-investigators = "sonnet"
+why-synthesizer = "opus"
+reflect-tooling = "sonnet"
+reflect-judgment-divergent-synthesizer = "opus"
+best-of-n-runners = ["opus", "sonnet"]
+best-of-n-cross-judge-pool = ["opus", "sonnet"]
+swarm-workers = "sonnet"
+architect-runners = ["opus", "sonnet"]
+interrogate-reviewers = ["opus", "sonnet"]
+builders = "opus"  # role map: builders run on Opus 5.5
+builders-limit-fallback = "inherit-parent"  # when the builder model hits its usage limit: the main agent builds alone; BLOCKED.md records "subagents paused"
+planners-and-reviewers = "fable"  # role map: deep-dive plans and reviews run on Fable
+planners-and-reviewers-limit-fallback = "opus"  # when Fable hits its usage limit, switch to Opus
+
+# Codex values. In Codex, every ctlhq-models call adds --host codex and reads this table. A role with no line here runs on the session's model.
+[codex]
+planners-and-reviewers = "gpt-6-astra"  # role map: in Codex, plans and reviews run on gpt-6-astra (model_reasoning_effort xhigh)
+planners-and-reviewers-limit-fallback = "gpt-6.1-sol"  # role map: when gpt-6-astra hits its usage limit, switch to gpt-6.1-sol

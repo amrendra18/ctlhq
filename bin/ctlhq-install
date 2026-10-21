@@ -1,0 +1,789 @@
+#!/usr/bin/env python3
+"""ctlhq-install: link this repository's skills, agents and rules file into the host folders of a home.
+
+Usage:
+  ctlhq-install [--dry-run] [--replace] [--agents-md] [--home DIR]   create or repair every link
+  ctlhq-install --check [--home DIR]                                 report drift, change nothing
+  ctlhq-install --uninstall [--dry-run] [--home DIR]                 remove only what it installed
+
+--home defaults to $HOME. Links are absolute paths to each layer's resolved location.
+
+Layers:
+  A layer is a folder holding skills/, agents/ or home/, and optionally docs/install.tsv.
+  The installer reads the ordered list of layers from <home>/.ctlhq/layers.toml, never
+  from any other home. With no file, the only layer is this repository: the parent of
+  this tool's bin/ folder, found from the tool's real path, so a renamed or moved folder
+  works when the installer runs again. Skills and agents from every layer are linked
+  side by side. The same skill or agent name in two layers is refused (exit 1, nothing
+  changed). A listed layer that is not a folder holding skills/, agents/ or home/ is a
+  usage error (exit 2, nothing changed), in every mode.
+
+<home>/.ctlhq/layers.toml, every key optional:
+  layers = ["~/code/public-skills", "~/code/my-skills"]
+                       ordered layer folders; absolute or ~/ paths, where ~ is the home
+                       given with --home. Default: this repository alone.
+  agents_md = true     write <home>/.codex/AGENTS.md (see Rules file). Default false.
+  not_shipped = ["vendor-skill"]
+                       skill names that no mode links, checks or removes, for example
+                       a skill another tool's installer owns.
+  [hosts]
+  why = ["claude", "codex"]
+                       per-machine host rows. Each overrides the layers' host tables for
+                       one skill that a layer ships.
+
+What it links:
+  skills/<name>/SKILL.md   <home>/.claude/skills/<name> and <home>/.codex/skills/<name>
+                           (default hosts claude,codex). A layer's docs/install.tsv
+                           (skill<TAB>hosts, hosts from claude, codex, agents) overrides one
+                           of that layer's skills; "agents" is <home>/.agents/skills/.
+  agents/<file>.md         <home>/.claude/agents/<file>.md
+
+Rules file (only with agents_md = true, or --agents-md, which saves that line in
+layers.toml once the file below is written or already correct; while a file of the
+user's own stays in place, --agents-md saves nothing):
+  <home>/.codex/AGENTS.md is a generated file: a first-line marker naming its sources,
+  then each layer's home/AGENTS.md joined in layer order. <home>/.claude/CLAUDE.md is
+  never touched; it may include ~/.codex/AGENTS.md with one @ line.
+  A link at that path is removed first, so nothing is ever written through it.
+  A real file without the marker is a "copy": left in place, exit 1, unless --replace
+  moves it to <home>/.ctlhq-backups/ first.
+  Another tool may own a block in the file, marked <!-- <tool>:<id> --> ... <!-- /<tool>:<id> -->
+  (a tool's own installer adds it). Such a block that differs from the layers is "managed"
+  drift, named with the tool: copy the new block into a layer's home/AGENTS.md. Install
+  never overwrites it (exit 1).
+  Any other difference is "stale" drift, and install rewrites the file.
+  With agents_md off (false or no line), a generated file there is "unwanted": install
+  moves it to <home>/.ctlhq-backups/ and prints the @ line the user may remove from
+  ~/.claude/CLAUDE.md. A file without the marker is never touched.
+
+Install rules:
+  A missing link is created (parent folders too). A link to the right place is left alone.
+  A link pointing elsewhere is repointed and reported. A real file or folder is never
+  deleted: it is reported "copy in place, not replaced" and the run exits 1, unless
+  --replace is given, which first moves it to <home>/.ctlhq-backups/<YYYY-MM-DD>/<same
+  relative path>. A link into a layer in a host folder the skill is not listed for (for
+  example .codex/skills/<name> for a claude,agents skill) is removed and reported.
+  A link in a host folder, under a name no layer ships, is the installer's own leftover
+  (an old skill or agent name after a rename) only when all four hold: the link's text is
+  an absolute path; that path names an item directly inside <layer>/skills or
+  <layer>/agents of a listed layer; that skills or agents folder exists; and the item
+  itself is gone. Install removes such a "stale" link and prints one "remove stale" line
+  each. Every other link is never touched: a relative link, a link deeper inside a layer,
+  a link into a layer whose skills or agents folder is missing, a link outside every
+  layer, and a link whose target exists.
+  Apart from stale links, names no layer ships are never touched; not_shipped names,
+  synced/ and .system/ are never touched at all.
+  The PATH line for bin/ and the Stop hook line are printed for the operator to apply;
+  the installer never edits shell files or settings.json.
+
+--check prints one line per layer (path, skill, agent and link counts), then each drift
+on one line: missing (no link), copy (a real file or folder), broken (a link into a
+missing folder), elsewhere (a link outside every layer), wrong (a link to another item in
+a layer), extra (a link into a layer in a host folder the skill is not listed for), stale
+(the installer's own leftover, as defined under Install rules; a "fix:" line follows).
+For the rules file it also reports link (a link where the generated file belongs), stale
+and managed, or, with agents_md off, unwanted (a generated file still in place).
+Exit 1 on any drift, 0 when clean.
+--dry-run prints every action, including unchanged links, and changes nothing; its exit
+code is the one the real run would return.
+--uninstall removes the links for every skill and agent the layers ship that point into
+a layer, in every host folder, and a <home>/.codex/AGENTS.md whose first line is the
+marker, after a backup. It also removes each stale link (as defined under Install
+rules). It lists, and leaves, every other link in a host folder, under a name no layer
+ships, that points into a layer, apart from not_shipped names, synced/ and .system/. It
+then prints the @ line the user may remove from ~/.claude/CLAUDE.md, and, when
+layers.toml holds agents_md = true, that the line stays there, so a later install writes
+the rules file again.
+
+Operator rule encoded: "Any change that widens a sandbox, writable root, network rule,
+permission, hook, or global instruction file needs the operator's yes first."
+
+Exit 0 success or clean, 1 drift, a copy or managed block left in place, or a refused
+duplicate name, 2 usage error.
+"""
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+from typing import NamedTuple, Optional
+
+ROOT = Path(__file__).resolve().parent.parent
+HOST_DIRS = {
+    "claude": ".claude/skills",
+    "codex": ".codex/skills",
+    "agents": ".agents/skills",
+}
+DEFAULT_HOSTS = ("claude", "codex")
+AGENTS_DIR = ".claude/agents"
+LAYER_PARTS = ("skills", "agents", "home")
+NEVER_TOUCH = {"synced", ".system"}
+SETTINGS = ".ctlhq/layers.toml"
+RULES = ".codex/AGENTS.md"
+MARKER = "<!-- generated by ctlhq-install from "
+CLAUDE_INCLUDE = "@~/.codex/AGENTS.md"
+MANAGED_BLOCK = re.compile(r"^<!-- (([A-Za-z0-9_.-]+):[^\s>]+) -->$.*?^<!-- /\1 -->$", re.M | re.S)
+LINK_KINDS = ("ok", "missing", "copy", "broken", "elsewhere", "wrong", "extra", "stale")
+RULES_KINDS = ("link", "managed")
+
+
+class Settings(NamedTuple):
+    layers: tuple
+    agents_md: bool
+    not_shipped: frozenset
+    hosts: dict
+
+
+class Link(NamedTuple):
+    path: Path
+    source: Path
+    wanted: bool  # False: a host folder the skill is not listed for; a link into a layer there is 'extra'
+    layer: Path
+
+
+class Rules(NamedTuple):
+    path: Path
+    text: str
+    sources: tuple
+
+
+class Duplicates(Exception):
+    pass
+
+
+def usage_error(msg: str) -> int:
+    print(f"ctlhq-install: {msg}", file=sys.stderr)
+    print("usage: ctlhq-install [--dry-run] [--check] [--uninstall] [--replace] [--agents-md] [--home DIR]",
+          file=sys.stderr)
+    return 2
+
+
+def drop_comment(line: str) -> str:
+    quote, i = None, 0
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == "#":
+            return line[:i]
+        i += 1
+    return line
+
+
+class Unterminated(ValueError):
+    pass
+
+
+def parse_value(s: str, where: str):
+    """One TOML value: true, false, a quoted string, or a list of quoted strings. Returns (value, rest)."""
+    s = s.lstrip()
+    for word, value in (("true", True), ("false", False)):
+        if s.startswith(word) and not s[len(word):len(word) + 1].isalnum():
+            return value, s[len(word):]
+    if s[:1] in ('"', "'"):
+        q, out, i = s[0], [], 1
+        while i < len(s):
+            c = s[i]
+            if q == '"' and c == "\\" and i + 1 < len(s):
+                out.append(s[i + 1])
+                i += 2
+                continue
+            if c == q:
+                return "".join(out), s[i + 1:]
+            out.append(c)
+            i += 1
+        raise ValueError(f"{where}: unterminated string")
+    if s[:1] == "[":
+        rest, items = s[1:], []
+        while True:
+            rest = rest.lstrip()
+            if not rest:
+                raise Unterminated(f"{where}: unterminated list")
+            if rest[0] == "]":
+                return items, rest[1:]
+            if rest[0] not in ('"', "'"):
+                raise ValueError(f"{where}: list items must be quoted strings")
+            item, rest = parse_value(rest, where)
+            items.append(item)
+            rest = rest.lstrip()
+            if rest[:1] == ",":
+                rest = rest[1:]
+            elif rest and rest[0] != "]":
+                raise ValueError(f"{where}: expected , or ] in the list")
+    raise ValueError(f"{where}: a value must be true, false, a quoted string or a list of quoted strings")
+
+
+def parse_settings(text: str, name: str) -> dict:
+    """The layers.toml subset: top-level keys, then an optional [hosts] table of skill = [hosts]."""
+    top, hosts, table = {}, {}, None
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        n, s = i + 1, drop_comment(lines[i]).strip()
+        i += 1
+        where = f"{name} line {n}"
+        if not s:
+            continue
+        if s.startswith("[") and s.endswith("]") and "=" not in s:
+            table = s[1:-1].strip()
+            if table != "hosts":
+                raise ValueError(f"{where}: unknown table [{table}]; the only table is [hosts]")
+            continue
+        key, eq, rest = s.partition("=")
+        key = key.strip()
+        if not eq or not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+            raise ValueError(f"{where}: expected key = value")
+        while True:
+            try:
+                value, tail = parse_value(rest, where)
+                break
+            except Unterminated:
+                if i >= len(lines):
+                    raise
+                rest += " " + drop_comment(lines[i]).strip()
+                i += 1
+        if tail.strip():
+            raise ValueError(f"{where}: unexpected text after the value: {tail.strip()!r}")
+        if key in (hosts if table == "hosts" else top):
+            raise ValueError(f"{where}: {key} is set twice")
+        if table == "hosts":
+            if not isinstance(value, list) or not value or any(h not in HOST_DIRS for h in value):
+                raise ValueError(f"{where}: {key} needs a list of hosts from {', '.join(HOST_DIRS)}")
+            hosts[key] = tuple(value)
+            continue
+        kind = {"layers": list, "agents_md": bool, "not_shipped": list}.get(key)
+        if kind is None:
+            raise ValueError(f"{where}: unknown key {key}; keys are layers, agents_md, not_shipped and [hosts]")
+        if not isinstance(value, kind):
+            raise ValueError(f"{where}: {key} must be {'true or false' if kind is bool else 'a list of quoted strings'}")
+        top[key] = value
+    top["hosts"] = hosts
+    return top
+
+
+def layer_path(raw: str, home: Path, where: str) -> Path:
+    if raw == "~" or raw.startswith("~/"):
+        path = home / raw[2:]
+    elif os.path.isabs(raw):
+        path = Path(raw)
+    else:
+        raise ValueError(f"{where}: layer {raw!r} must be an absolute path or start with ~/")
+    if not path.is_dir() or not any((path / part).is_dir() for part in LAYER_PARTS):
+        raise ValueError(f"{where}: layer {raw} is not a folder holding skills/, agents/ or home/")
+    return Path(os.path.realpath(path))
+
+
+def load_settings(home: Path) -> Settings:
+    path = home / SETTINGS
+    raw = {"hosts": {}}
+    if os.path.lexists(path):
+        if not path.is_file():
+            raise ValueError(f"{path} is not a file")
+        raw = parse_settings(path.read_text(encoding="utf-8"), str(path))
+    layers = tuple(layer_path(p, home, str(path)) for p in raw.get("layers", [str(ROOT)]))
+    if not layers:
+        raise ValueError(f"{path}: layers is empty")
+    if len(set(layers)) != len(layers):
+        raise ValueError(f"{path}: a layer is listed twice")
+    return Settings(layers, raw.get("agents_md", False), frozenset(raw.get("not_shipped", [])), raw["hosts"])
+
+
+def save_agents_md(home: Path) -> None:
+    """Set agents_md = true in layers.toml, keeping every other line."""
+    path = home / SETTINGS
+    lines = path.read_text(encoding="utf-8").split("\n") if path.is_file() else []
+    first_table = next((i for i, line in enumerate(lines) if drop_comment(line).strip().startswith("[")), len(lines))
+    found = next((i for i in range(first_table) if re.match(r"agents_md\s*=", drop_comment(lines[i]).strip())), None)
+    if found is None:
+        lines.insert(first_table, "agents_md = true")
+    else:
+        lines[found] = "agents_md = true"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".ctlhq-tmp")
+    if os.path.lexists(tmp):
+        tmp.unlink()
+    with open(tmp, "x", encoding="utf-8") as f:  # "x" never follows a link
+        f.write("\n".join(lines).rstrip("\n") + "\n")
+    os.replace(tmp, path)
+
+
+def read_hosts(layer: Path) -> dict:
+    """skill -> tuple of hosts, from the layer's docs/install.tsv; raises ValueError on a bad row."""
+    path = layer / "docs" / "install.tsv"
+    out: dict = {}
+    if not path.exists():
+        return out
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        cells = line.split("\t")
+        if n == 1 and cells[0] == "skill":
+            continue
+        if len(cells) != 2:
+            raise ValueError(f"{path} line {n}: expected skill<TAB>hosts")
+        hosts = tuple(h.strip() for h in cells[1].split(",") if h.strip())
+        bad = [h for h in hosts if h not in HOST_DIRS]
+        if bad or not hosts:
+            raise ValueError(f"{path} line {n}: unknown host {','.join(bad) or '(none)'}")
+        out[cells[0].strip()] = hosts
+    return out
+
+
+def joined_rules(home: Path, layers: tuple) -> Rules:
+    sources = tuple(layer / "home" / "AGENTS.md" for layer in layers if (layer / "home" / "AGENTS.md").is_file())
+    if not sources:
+        raise ValueError("agents_md = true, but no layer holds home/AGENTS.md")
+    parts = [p.read_text(encoding="utf-8") for p in sources]
+    body = "\n".join(t if t.endswith("\n") else t + "\n" for t in parts)
+    marker = f"{MARKER}{', '.join(map(str, sources))}. Edit those files and run ctlhq-install; edits here are overwritten. -->"
+    return Rules(home / RULES, f"{marker}\n\n{body}", sources)
+
+
+def build_plan(home: Path, settings: Settings):
+    """Every Link the layers ship, and the Rules file when agents_md is on."""
+    links, owner, dups = [], {}, []
+    for layer in settings.layers:
+        hosts_for = read_hosts(layer)
+        found = [("skill", p.parent.name, p.parent) for p in sorted(layer.glob("skills/*/SKILL.md"))]
+        found += [("agent", p.name, p) for p in sorted(layer.glob("agents/*.md"))]
+        for kind, name, source in found:
+            if kind == "skill" and name in NEVER_TOUCH:
+                print(f"note: {layer}/skills/{name} uses a reserved name; skipped", file=sys.stderr)
+                continue
+            if kind == "skill" and name in settings.not_shipped:
+                continue
+            if (kind, name) in owner:
+                dups.append(f"duplicate  {kind} {name} in {owner[kind, name]} and {layer}")
+                continue
+            owner[kind, name] = layer
+            if kind == "agent":
+                links.append(Link(home / AGENTS_DIR / name, source, True, layer))
+                continue
+            hosts = settings.hosts.get(name) or hosts_for.get(name, DEFAULT_HOSTS)
+            for host, sub in HOST_DIRS.items():
+                links.append(Link(home / sub / name, source, host in hosts, layer))
+    if dups:
+        raise Duplicates("\n".join(dups))
+    unknown = sorted(set(settings.hosts) - {name for kind, name in owner if kind == "skill"})
+    if unknown:
+        raise ValueError(f"{home / SETTINGS}: [hosts] names a skill no layer ships: {', '.join(unknown)}")
+    rules = joined_rules(home, settings.layers) if settings.agents_md else None
+    return links, rules
+
+
+def link_target(link: Path) -> Path:
+    raw = Path(os.readlink(link))
+    return raw if raw.is_absolute() else link.parent / raw
+
+
+def inside_layers(p: Path, layers: tuple) -> bool:
+    for candidate in (Path(os.path.realpath(p)), Path(os.path.normpath(p))):  # normpath: the item may be gone
+        if any(candidate == layer or layer in candidate.parents for layer in layers):
+            return True
+    return False
+
+
+def state(link: Path, source: Path, layers: tuple) -> str:
+    """ok, missing, copy, broken, elsewhere, wrong."""
+    if not os.path.lexists(link):
+        return "missing"
+    if not link.is_symlink():
+        return "copy"
+    target = link_target(link)
+    if os.path.realpath(target) == str(source):
+        return "ok"
+    if not os.path.exists(target):
+        return "broken"
+    return "wrong" if inside_layers(target, layers) else "elsewhere"
+
+
+def leftover(link: Path, layers: tuple) -> bool:
+    """The installer's own leftover, such as an old skill name after a rename: the link text is absolute,
+    names an item directly in an existing <layer>/skills or <layer>/agents folder, and that item is gone.
+    Any other link may be the user's own, so it is never removed."""
+    raw = Path(os.readlink(link))
+    folders = {layer / part for layer in layers for part in ("skills", "agents")}
+    return raw.is_absolute() and raw.parent in folders and raw.parent.is_dir() and not os.path.lexists(raw)
+
+
+def unshipped_links(home: Path, settings: Settings, links: list) -> list:
+    """(path, stale) for each link in a host folder, under a name no layer ships, that points into a layer.
+    stale: the link is the installer's own leftover (see leftover)."""
+    shipped = {link.path for link in links}
+    skip = NEVER_TOUCH | settings.not_shipped
+    out = []
+    for folder in sorted({home / sub for sub in HOST_DIRS.values()} | {home / AGENTS_DIR}):
+        for path in sorted(folder.iterdir()) if folder.is_dir() else ():
+            if path in shipped or path.name in skip or not path.is_symlink():
+                continue
+            if inside_layers(link_target(path), settings.layers):
+                out.append((path, leftover(path, settings.layers)))
+    return out
+
+
+def is_generated(path: Path) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.readline().startswith(MARKER)
+
+
+def unwanted_rules(home: Path, rules: Optional[Rules]) -> bool:
+    """A generated rules file in place while agents_md is off."""
+    return rules is None and is_generated(home / RULES)
+
+
+def print_include_note() -> None:
+    print("~/.claude/CLAUDE.md may include the removed file. If it holds this line, you may delete it:")
+    print(f"  {CLAUDE_INCLUDE}")
+
+
+def rules_state(rules: Rules) -> str:
+    """ok, missing, link, copy, managed, stale."""
+    path = rules.path
+    if not os.path.lexists(path):
+        return "missing"
+    if path.is_symlink():
+        return "link"
+    if not is_generated(path):
+        return "copy"
+    have = path.read_text(encoding="utf-8", errors="replace")
+    if have == rules.text:
+        return "ok"
+    return "managed" if managed_drift(have, rules.text) else "stale"
+
+
+def managed_drift(have: str, want: str) -> list:
+    """The tools whose managed blocks differ between the file and the layers, in name order."""
+    def blocks(text: str) -> dict:
+        out = {}
+        for m in MANAGED_BLOCK.finditer(text):
+            out.setdefault(m.group(2), []).append(m.group(0))
+        return out
+    a, b = blocks(have), blocks(want)
+    return sorted(t for t in a.keys() | b.keys() if a.get(t) != b.get(t))
+
+
+def managed_tools(rules: Rules) -> str:
+    return ", ".join(managed_drift(rules.path.read_text(encoding="utf-8", errors="replace"), rules.text))
+
+
+def write_rules(rules: Rules) -> None:
+    rules.path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = rules.path.with_name(rules.path.name + ".ctlhq-tmp")
+    if os.path.lexists(tmp):
+        tmp.unlink()
+    with open(tmp, "x", encoding="utf-8") as f:  # "x" never follows a link
+        f.write(rules.text)
+    os.replace(tmp, rules.path)
+
+
+def backup_path(home: Path, link: Path) -> Path:
+    base = home / ".ctlhq-backups" / datetime.date.today().isoformat() / link.relative_to(home)
+    dest, n = base, 1
+    while os.path.lexists(dest):
+        dest = base.with_name(f"{base.name}.{n}")
+        n += 1
+    return dest
+
+
+def back_up(home: Path, path: Path, pre: str, dry: bool) -> None:
+    dest = backup_path(home, path)
+    print(f"{pre}back up    {show(path, home)} -> {show(dest, home)}")
+    if not dry:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(dest))
+
+
+def show(link: Path, home: Path) -> str:
+    return "~/" + str(link.relative_to(home))
+
+
+def layer_count(settings: Settings) -> str:
+    n = len(settings.layers)
+    return f"{n} layer{'' if n == 1 else 's'}"
+
+
+def summary(counts: dict, kinds: tuple) -> str:
+    return ", ".join(f"{counts[k]} {k}" for k in kinds)
+
+
+def do_check(home: Path, settings: Settings, links: list, rules: Optional[Rules]) -> int:
+    layers = settings.layers
+    unwanted = unwanted_rules(home, rules)
+    kinds = LINK_KINDS + (RULES_KINDS if rules else ("unwanted",) if unwanted else ())
+    counts = {k: 0 for k in kinds}
+    lines = []
+    per_layer = {layer: {"skills": set(), "agents": 0, "links": 0, "ok": 0} for layer in layers}
+    for link, source, wanted, layer in links:
+        tally = per_layer[layer]
+        if source.is_dir():
+            tally["skills"].add(source.name)
+        else:
+            tally["agents"] += 1
+        if not wanted:
+            if link.is_symlink() and inside_layers(link_target(link), layers):
+                counts["extra"] += 1
+                lines.append(f"extra      {show(link, home)} links into a layer; host not listed")
+            continue
+        tally["links"] += 1
+        st = state(link, source, layers)
+        counts[st] += 1
+        if st == "ok":
+            tally["ok"] += 1
+        elif st == "missing":
+            lines.append(f"missing    {show(link, home)}")
+        elif st == "copy":
+            lines.append(f"copy       {show(link, home)} is a real {'folder' if link.is_dir() else 'file'}, not a link")
+        else:
+            lines.append(f"{st:<10} {show(link, home)} -> {os.readlink(link)}")
+    stale = [path for path, is_stale in unshipped_links(home, settings, links) if is_stale]
+    for path in stale:
+        lines.append(f"stale      {show(path, home)} -> {os.readlink(path)}; its target is gone")
+    counts["stale"] += len(stale)
+    if stale:
+        lines.append(f"fix:       run ctlhq-install to remove the {len(stale)} stale link{'' if len(stale) == 1 else 's'}")
+    if rules:
+        st = rules_state(rules)
+        counts[st] += 1
+        shown = show(rules.path, home)
+        if st == "link":
+            lines.append(f"link       {shown} -> {os.readlink(rules.path)}; install replaces the link with the generated file")
+        elif st == "copy":
+            lines.append(f"copy       {shown} is a real {'folder' if rules.path.is_dir() else 'file'} without the generated-file marker")
+        elif st == "stale":
+            lines.append(f"stale      {shown} differs from the layers' home/AGENTS.md; install rewrites it")
+        elif st == "managed":
+            lines.append(f"managed    {shown} has a block managed by {managed_tools(rules)} that differs from the layers; "
+                         "copy the new block into a layer's home/AGENTS.md")
+        elif st == "missing":
+            lines.append(f"missing    {shown}")
+    if unwanted:
+        counts["unwanted"] += 1
+        lines.append(f"unwanted   {show(home / RULES, home)} is a generated file, but agents_md is not true; "
+                     "install backs it up and removes it")
+    for n, layer in enumerate(layers, 1):
+        t = per_layer[layer]
+        print(f"layer {n}    {layer}: {len(t['skills'])} skills, {t['agents']} agents, {t['links']} links, {t['ok']} ok")
+    for line in lines:
+        print(line)
+    drift = sum(v for k, v in counts.items() if k != "ok")
+    print(f"check: {summary(counts, kinds)}; {'clean' if drift == 0 else f'{drift} drift'} ({layer_count(settings)}, home {home})")
+    return 1 if drift else 0
+
+
+def install_rules(home: Path, rules: Rules, dry: bool, replace: bool, counts: dict) -> str:
+    """ok, written, copy (left in place) or managed (kept)."""
+    pre = "would " if dry else ""
+    shown = show(rules.path, home)
+    st = rules_state(rules)
+    if st == "ok":
+        counts["ok"] += 1
+        if dry:
+            print(f"ok           {shown}")
+        return "ok"
+    if st == "managed":
+        print(f"managed      {shown}: its block managed by {managed_tools(rules)} differs from the layers; not overwritten. "
+              "Copy the new block into a layer's home/AGENTS.md, then run install again")
+        counts["managed kept"] += 1
+        return "managed"
+    if st == "copy":
+        if not replace:
+            print(f"copy         {shown}: copy in place, not replaced (--replace moves it to ~/.ctlhq-backups/)")
+            counts["copies left"] += 1
+            return "copy"
+        back_up(home, rules.path, pre, dry)
+        counts["backed up"] += 1
+    if st == "link":
+        print(f"{pre}remove link {shown} (was {os.readlink(rules.path)}); its target is not changed")
+        if not dry:
+            rules.path.unlink()
+    print(f"{pre}write      {shown} from {len(rules.sources)} layer rules files")
+    if not dry:
+        write_rules(rules)
+    counts["written"] += 1
+    return "written"
+
+
+def do_install(home: Path, settings: Settings, links: list, rules: Optional[Rules], dry: bool, replace: bool,
+               save_setting: bool) -> int:
+    pre = "would " if dry else ""
+    layers = settings.layers
+    keys = ("ok", "linked", "repointed", "backed up", "copies left", "extra removed", "stale removed")
+    unwanted = unwanted_rules(home, rules)
+    keys += ("written", "managed kept") if rules else ("rules removed",) if unwanted else ()
+    counts = {k: 0 for k in keys}
+    for link, source, wanted, _layer in links:
+        if not wanted:
+            if link.is_symlink() and inside_layers(link_target(link), layers):
+                print(f"{pre}remove extra {show(link, home)} (host not listed for this skill)")
+                if not dry:
+                    link.unlink()
+                counts["extra removed"] += 1
+            continue
+        st = state(link, source, layers)
+        if st == "ok":
+            counts["ok"] += 1
+            if dry:
+                print(f"ok           {show(link, home)}")
+            continue
+        if st == "copy":
+            if not replace:
+                print(f"copy         {show(link, home)}: copy in place, not replaced (--replace moves it to ~/.ctlhq-backups/)")
+                counts["copies left"] += 1
+                continue
+            back_up(home, link, pre, dry)
+            counts["backed up"] += 1
+        elif st != "missing":
+            print(f"{pre}repoint    {show(link, home)} (was {os.readlink(link)})")
+            if not dry:
+                link.unlink()
+            counts["repointed"] += 1
+        else:
+            counts["linked"] += 1
+        print(f"{pre}link       {show(link, home)} -> {source}")
+        if not dry:
+            link.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(str(source), str(link))
+    for path, is_stale in unshipped_links(home, settings, links):
+        if is_stale:
+            print(f"{pre}remove stale {show(path, home)} (was {os.readlink(path)}; its target is gone)")
+            if not dry:
+                path.unlink()
+            counts["stale removed"] += 1
+    if rules:
+        st = install_rules(home, rules, dry, replace, counts)
+        if save_setting:
+            setting = show(home / SETTINGS, home)
+            if st in ("ok", "written"):
+                if not dry:
+                    save_agents_md(home)
+                print(f"{'would set' if dry else 'set'}        agents_md = true in {setting}")
+            elif st == "copy":
+                print(f"not set      agents_md = true in {setting}: {show(rules.path, home)} is your own file. "
+                      "To use the generated file, run again with --agents-md --replace (your file moves to "
+                      "~/.ctlhq-backups/). To keep your file, do nothing; later runs leave it alone.")
+            else:
+                print(f"not set      agents_md = true in {setting}: copy the new block into a layer's home/AGENTS.md, "
+                      "then run --agents-md again")
+    elif unwanted:
+        back_up(home, home / RULES, pre, dry)
+        print(f"{pre}remove     {show(home / RULES, home)} (generated file, agents_md is not true; backed up)")
+        counts["backed up"] += 1
+        counts["rules removed"] += 1
+        print_include_note()
+    print()
+    print("Apply these yourself (the installer does not edit shell files or settings.json):")
+    print(f'  PATH line, for ~/.zshrc:   export PATH="{ROOT}/bin:$PATH"')
+    hook = {"type": "command", "command": f"{ROOT}/bin/ctlhq-reply-lint --hook", "timeout": 5}
+    print('  Stop hook, the "Stop" key inside "hooks" in ~/.claude/settings.json '
+          '(if "Stop" exists, add the inner {"type": ...} object to its "hooks" list):')
+    print(f'    "Stop": {json.dumps([{"hooks": [hook]}])}')
+    print()
+    print(f"{'dry run' if dry else 'install'}: {summary(counts, keys)} ({layer_count(settings)}, home {home})")
+    return 1 if counts["copies left"] or counts.get("managed kept") else 0
+
+
+def do_uninstall(home: Path, settings: Settings, links: list, dry: bool) -> int:
+    pre = "would " if dry else ""
+    removed = kept = left = 0
+    rules_path = home / RULES
+    rules_gone = False
+    for path in [link.path for link in links] + [rules_path]:
+        if not path.is_symlink():
+            continue
+        if inside_layers(link_target(path), settings.layers):
+            print(f"{pre}remove     {show(path, home)}")
+            if not dry:
+                path.unlink()
+            removed += 1
+            rules_gone = rules_gone or path == rules_path
+        else:
+            print(f"keep       {show(path, home)} -> {os.readlink(path)} (outside every layer)")
+            kept += 1
+    if is_generated(rules_path):
+        back_up(home, rules_path, pre, dry)
+        print(f"{pre}remove     {show(rules_path, home)} (generated file, backed up)")
+        removed += 1
+        rules_gone = True
+    for path, is_stale in unshipped_links(home, settings, links):
+        if is_stale:
+            print(f"{pre}remove     {show(path, home)} (its target is gone)")
+            if not dry:
+                path.unlink()
+            removed += 1
+        else:
+            print(f"left       {show(path, home)} -> {os.readlink(path)} (a name no layer ships; delete it yourself)")
+            left += 1
+    if rules_gone:
+        print_include_note()
+    if settings.agents_md:
+        print(f"agents_md = true stays in {show(home / SETTINGS, home)}. Delete that line, "
+              "or a later install writes ~/.codex/AGENTS.md again.")
+    print(f"{'dry run' if dry else 'uninstall'}: {removed} removed, {kept} kept, {left} left for you to delete "
+          f"({layer_count(settings)}, home {home})")
+    return 0
+
+
+def main(argv: list) -> int:
+    flags = {"--dry-run": False, "--check": False, "--uninstall": False, "--replace": False, "--agents-md": False}
+    home = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a in flags:
+            flags[a] = True
+        elif a == "--home":
+            if i + 1 >= len(argv):
+                return usage_error("--home needs a folder")
+            home = argv[i + 1]
+            i += 1
+        elif a.startswith("--home="):
+            home = a.split("=", 1)[1]
+        else:
+            return usage_error(f"unknown argument: {a}")
+        i += 1
+    if flags["--check"] and (flags["--uninstall"] or flags["--dry-run"] or flags["--replace"] or flags["--agents-md"]):
+        return usage_error("--check takes only --home")
+    if flags["--uninstall"] and (flags["--replace"] or flags["--agents-md"]):
+        return usage_error("--uninstall does not combine with --replace or --agents-md")
+    home_path = Path(home if home is not None else os.path.expanduser("~")).expanduser()
+    if not home_path.is_dir():
+        return usage_error(f"home folder not found: {home_path}")
+    home_path = Path(os.path.realpath(home_path))
+    dry = flags["--dry-run"]
+    try:
+        settings = load_settings(home_path)
+        save_setting = flags["--agents-md"] and not settings.agents_md
+        if save_setting:
+            if (home_path / SETTINGS).is_symlink():
+                raise ValueError(f"{home_path / SETTINGS} is a link; replace it with a real file, then run --agents-md again")
+            settings = settings._replace(agents_md=True)
+        links, rules = build_plan(home_path, settings)
+        if flags["--check"]:
+            return do_check(home_path, settings, links, rules)
+        if flags["--uninstall"]:
+            return do_uninstall(home_path, settings, links, dry)
+        return do_install(home_path, settings, links, rules, dry, flags["--replace"], save_setting)
+    except Duplicates as e:
+        print(str(e))
+        print("ctlhq-install: the same name in two layers is refused; nothing changed. Remove one copy.")
+        return 1
+    except ValueError as e:
+        return usage_error(str(e))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,743 @@
+#!/usr/bin/env python3
+"""ctlhq-reply-lint: check a draft reply against the operator's reply rules before it is sent.
+
+Usage:
+  ctlhq-reply-lint [--max-words N] [--max-words-structured N] [--no-next-step] [--allow a,b,c]
+                    [--repo DIR] [--previous FILE] [--json] [FILE]
+  cat reply.md | ctlhq-reply-lint
+  ctlhq-reply-lint --hook          (Claude Code Stop hook; reads the hook JSON on stdin)
+  ctlhq-reply-lint --hook-json     (Codex Stop hook; same input, answers {"decision": "block", "reason": ...} on stdout)
+  ctlhq-reply-lint --approval [FILE]   (an approval question asked in chat)
+
+Prints one line per finding, "line: rule: fail|warning: message", then "N failures, M warnings".
+Exit 1 on any failure, 0 when there are only warnings or nothing, 2 on a usage error.
+--json prints the findings as a JSON array of {line, rule, severity, message} on stdout
+and the summary line on stderr.
+
+Failures (exit 1), each with the rule it encodes from home/AGENTS.md:
+  table-number   a table without a leading number column (unslop rule 34).
+                 "Number every list, table row and paragraph that may be discussed later."
+  long-dash      a long dash (unslop rule 13). "Do not use em dashes."
+  curly-quote    a curly quote (unslop rule 19).
+  next-step      no "next step" anywhere, any case (--no-next-step turns it off).
+                 "Then 'Next step: <who> <action>'."
+  operator-command  a "next step" line asks you or the operator to run, check, install, open,
+                 or launch something and the reply has no fenced code block (fail).
+  max-words      more than N words outside fenced code: 400, or 600 when the reply holds a
+                 table or a list (--max-words N sets both to N; --max-words-structured N the second).
+                 "Discussion replies: at most 300 words."
+  label-gloss    a project label (S6, N4, D34, 1B: one or two capitals and one or two
+                 digits, or a digit and a capital) whose first sentence has no parenthesis gloss.
+                 "Gloss a project label at first use in each reply."
+  abbreviation   a warning: an all-caps word of 2 to 5 letters whose first sentence has no
+                 expansion in parentheses. "Avoid abbreviations or compressed fragments that
+                 make the reader guess." The agent judges whether the reader knows the term, so
+                 there is no built-in list; --allow skips names. Text
+                 inside backticks is never checked.
+  double-meaning a result label that can mean two things: pass, passes, passed, passing,
+                 qualify, qualifies, qualified. "Avoid labels such as 'pass' when they could
+                 mean either..." Write the exact outcome. A warning: "pass" is fine as a verb. (done and fixed: see claim-evidence.)
+  step-actor     a numbered item that starts with an action verb (run, open, install, ...)
+                 while neither the item nor the line before the list names who acts (you,
+                 operator, I, we, main agent, builder, reviewer, agent). "Name who acts." A warning: a numbered
+                 record of past steps needs no actor.
+
+Warnings (printed, exit unaffected):
+  sentence-length  a sentence over 25 words. "At most 20 words for an instruction, 25 for an explanation."
+  numbered-list    a bulleted list of 3 or more items. "Number every list."
+  status-line      over 120 words and no line with proposed, implemented, tested, committed,
+                   gate, installed, or "Status:". "Give one status line per reply during work."
+  vague-pronoun    a paragraph, list item, or table cell that opens with It or They, or with
+                   This, That, These, or Those followed by a verb ("This builds"). "Name the
+                   thing when words such as 'it' or 'this' could be unclear."
+  claim-evidence   "fixed", "done", or "succeeds" with no hash, exit code, or test name on the line.
+                   'Never write "fixed", "done", or "succeeds" without the state and the evidence.'
+  chatbot-phrase   unslop rule 20; sycophantic-tone: unslop rule 22.
+  vague-noun       a noun that names no exact item: thing, things, stuff, something, the
+                   issue, the problem, the other one, some files. "Name the thing when words
+                   such as 'it' or 'this' could be unclear."
+
+Turn warnings (printed, exit unaffected). They need context beyond the reply: --repo DIR
+and --previous FILE, or, under --hook and --hook-json, the hook input's cwd and
+transcript_path.
+  next-step-open   the reply reports a finished item (a word such as implemented, tested,
+                   committed, installed, accepted, merged, finished, completed, done, or a
+                   "Status:" line) and ends the turn while `ctlhq-status --next --json --repo
+                   DIR` finds a next step and BLOCKED.md has no open row. Quiet when the
+                   newest operator message (from the transcript) asks a question, when the
+                   reply asks one (a sentence ending in "?", or a "next step" line that hands
+                   the step to you or the operator, other than "none from you"), when the
+                   "next step" line waits on running work ("still running", "waiting on" or
+                   "waiting for" anything but you or the operator, or "when", "once", "after"
+                   followed within 60 characters by reports, returns, finishes, completes,
+                   lands, exits, or ends), and when DIR has no PLAN.md milestone table.
+                   ctlhq-mode: "A finished item never stops the work."
+  repeat-reply     this reply and the previous one have the same "next step" line (case and
+                   spacing ignored) and this reply adds no new fact: no new fact token (a word
+                   with a digit, a path, or backticked code) and fewer than 10 new words of 4
+                   or more letters, "next step" lines left out. The previous reply is the last
+                   assistant text before the newest operator or system turn of the transcript,
+                   read with bin/ctlhq-transcripts; the rule is quiet when an operator message
+                   came after the previous reply. The bar of 10 words was measured on 35 reply
+                   pairs with the same next step line, from one long Claude Code session:
+                   status pings added 0 to 9 new words, replies with news 13 or more. home/AGENTS.md: "During a wait, one line when the wait starts and
+                   one when it ends; never a 'still waiting' loop."
+
+--approval checks an approval question asked in chat. It gets every rule above plus:
+  approval-first-sentence  fail: the first sentence does not address the operator (you,
+                   your, operator). "A decision question starts with what changes for the
+                   operator's result in one plain sentence."
+  approval-id      fail: a commit hash, a UUID, or an id such as scope_3 or apr-7f3k in the
+                   question. "Lead with the decision in plain words, without JSON, hashes,
+                   or IDs."
+  approval-budget  fail: the first sentence is over 30 words, or a sentence ending in "?" is
+                   over 15 words.
+
+A gloss counts when the same sentence holds a parenthesis after the token, or the token
+sits inside one: "D34 (the lock-wait defect)" and "the lock-wait defect (D34)" both pass.
+--allow a,b,c adds labels or abbreviations that need no gloss (--labels is an alias).
+
+Stop hook: add {"type": "command", "command": "/path/to/bin/ctlhq-reply-lint --hook"} under
+hooks.Stop in settings.json. Claude Code passes JSON with last_assistant_message on stdin;
+--hook reads it, prints the findings on stderr, and exits 2 on a failure, which blocks the
+stop and sends the findings back to the agent (Claude Code ignores exit 1 for blocking).
+It exits 0 when stop_hook_active is set, so it fires at most once per reply.
+A reply with no failure but a turn warning is sent back once the same way (exit 2, or
+"decision": "block" under --hook-json), headed "warning, sent once". Once means once per
+operator message: sending one writes <temp folder>/ctlhq-reply-lint/sent/<sha1 of session_id
+and the newest operator message's time> (without a transcript the key is the reply text).
+While that file exists the turn warnings stay quiet, so a host that does not set
+stop_hook_active cannot loop. When the file cannot be written, the turn warnings stay quiet.
+Other warnings alone stay quiet under the hooks.
+Plain stdin without --hook is read as the reply text itself.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+UNSLOP = HERE / "ctlhq-unslop"
+STATUS = HERE / "ctlhq-status"
+TRANSCRIPTS = HERE / "ctlhq-transcripts"
+TURN_RULES = ("next-step-open", "repeat-reply")
+NEW_WORDS_MIN = 10
+FACT_TOKEN = re.compile(r"`[^`\n]+`|\S*\d\S*|\S+/\S+")
+CONTENT_WORD = re.compile(r"[a-z][a-z'-]{3,}")
+WAITING = re.compile(
+    r"\bstill running\b|\bwaiting (?:on|for) (?!you\b|your\b|the operator\b)"
+    r"|\b(?:when|once|after)\b[^.\n]{0,60}?\b(?:reports?|returns?|finish(?:es)?|completes?|lands?|exits?|ends?)\b",
+    re.IGNORECASE)
+FINISHED = re.compile(r"\b(?:implemented|tested|committed|installed|accepted|merged|finished|completed?|done)\b|^\W*status:",
+                      re.IGNORECASE | re.MULTILINE)
+QUESTION = re.compile(r"\?(?=[\s*_)\"']|$)")
+OPERATOR_STEP = re.compile(r"\b(?:you|your|yours|operator)\b", re.IGNORECASE)
+
+UNSLOP_RULES = {
+    13: ("long-dash", "fail"),
+    19: ("curly-quote", "fail"),
+    34: ("table-number", "fail"),
+    20: ("chatbot-phrase", "warning"),
+    22: ("sycophantic-tone", "warning"),
+}
+BLOCK_START = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+VAGUE_PRONOUN = re.compile(r"^(?:It|They)\b|^(?:This|That|These|Those)\s+(?:is|are|was|were|does|do|did|has|have|means|makes|runs|builds|covers|keeps|holds|shows|gives|works|needs|lets|adds|says|will|can|would|should|stays|goes|comes|took|takes|fails|failed|passes|checks|reads|writes)\b")
+STATUS_WORDS = re.compile(r"\b(?:proposed|implemented|tested|committed|gate|installed)\b|Status:", re.IGNORECASE)
+CLAIM = re.compile(r"\b(?:fixed|done|succeeds)\b", re.IGNORECASE)
+EVIDENCE = re.compile(
+    r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"  # a commit hash
+    r"|\bexit(?: code)?:? ?\d+"  # an exit code
+    r"|\btests?/\S+|\b\S+\.sh\b|\btest_\w+|\b\w+_test\b|\b\d+ checks? passed",  # a test name or result
+    re.IGNORECASE,
+)
+LABEL = re.compile(r"\b(?:[A-Z]{1,2}\d{1,2}|\d[A-Z])\b")
+ABBREV = re.compile(r"\b[A-Z]{2,5}\b")
+NEXT_STEP = re.compile(r"next step", re.IGNORECASE)
+FENCE = re.compile(r"^\s*(```|~~~)")
+INLINE_CODE = re.compile(r"`[^`\n]*`")
+URL = re.compile(r"https?://\S+")
+LINK_TARGET = re.compile(r"\]\([^)]*\)")
+BULLET = re.compile(r"^(\s*)[-*+]\s+")
+NUMBERED = re.compile(r"^\s*\d+[.)]\s+")
+HEADING = re.compile(r"^\s*#{1,6}\s")
+TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+SENT_END = re.compile(r"(?<=[.!?])\s+")
+MAX_SENTENCE = 25
+DOUBLE_MEANING = re.compile(r"\b(?:pass(?:es|ed|ing)?|qualif(?:y|ies|ied))\b", re.IGNORECASE)
+STEP_VERB = re.compile(
+    r"^\s*\d+[.)]\s+(?:\*\*)?(?:run|open|install|click|type|paste|copy|check|add|set|start|restart|stop|"
+    r"quit|delete|remove|edit|create|launch|wait|review|approve|merge|commit|push|send|read|write|"
+    r"test|update|move|rename|download|upload|enable|disable|sign|load|build|deploy)\b",
+    re.IGNORECASE)
+ACTOR = re.compile(r"\b(?:you|your|operator|I|we|main agent|builder|reviewer|agent|subagent)\b", re.IGNORECASE)
+VAGUE = re.compile(r"\b(?:things?|stuff|something|the issue|the problem|the other one|some files)\b", re.IGNORECASE)
+READER = re.compile(r"\b(?:you|your|you'll|you're|operator)\b", re.IGNORECASE)
+APPROVAL_ID = re.compile(
+    r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"  # a commit hash
+    r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"  # a UUID
+    r"|\b[A-Za-z]+[_-](?=[A-Za-z0-9]*\d)[A-Za-z0-9]+\b",  # an id such as scope_3 or apr-7f3k
+    re.IGNORECASE)
+QUESTION_MAX = 15
+FIRST_SENTENCE_MAX = 30
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-reply-lint: {msg}", file=sys.stderr)
+    print("usage: ctlhq-reply-lint [--max-words N] [--max-words-structured N] [--no-next-step] [--allow a,b,c] [--json] [--hook | --approval] [FILE]",
+          file=sys.stderr)
+    return 2
+
+
+def hook_input(raw: str) -> dict | None:
+    """The reply, cwd, and transcript path from the Stop hook JSON; None means skip (already active or no text)."""
+    try:
+        o = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(o, dict) or o.get("stop_hook_active"):
+        return None
+    text = hook_text(o)
+    if text is None:
+        return None
+    cwd = o.get("cwd") if isinstance(o.get("cwd"), str) else None
+    path = o.get("transcript_path") if isinstance(o.get("transcript_path"), str) else None
+    session = o.get("session_id") if isinstance(o.get("session_id"), str) else (path or "")
+    return {"reply": text, "cwd": cwd, "transcript": path, "session": session}
+
+
+def hook_text(o: dict) -> str | None:
+    """last_assistant_message, else the last assistant text block in the transcript."""
+    m = o.get("last_assistant_message")
+    if isinstance(m, str) and m.strip():
+        return m
+    text = ""
+    path = o.get("transcript_path")
+    if path:
+        try:
+            for line in open(path, errors="replace"):
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(e, dict) or e.get("type") != "assistant":
+                    continue
+                for b in (e.get("message") or {}).get("content") or []:
+                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip():
+                        text = b["text"]
+        except OSError:
+            pass
+    return text or None
+
+
+def unslop_findings(text: str) -> list[tuple[int, str, str, str]]:
+    rules = ",".join(str(r) for r in sorted(UNSLOP_RULES))
+    try:
+        r = subprocess.run([sys.executable, str(UNSLOP), "--rules", rules], input=text,
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return [(0, "unslop", "fail", f"could not run {UNSLOP}: {e}")]
+    if r.returncode not in (0, 1):
+        return [(0, "unslop", "fail", f"ctlhq-unslop exited {r.returncode}: {r.stderr.strip()[:200]}")]
+    out = []
+    for line in r.stdout.splitlines():
+        m = re.match(r"^<stdin>:(\d+): rule (\d+) ([^:]+): (.*)$", line)
+        if not m:
+            continue
+        num = int(m.group(2))
+        name, sev = UNSLOP_RULES.get(num, (f"unslop-{num}", "fail"))
+        out.append((int(m.group(1)), name, sev, f"unslop rule {num} {m.group(3)}: {m.group(4)}"))
+    return out
+
+
+def prose_lines(lines: list[str]) -> tuple[list[str], set[str]]:
+    """Lines with fenced code blanked and inline code, URLs, link targets masked; plus backticked tokens."""
+    out, ticked, in_fence = [], set(), False
+    for ln in lines:
+        if FENCE.match(ln):
+            in_fence = not in_fence
+            out.append("")
+            continue
+        if in_fence:
+            out.append("")
+            continue
+        for m in INLINE_CODE.finditer(ln):
+            ticked.update(re.findall(r"\w+", m.group(0)))
+        ln = INLINE_CODE.sub("code", ln)
+        ln = LINK_TARGET.sub("]", ln)
+        ln = URL.sub("link", ln)
+        out.append(ln)
+    return out, ticked
+
+
+def blocks(lines: list[str]) -> list[list[tuple[int, str]]]:
+    """Group prose lines into paragraphs, list items, headings, and table rows: [(line number, text)]."""
+    out: list[list[tuple[int, str]]] = []
+    cur: list[tuple[int, str]] | None = None
+    for i, ln in enumerate(lines, 1):
+        if not ln.strip() or TABLE_SEP.match(ln):
+            cur = None
+            continue
+        if TABLE_ROW.match(ln) or HEADING.match(ln):
+            out.append([(i, ln)])
+            cur = None
+            continue
+        if BULLET.match(ln) or NUMBERED.match(ln) or cur is None:
+            cur = [(i, ln)]
+            out.append(cur)
+        else:
+            cur.append((i, ln))
+    return out
+
+
+def sentences(block: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Split a block into sentences; each carries the line number where it starts."""
+    text, starts = "", []
+    for n, ln in block:
+        ln = BULLET.sub("", NUMBERED.sub("", HEADING.sub("", ln)))
+        if TABLE_ROW.match(ln):
+            ln = ln.replace("|", " ")
+        starts.append((len(text), n))
+        text += ln.strip() + " "
+    out, pos = [], 0
+    for part in SENT_END.split(text):
+        idx = text.find(part, pos)
+        pos = idx + len(part)
+        if not part.strip():
+            continue
+        line = max((n for off, n in starts if off <= idx), default=block[0][0])
+        out.append((line, part.strip()))
+    return out
+
+
+def glossed(sentence: str, start: int, end: int) -> bool:
+    """True when a parenthesis follows the token in this sentence, or the token sits inside one."""
+    if "(" in sentence[end:]:
+        return True
+    before = sentence[:start]
+    return before.rfind("(") > before.rfind(")")
+
+
+NOTHING_FROM_YOU = re.compile(r"\b(?:none|nothing)(?: needed)? from (?:you|the operator)\b", re.IGNORECASE)
+OPERATOR_ACTION = re.compile(r"\b(?:you|operator)\b.{0,40}\b(?:run|runs|execute|install|check|test|restart|start|open|paste|type|launch|verify)\b", re.IGNORECASE)
+TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$")
+LIST_LINE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
+
+
+def prose_lines_for_budget(text: str) -> list:
+    out, fence = [], False
+    for ln in text.split("\n"):
+        if ln.lstrip().startswith("```"):
+            fence = not fence
+            continue
+        if not fence:
+            out.append(ln)
+    return out
+
+
+def lint(text: str, max_words: int, need_next: bool, allow: set[str], max_structured: int = 600) -> list[tuple[int, str, str, str]]:
+    raw = text.split("\n")
+    lines, ticked = prose_lines(raw)
+    findings = unslop_findings(text)
+
+    words, in_fence = 0, False  # every word outside fenced code counts, inline code included
+    for r in raw:
+        if FENCE.match(r):
+            in_fence = not in_fence
+        elif not in_fence:
+            words += len(r.split())
+    if need_next and not any(NEXT_STEP.search(ln) for ln in lines):
+        findings.append((len(raw), "next-step", "fail", "no 'Next step' line; add 'Next step: <who> <action>'"))
+    has_fence = any(FENCE.match(r) for r in raw)
+    for n, ln in enumerate(raw, 1):
+        if NEXT_STEP.search(ln) and OPERATOR_ACTION.search(ln) and not NOTHING_FROM_YOU.search(ln) and not has_fence:
+            findings.append((n, "operator-command", "fail", "the next step asks the operator to run or check something; put the exact command in a code block in this reply"))
+            break
+    structured = any(TABLE_LINE.match(ln) or LIST_LINE.match(ln) for ln in prose_lines_for_budget(text))
+    limit = max_structured if (structured and max_structured) else max_words
+    if words > limit:
+        findings.append((1, "max-words", "fail", f"{words} words outside code blocks (limit {limit}{', table or list present' if limit != max_words else ''}); "
+                                                 "shorten it or move detail to a file"))
+
+    seen_label, seen_abbrev = set(), set()
+    for blk in blocks(lines):
+        is_table = TABLE_ROW.match(blk[0][1]) is not None
+        is_heading = HEADING.match(blk[0][1]) is not None
+        for n, s in sentences(blk):
+            for m in LABEL.finditer(s):
+                tok = m.group(0)
+                if tok in seen_label or tok in allow or tok in ticked:
+                    continue
+                seen_label.add(tok)
+                if not glossed(s, m.start(), m.end()):
+                    findings.append((n, "label-gloss", "fail",
+                                     f"{tok} has no gloss on first use; write '{tok} (what it is)'"))
+            for m in ABBREV.finditer(s):
+                tok = m.group(0)
+                if tok in seen_abbrev or tok in allow or tok in ticked:
+                    continue
+                seen_abbrev.add(tok)
+                if not glossed(s, m.start(), m.end()):
+                    findings.append((n, "abbreviation", "warning",
+                                     f"{tok} is not expanded on first use; write the words with '({tok})' "
+                                     "or pass --allow"))
+            if not is_table and not is_heading:
+                count = len(s.split())
+                if count > MAX_SENTENCE:
+                    findings.append((n, "sentence-length", "warning",
+                                     f"sentence of {count} words (limit {MAX_SENTENCE}); split it"))
+
+    for i, ln in enumerate(lines, 1):
+        if not ln.strip() or HEADING.match(ln):
+            continue
+        if TABLE_ROW.match(ln):
+            starts = ln.strip().strip("|").split("|")
+        elif BLOCK_START.match(ln) or i == 1 or not lines[i - 2].strip():
+            starts = [ln]
+        else:
+            continue
+        for cell in starts:
+            m = VAGUE_PRONOUN.match(BLOCK_START.sub("", cell.strip(), count=1).lstrip("*_ "))
+            if m:
+                findings.append((i, "vague-pronoun", "warning",
+                                 f"'{m.group(0).strip()}' opens a block; name the thing it points to"))
+    run_start, run_len, run_indent = 0, 0, None
+    for i, ln in enumerate(lines + [""], 1):
+        m = BULLET.match(ln)
+        if m and (run_indent is None or len(m.group(1)) == run_indent):
+            if run_len == 0:
+                run_start, run_indent = i, len(m.group(1))
+            run_len += 1
+            continue
+        if m or (ln.startswith((" ", "\t")) and ln.strip() and run_len):
+            continue  # a nested item or a wrapped line inside the run
+        if run_len >= 3:
+            findings.append((run_start, "numbered-list", "warning",
+                             f"bulleted list of {run_len} items; consider numbering it"))
+        run_start, run_len, run_indent = 0, 0, None
+
+    if words > 120 and not any(STATUS_WORDS.search(ln) for ln in lines):
+        findings.append((1, "status-line", "warning",
+                         "no status line (proposed, implemented, tested, committed, gate, installed, or 'Status:')"))
+
+    for i, (ln, r) in enumerate(zip(lines, raw), 1):
+        m = CLAIM.search(ln)
+        if m and not EVIDENCE.search(r):
+            findings.append((i, "claim-evidence", "warning",
+                             f"'{m.group(0)}' with no hash, exit code, or test name on the line"))
+
+    for i, ln in enumerate(lines, 1):
+        m = DOUBLE_MEANING.search(ln)
+        if m:
+            findings.append((i, "double-meaning", "warning",
+                             f"'{m.group(0)}' can mean two things; write the exact outcome (the test ran and exited 0, the OS blocked it)"))
+        m = VAGUE.search(ln)
+        if m:
+            findings.append((i, "vague-noun", "warning", f"'{m.group(0)}' names no exact item; name the file, test, or step"))
+
+    lead = ""
+    for i, ln in enumerate(lines, 1):
+        if not NUMBERED.match(ln):
+            if ln.strip() and not ln.startswith((" ", "\t")):
+                lead = ln
+            continue
+        if STEP_VERB.match(ln) and not ACTOR.search(ln) and not ACTOR.search(lead):
+            findings.append((i, "step-actor", "warning", "a numbered step with no actor; say who does it (you, the main agent, the builder)"))
+
+    return sorted(set(findings), key=lambda f: (f[0], f[1], f[3]))  # one row per line, rule, and message
+
+
+def next_step_index(lines: list[str]) -> int:
+    """The 1-based number of the last line that holds "next step", or 0."""
+    return max((i for i, ln in enumerate(lines, 1) if NEXT_STEP.search(ln)), default=0)
+
+
+def next_step_line(lines: list[str]) -> str | None:
+    """The last line that holds "next step", lowercased with markup and spacing removed."""
+    i = next_step_index(lines)
+    return " ".join(re.sub(r"[*_`]", "", lines[i - 1]).lower().split()) if i else None
+
+
+def asks_question(lines: list[str]) -> bool:
+    if any(QUESTION.search(ln) for ln in lines):
+        return True
+    i = next_step_index(lines)
+    step = lines[i - 1] if i else ""
+    return bool(OPERATOR_STEP.search(step)) and not NOTHING_FROM_YOU.search(step)
+
+
+def plan_next(repo: str) -> dict | None:
+    """ctlhq-status --next --json for repo, or None when it does not answer."""
+    try:
+        r = subprocess.run([sys.executable, str(STATUS), "--next", "--json", "--repo", repo],
+                           capture_output=True, text=True, timeout=2)
+        return json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def next_step_open(text: str, repo: str, operator: str | None) -> list[tuple[int, str, str, str]]:
+    lines, _ = prose_lines(text.split("\n"))
+    i = next_step_index(lines)
+    if not FINISHED.search("\n".join(lines)) or (operator is not None and QUESTION.search(operator)):
+        return []
+    if asks_question(lines) or (i and WAITING.search(lines[i - 1])):
+        return []
+    nx = plan_next(repo)
+    if not nx or not nx.get("step") or nx.get("blocked_open"):
+        return []
+    s = nx["step"]
+    return [(i, "next-step-open", "warning",
+             f"this reply reports a finished item, PLAN.md line {s.get('line')} has a next step ({s.get('milestone')}, "
+             f"{s.get('state')}), BLOCKED.md has no open row, and the reply asks no question; a finished item never "
+             "stops the work: start that step, or say which decision the operator kept, or which blocker, stops you")]
+
+
+def fact_tokens(lines: list[str]) -> set[str]:
+    out = set()
+    for ln in lines:
+        for m in FACT_TOKEN.finditer(ln):
+            tok = re.sub(r"'s$", "", m.group(0).strip(".,;:()[]{}\"'*_!?")).lower()
+            if tok:
+                out.add(tok)
+    return out
+
+
+def content_words(lines: list[str]) -> set[str]:
+    return {re.sub(r"'s$", "", w) for ln in lines for w in CONTENT_WORD.findall(ln.lower())}
+
+
+def repeat_reply(text: str, previous: str) -> list[tuple[int, str, str, str]]:
+    raw_now, raw_before = text.split("\n"), previous.split("\n")
+    step_now, step_before = next_step_line(raw_now), next_step_line(raw_before)
+    if step_now is None or step_now != step_before:
+        return []
+    body_now = [ln for ln in raw_now if not NEXT_STEP.search(ln)]
+    body_before = [ln for ln in raw_before if not NEXT_STEP.search(ln)]
+    new_facts = fact_tokens(body_now) - fact_tokens(body_before)
+    new_words = content_words(body_now) - content_words(body_before)
+    if new_facts or len(new_words) >= NEW_WORDS_MIN:
+        return []
+    return [(next_step_index(raw_now), "repeat-reply", "warning",
+             f"same next step line as the previous reply and no new fact ({len(new_words)} new words, no new number, path, or code); "
+             "during a wait, write one line when it starts and one when it ends, and stop without another status reply")]
+
+
+def transcript_context(transcript: str) -> dict:
+    """From ctlhq-transcripts: the previous reply (None when the operator wrote since it), the newest
+    operator message, and that message's time."""
+    out: dict = {"previous": None, "operator": None, "operator_ts": None}
+    try:
+        r = subprocess.run([sys.executable, str(TRANSCRIPTS), "turns", transcript, "--role", "all", "--text-only", "--json"],
+                           capture_output=True, text=True, timeout=2)
+        turns = json.loads(r.stdout) if r.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return out
+    turns = [t for t in turns if isinstance(t, dict)] if isinstance(turns, list) else []
+    op = max((i for i, t in enumerate(turns) if t.get("role") == "operator"), default=None)
+    if op is not None:
+        out["operator"], out["operator_ts"] = turns[op].get("text") or "", turns[op].get("ts")
+    last_other = max((i for i, t in enumerate(turns) if t.get("role") != "assistant"), default=None)
+    if last_other is None:
+        return out
+    prev = max((i for i in range(last_other) if turns[i].get("role") == "assistant" and (turns[i].get("text") or "").strip()),
+               default=None)
+    if prev is not None and (op is None or op < prev):
+        out["previous"] = turns[prev]["text"]
+    return out
+
+
+def sent_marker(session: str, key: str) -> Path:
+    """The once-file for a turn warning, under the temp folder, so no project gets untracked files."""
+    base = Path(tempfile.gettempdir()) / "ctlhq-reply-lint" / "sent"
+    return base / hashlib.sha1(f"{session}\n{key}".encode("utf-8")).hexdigest()
+
+
+def turn_findings(text: str, repo: str | None, previous: str | None, operator: str | None = None) -> list[tuple[int, str, str, str]]:
+    out = []
+    if repo:
+        out += next_step_open(text, repo, operator)
+    if previous is not None:
+        out += repeat_reply(text, previous)
+    return out
+
+
+def words_in(text: str) -> int:
+    return len(text.split())
+
+
+def first_sentence(text: str) -> str:
+    """The first prose sentence, headings and code skipped."""
+    body = " ".join(l.strip() for l in prose_lines(text.split("\n"))[0] if l.strip() and not HEADING.match(l))
+    parts = [p for p in SENT_END.split(body) if p.strip()]
+    return parts[0] if parts else ""
+
+
+def lint_approval_text(text: str) -> list:
+    out = []
+    first = first_sentence(text)
+    if not READER.search(first):
+        out.append((1, "approval-first-sentence", "fail",
+                    "the first sentence must say what you (the operator) will see or get; start with that"))
+    if words_in(first) > FIRST_SENTENCE_MAX:
+        out.append((1, "approval-budget", "fail", f"first sentence of {words_in(first)} words (limit {FIRST_SENTENCE_MAX})"))
+    lines, _ = prose_lines(text.split("\n"))
+    for i, ln in enumerate(lines, 1):
+        for m in APPROVAL_ID.finditer(ln):
+            out.append((i, "approval-id", "fail", f"'{m.group(0)}' is a hash or id; say in plain words what it stands for"))
+        for q in SENT_END.split(ln):
+            q = NUMBERED.sub("", BULLET.sub("", q)).strip()
+            if q.endswith("?") and words_in(q) > QUESTION_MAX:
+                out.append((i, "approval-budget", "fail", f"question of {words_in(q)} words (limit {QUESTION_MAX})"))
+    return out
+
+
+def main(argv: list[str]) -> int:
+    max_words, need_next, as_json, hook, approval = 400, True, False, False, False
+    hook_json = False
+    max_structured = 600
+    repo: str | None = None
+    previous_file: str | None = None
+    allow: set[str] = set()
+    files: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--max-words":
+            i += 1
+            if i >= len(argv) or not argv[i].isdigit():
+                return usage("--max-words needs a whole number")
+            max_words = int(argv[i])
+            max_structured = max_words
+        elif a in ("--allow", "--labels"):
+            i += 1
+            if i >= len(argv):
+                return usage(f"{a} needs a list like S6,MCP")
+            allow.update(x.strip() for x in argv[i].split(",") if x.strip())
+        elif a == "--max-words-structured":
+            i += 1
+            if i >= len(argv) or not argv[i].isdigit():
+                return usage("--max-words-structured needs a whole number")
+            max_structured = int(argv[i])
+        elif a in ("--repo", "--previous"):
+            i += 1
+            if i >= len(argv):
+                return usage(f"{a} needs a value")
+            if a == "--repo":
+                repo = argv[i]
+            else:
+                previous_file = argv[i]
+        elif a == "--no-next-step":
+            need_next = False
+        elif a == "--json":
+            as_json = True
+        elif a == "--hook":
+            hook = True
+        elif a == "--hook-json":
+            hook = True
+            hook_json = True
+        elif a == "--approval":
+            approval = True
+        elif a.startswith("-") and a != "-":
+            return usage(f"unknown option {a}")
+        else:
+            files.append(a)
+        i += 1
+    if len(files) > 1:
+        return usage("give one FILE, or none to read stdin")
+    if hook and files:
+        return usage("--hook reads stdin; drop the FILE")
+    if hook and approval:
+        return usage("--approval and --hook do not combine")
+    if hook and (repo or previous_file):
+        return usage("--hook reads cwd and transcript_path from its input; drop --repo and --previous")
+    previous: str | None = None
+    operator: str | None = None
+    once_key: str | None = None
+    marker: Path | None = None
+    if previous_file is not None:
+        try:
+            previous = Path(previous_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            return usage(f"cannot read --previous {previous_file} ({e})")
+
+    if files and files[0] != "-":
+        try:
+            text = Path(files[0]).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            return usage(f"cannot read {files[0]} ({e})")
+    else:
+        text = sys.stdin.read()
+    if hook:
+        got = hook_input(text)
+        if got is None:
+            if hook_json:
+                print(json.dumps({"continue": True}))
+            return 0
+        text = got["reply"]
+        repo = got["cwd"]
+        if got["transcript"]:
+            ctx = transcript_context(got["transcript"])
+            previous, operator = ctx["previous"], ctx["operator"]
+            once_key = f"operator turn {ctx['operator_ts']}" if ctx["operator_ts"] else once_key
+        marker = sent_marker(got["session"], once_key or f"reply {text}")
+
+    extra = lint_approval_text(text) if approval else turn_findings(text, repo, previous, operator)
+    findings = sorted(set(lint(text, max_words, need_next, allow, max_structured) + extra), key=lambda f: (f[0], f[1], f[3]))
+    fails = sum(1 for f in findings if f[2] == "fail")
+    warns = len(findings) - fails
+    summary = f"{fails} failures, {warns} warnings"
+    if hook:
+        turn = [f for f in findings if f[1] in TURN_RULES]
+        if turn and marker is not None and marker.exists():
+            findings = [f for f in findings if f[1] not in TURN_RULES]
+            turn = []
+            fails = sum(1 for f in findings if f[2] == "fail")
+            summary = f"{fails} failures, {len(findings) - fails} warnings"
+        if fails:
+            lines = ["Reply check (ctlhq-reply-lint): fix these before you stop."]
+            shown = findings
+        elif turn:
+            lines = ["Reply check (ctlhq-reply-lint): warning, sent once. Continue the work, or stop again."]
+            shown = turn
+        else:
+            lines, shown = [], []
+        if turn and marker is not None:
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(summary + "\n", encoding="utf-8")
+            except OSError:
+                shown = [f for f in shown if f[1] not in TURN_RULES]
+                if not fails:
+                    lines, shown = [], []
+        lines += [f"{n}: {rule}: {sev}: {msg}" for n, rule, sev, msg in shown]
+        if shown:
+            lines.append(summary)
+        if hook_json:
+            print(json.dumps({"decision": "block", "reason": "\n".join(lines)}) if shown else json.dumps({"continue": True}))
+            return 0
+        if shown:
+            print("\n".join(lines), file=sys.stderr)
+            return 2
+        return 0
+    if as_json:
+        print(json.dumps([{"line": n, "rule": rule, "severity": sev, "message": msg}
+                          for n, rule, sev, msg in findings], indent=2))
+        print(summary, file=sys.stderr)
+    else:
+        for n, rule, sev, msg in findings:
+            print(f"{n}: {rule}: {sev}: {msg}")
+        print(summary)
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

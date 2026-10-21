@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""ctlhq-unslop: find the mechanical AI-writing patterns from the unslop skill.
+
+Usage:
+  ctlhq-unslop [--rules N,N,...] [--list-rules] [FILE ...]
+  cat text.md | ctlhq-unslop
+
+Prints one line per finding: path:line: rule N <name>: <matched text>
+Exit 1 when it finds anything, 0 when clean, 2 on a usage error.
+
+It skips fenced code blocks, inline code, link targets, and YAML front matter.
+Rules it does not check need judgment. Run --list-rules to see both lists.
+Rules 1 to 33 come from the project named in the README's Credits section; rules 34 and up are ctlhq's own.
+"""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+CHECKED = {
+    7: "AI vocabulary",
+    8: "fancy way to say is",
+    9: "not just X but Y",
+    13: "dash",
+    14: "mid-sentence colon",
+    17: "title case heading",
+    18: "emoji in heading or bullet",
+    19: "curly quote",
+    20: "chatbot phrase",
+    22: "sycophantic tone",
+    23: "filler phrase",
+    24: "hedging",
+    26: "abstract metaphor noun",
+    29: "possible passive voice",
+    31: "fancy word",
+    33: "arrow or symbol-speak",
+    34: "table without a number column",
+}
+
+JUDGMENT_ONLY = {
+    3: "superficial -ing phrases",
+    5: "vague attributions",
+    10: "rule of three",
+    11: "synonym cycling",
+    12: "false ranges",
+    15: "boldface overuse",
+    16: "inline-header lists",
+    25: "generic conclusions",
+    27: "say what it does, not how it feels",
+    28: "dense sentences",
+    30: "adverbs propping weak verbs",
+    32: "mannered prose",
+}
+
+NOT_FLAGGED_WORDS = (
+    'rule 8 skips "features" and rule 26 skips vector, primitive, harness, '
+    'scaffolding, surface, wedge, and evacuate. Each has common literal uses. '
+    "Check those by hand. Rule 14 flags every mid-sentence colon, including one before an "
+    "inline list, which the skill allows; judge each hit. Rule 17 may flag a sentence-case "
+    "heading that holds two or more proper nouns."
+)
+
+
+def words(*ws: str) -> re.Pattern[str]:
+    return re.compile(r"\b(?:" + "|".join(re.escape(w) for w in ws) + r")\b", re.IGNORECASE)
+
+
+AI_VOCAB = words(
+    "additionally", "crucial", "delve", "delves", "delving", "enduring", "enhance", "enhances",
+    "enhancing", "fostering", "foster", "fosters", "garner", "garners", "interplay", "intricate",
+    "landscape", "pivotal", "showcase", "showcases", "showcasing", "tapestry", "testament",
+    "underscore", "underscores", "underscoring", "vibrant",
+)
+FANCY_IS = words("serves as", "serve as", "stands as", "stand as", "boasts", "boast")
+NOT_JUST = re.compile(r"\bnot (?:just|only|merely)\b[^.!?\n]{0,120}?\bbut\b", re.IGNORECASE)
+EM_EN_DASH = re.compile(r"[–—]")
+HYPHEN_DASH = re.compile(r"(?<=\S) (?:--?|‐|‑) (?=\S)")
+MID_COLON = re.compile(r": \S")
+EMOJI = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF\U0001F900-\U0001F9FF⭐⬆✅❌✨]"
+)
+CURLY = re.compile(r"[‘’“”]")
+CHATBOT = re.compile(
+    r"I hope this helps|Let me know if|\bOf course!|\bCertainly!|smoking gun|Happy to help|Feel free to",
+    re.IGNORECASE,
+)
+SYCOPHANT = re.compile(
+    r"Great question|Excellent question|You're absolutely right|You are absolutely right|absolutely right|Great point|Good catch!",
+    re.IGNORECASE,
+)
+FILLER = re.compile(
+    r"\bin order to\b|\bdue to the fact that\b|\bit is important to note\b|\bit's worth noting\b|\bit is worth noting\b|\bneedless to say\b|\bat the end of the day\b",
+    re.IGNORECASE,
+)
+HEDGE = re.compile(
+    r"\bcould potentially\b|\bmight possibly\b|\bpotentially possibly\b|\bit could be argued\b|\bmay potentially\b|\bperhaps possibly\b",
+    re.IGNORECASE,
+)
+METAPHOR = re.compile(
+    r"\bsubstrate\b|\bnexus\b|\blocus\b|\bvantage\b|\bbedrock\b|\bparadigm\b|\bgold-plat\w*|\bnorth star\b|\bflywheel\b|\bendgame\b|\bmodality\b|\bmodalities\b|\bAPI surface\b|\bwedge in\b|\bratchet\w*",
+    re.IGNORECASE,
+)
+PASSIVE = re.compile(r"\b(?:is|are|was|were|be|been|being)\s+(?:\w+ed|\w+en)\b(?!\s+by\s+the\s+time)", re.IGNORECASE)
+PASSIVE_SKIP = words(
+    "is used", "are used", "is needed", "are needed", "is based", "are based", "is called",
+    "are called", "is required", "are required", "is finished", "is done", "are done",
+    "is written", "is given", "are given", "is fine", "is bound", "is open", "is green", "is red",
+    "been", "being",
+)
+FANCY_WORD = re.compile(
+    r"\butiliz\w*|\bleverag\w*|\bfacilitat\w*|\bnumerous\b|\bin the event that\b|\bprior to\b|\bsubsequent to\b|\bcommence\w*|\bendeavou?r\w*",
+    re.IGNORECASE,
+)
+ARROW = re.compile(r"→|⇒|(?<=\S) -> (?=\S)|(?<=\S) => (?=\S)")
+
+INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)")
+IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+LINK_TARGET = re.compile(r"\]\([^)]*\)")
+URL = re.compile(r"https?://\S+")
+HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+BULLET = re.compile(r"^\s*[-*+]\s+")
+TIME = re.compile(r"\b\d{1,2}:\d{2}\b")
+TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+NUMBER_HEADER = re.compile(r"^(#|no\.?|n|nr|row|id|step|item|\d+)$", re.IGNORECASE)
+
+
+def strip_prose(text: str) -> str:
+    text = INLINE_CODE.sub("`", text)
+    text = IMAGE.sub("", text)
+    text = LINK_TARGET.sub("]", text)
+    text = URL.sub("", text)
+    return text
+
+
+def is_title_case(heading: str) -> bool:
+    body = INLINE_CODE.sub("", heading)
+    toks = [t for t in re.split(r"\s+", body.strip()) if t and t[0].isalpha()]
+    if len(toks) < 3 or toks[0][0].islower():
+        return False
+    rest = toks[1:]
+    caps = [t for t in rest if t[0].isupper() and not t.isupper()]
+    small = {"a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with", "vs", "at", "by", "is"}
+    lower = [t for t in rest if t[0].islower() and t.lower() not in small]
+    return len(caps) >= 2 and len(caps) > len(lower)
+
+
+def lint_lines(lines: list[str], path: str, active: set[int]) -> list[str]:
+    out: list[str] = []
+    start = 0
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                start = i + 1
+                break
+    fence: tuple[str, int] | None = None
+    for idx in range(start, len(lines)):
+        raw = lines[idx]
+        n = idx + 1
+        m = re.match(r"^ {0,3}(`{3,}|~{3,})", raw)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and raw.strip() == m.group(1):
+                fence = None
+            continue
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            continue
+        prose = strip_prose(raw)
+
+        def hit(rule: int, text: str) -> None:
+            if rule in active:
+                out.append(f"{path}:{n}: rule {rule} {CHECKED[rule]}: {text.strip()}")
+
+        for mm in AI_VOCAB.finditer(prose):
+            hit(7, mm.group(0))
+        for mm in FANCY_IS.finditer(prose):
+            hit(8, mm.group(0))
+        for mm in NOT_JUST.finditer(prose):
+            hit(9, mm.group(0))
+        for mm in EM_EN_DASH.finditer(prose):
+            hit(13, "long dash")
+        if not BULLET.match(raw):
+            for mm in HYPHEN_DASH.finditer(prose):
+                hit(13, "hyphen used as a dash")
+        colon_text = TIME.sub("", prose)
+        for mm in MID_COLON.finditer(colon_text):
+            hit(14, colon_text[max(0, mm.start() - 20): mm.end() + 20])
+        hm = HEADING.match(raw)
+        if hm and is_title_case(hm.group(2)):
+            hit(17, hm.group(2))
+        if TABLE_ROW.match(raw) and idx + 1 < len(lines) and TABLE_SEP.match(lines[idx + 1]):
+            first = raw.strip().strip("|").split("|")[0].strip().strip("*`")
+            if not NUMBER_HEADER.match(first):
+                hit(34, f"first column is {first!r}; add a numbering column so rows can be cited")
+        if hm or BULLET.match(raw):
+            for mm in EMOJI.finditer(raw):
+                hit(18, mm.group(0))
+        for mm in CURLY.finditer(prose):
+            hit(19, "curly quote")
+        for mm in CHATBOT.finditer(prose):
+            hit(20, mm.group(0))
+        for mm in SYCOPHANT.finditer(prose):
+            hit(22, mm.group(0))
+        for mm in FILLER.finditer(prose):
+            hit(23, mm.group(0))
+        for mm in HEDGE.finditer(prose):
+            hit(24, mm.group(0))
+        for mm in METAPHOR.finditer(prose):
+            hit(26, mm.group(0))
+        for mm in PASSIVE.finditer(prose):
+            if not PASSIVE_SKIP.search(mm.group(0)):
+                hit(29, mm.group(0))
+        for mm in FANCY_WORD.finditer(prose):
+            hit(31, mm.group(0))
+        for mm in ARROW.finditer(prose):
+            hit(33, mm.group(0))
+    return out
+
+
+def main(argv: list[str]) -> int:
+    rules = set(CHECKED)
+    files: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--list-rules":
+            print("checked by this tool:")
+            for k in sorted(CHECKED):
+                print(f"  {k:>2}  {CHECKED[k]}")
+            print("left to judgment (read the skill):")
+            for k in sorted(JUDGMENT_ONLY):
+                print(f"  {k:>2}  {JUDGMENT_ONLY[k]}")
+            print("note: " + NOT_FLAGGED_WORDS)
+            return 0
+        if a == "--rules":
+            i += 1
+            if i >= len(argv):
+                print("--rules needs a list like 13,14,19", file=sys.stderr)
+                return 2
+            try:
+                rules = {int(x) for x in argv[i].split(",") if x}
+            except ValueError:
+                print("--rules needs integers separated by commas", file=sys.stderr)
+                return 2
+            bad = rules - set(CHECKED)
+            if bad:
+                print(f"not checked by this tool: {sorted(bad)}", file=sys.stderr)
+                return 2
+        elif a.startswith("-") and a != "-":
+            print(f"unknown option {a}", file=sys.stderr)
+            return 2
+        else:
+            files.append(a)
+        i += 1
+
+    findings: list[str] = []
+    count_files = 0
+    if not files or files == ["-"]:
+        findings += lint_lines(sys.stdin.read().split("\n"), "<stdin>", rules)
+        count_files = 1
+    else:
+        for f in files:
+            p = Path(f)
+            if p.is_dir():
+                targets = sorted(x for x in p.rglob("*.md") if x.is_file())
+            else:
+                targets = [p]
+            for t in targets:
+                try:
+                    text = t.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as e:
+                    print(f"{t}: cannot read ({e})", file=sys.stderr)
+                    return 2
+                findings += lint_lines(text.split("\n"), str(t), rules)
+                count_files += 1
+    for line in findings:
+        print(line)
+    print(f"{len(findings)} findings in {count_files} file(s)")
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

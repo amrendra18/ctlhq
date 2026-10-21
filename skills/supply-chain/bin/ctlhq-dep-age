@@ -1,0 +1,648 @@
+#!/usr/bin/env python3
+"""ctlhq-dep-age: release date, age, and source of every locked dependency, flagged under the minimum age.
+
+Usage:
+  ctlhq-dep-age [--min-days 21] [--exceptions FILE] [--json] [--timeout 10] [--allow-empty]
+          [--offline --dates FILE] [--today YYYY-MM-DD] [--pkg ECO:NAME@VERSION ...] [LOCKFILE ...]
+  ctlhq-dep-age --file <download>
+
+Lockfiles read: package-lock.json (npm), pnpm-lock.yaml (npm), go.sum and go.mod (go),
+uv.lock and requirements.txt (pypi), Cargo.lock (crates). With no LOCKFILE and no --pkg,
+every one of these names in the current folder is read. --pkg checks one package before it
+is added, for example --pkg npm:left-pad@1.3.0 (ECO is npm, pypi, go, or crates).
+A requirements file's -r and -c lines (and --requirement, --constraint) are followed,
+relative to the including file. A lockfile that yields 0 packages is named on stderr and
+exits 1, because nothing was checked there; --allow-empty accepts it.
+
+Each version's release date comes from the official registry, with urllib and --timeout
+seconds per request: registry.npmjs.org, pypi.org (JSON API, earliest file upload),
+proxy.golang.org (.info), crates.io (API v1). The output is a numbered table, tab
+separated: #, package, version, released, age_days, source, verdict. Then one summary line
+that starts with the count of packages read and the count per file, for example
+"3 packages read (requirements.txt 1, base.txt 2), 0 flagged, ...".
+
+Verdicts:
+  ok          official source, at least --min-days old
+  young       released less than --min-days ago
+  unofficial  resolved from a source other than the official registry (git, a file, a URL,
+              another index, a go.mod replace)
+  unpinned    no exact version (a requirements.txt line without ==)
+  not-found   the official registry has no such version
+  excepted    one of the above, but the exceptions file names the package and version
+A flag is any verdict except ok and excepted.
+
+Exceptions file: one exception per line, "name<TAB or space>version<TAB or space>note".
+The version * matches every version. Lines starting with # are comments. The skill says
+what the note must hold (who approved, the date, the reason).
+
+--offline reads release dates from --dates FILE instead of the network: one line per
+version, "eco<TAB>name<TAB>version<TAB>YYYY-MM-DD" (tests use it). --today fixes the date
+ages are counted from. --json prints {"rows": [...], "summary": {...}} instead.
+
+--file <download> prints the SHA-256 of a downloaded file and lists any checksum or
+signature file next to it (<file>.sha256, .sha512, .asc, .sig, .minisig, SHA256SUMS,
+checksums.txt, and similar). A checksum list counts only on a line that names the file
+(a <file>.sha256 file names it by its own name). Signatures are listed, not verified, and
+never accepted alone; an empty one is reported as empty. Run gpg --verify or minisign -V
+yourself.
+
+Exit codes: 0 nothing flagged (or --file: a checksum file next to the download names it
+with a matching SHA-256); 1 a flag not in the exceptions file, or a lockfile that yields 0
+packages without --allow-empty (or --file: no matching SHA-256, a mismatch, or only a
+signature); 2 usage error or unreadable lockfile; 3 a registry was unreachable or answered
+with something that is not JSON, so no verdict was reached (never read exit 3 as clean).
+
+Encodes home/AGENTS.md: "Keep blocked operations, working local actions, and missing evidence separate in totals."
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import socket
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+LOCKNAMES = ("package-lock.json", "pnpm-lock.yaml", "go.sum", "go.mod", "uv.lock",
+             "requirements.txt", "Cargo.lock")
+OFFICIAL = {"npm": "registry.npmjs.org", "pypi": "pypi.org", "go": "proxy.golang.org",
+            "crates": "crates.io"}
+ECOS = tuple(OFFICIAL)
+UA = "ctlhq-dep-age/1 (+https://github.com)"
+# URL templates; the environment variables exist so tests can point at a local server.
+URLS = {
+    "npm": os.environ.get("DEP_AGE_NPM_URL", "https://registry.npmjs.org/{name}"),
+    "pypi": os.environ.get("DEP_AGE_PYPI_URL", "https://pypi.org/pypi/{name}/{version}/json"),
+    "go": os.environ.get("DEP_AGE_GO_URL", "https://proxy.golang.org/{name}/@v/{version}.info"),
+    "crates": os.environ.get("DEP_AGE_CRATES_URL", "https://crates.io/api/v1/crates/{name}/{version}"),
+}
+
+
+class Usage(Exception):
+    pass
+
+
+class NetworkDown(Exception):
+    pass
+
+
+class BadReply(NetworkDown):
+    """The registry answered, but not with JSON (a login page, a proxy error page)."""
+
+
+def dep(eco, name, version, source=None, note="", origin=None):
+    """One locked package. source None means the official registry. origin is the file it came from."""
+    return {"eco": eco, "name": name, "version": version,
+            "source": source or OFFICIAL[eco], "official": source is None, "note": note,
+            "origin": origin}
+
+
+# ---------- lockfile parsers ----------
+
+def host_of(url):
+    return urllib.parse.urlparse(url).hostname or url
+
+
+def npm_source(resolved):
+    if not resolved:
+        return None
+    if resolved.startswith("https://registry.npmjs.org/"):
+        return None
+    if resolved.startswith(("git", "github:")):
+        return "git"
+    if resolved.startswith("file:"):
+        return "file"
+    return host_of(resolved)
+
+
+def parse_package_lock(path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    out = []
+    pkgs = data.get("packages")
+    if isinstance(pkgs, dict):
+        for key, meta in pkgs.items():
+            if not key or meta.get("link") or "node_modules/" not in key:
+                continue
+            name = meta.get("name") or key.rsplit("node_modules/", 1)[1]
+            version = meta.get("version", "")
+            out.append(dep("npm", name, version, npm_source(meta.get("resolved"))))
+        return out
+
+    def walk(deps):
+        for name, meta in (deps or {}).items():
+            version = meta.get("version", "")
+            src = npm_source(meta.get("resolved"))
+            if re.match(r"^(git|github:|file:|https?:)", version):
+                src, version = src or npm_source(version) or "url", version
+            out.append(dep("npm", name, version, src))
+            walk(meta.get("dependencies"))
+    walk(data.get("dependencies"))
+    return out
+
+
+def split_pnpm_key(key):
+    key = key.strip().strip("'\"").rstrip(":").strip("'\"")
+    key = key.lstrip("/")
+    key = re.sub(r"\(.*$", "", key)  # peer suffix (v6+)
+    at = key.find("@", 1)
+    if at > 0 and "/" not in key[at:]:
+        name, version = key[:at], key[at + 1:]
+    else:  # v5: name/version or @scope/name/version
+        name, _, version = key.rpartition("/")
+    version = version.split("_", 1)[0]
+    return name, version
+
+
+def parse_pnpm_lock(path):
+    out, in_pkgs, current = [], False, None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if raw and not raw.startswith(" "):
+            in_pkgs = raw.rstrip() == "packages:"
+            current = None
+            continue
+        if not in_pkgs or not raw.strip() or raw.strip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent == 2 and raw.rstrip().endswith(":"):
+            name, version = split_pnpm_key(raw)
+            current = dep("npm", name, version)
+            out.append(current)
+        elif current is not None and "tarball:" in raw:
+            m = re.search(r"tarball:\s*['\"]?([^,}'\"\s]+)", raw)
+            if m:
+                src = npm_source(m.group(1))
+                current["source"], current["official"] = (src or OFFICIAL["npm"]), src is None
+        elif current is not None and re.search(r"\b(repo|commit):", raw):
+            current["source"], current["official"] = "git", False
+    return out
+
+
+def parse_go_sum(path):
+    seen, out = set(), []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        mod, ver = parts[0], parts[1].replace("/go.mod", "")
+        if (mod, ver) not in seen:
+            seen.add((mod, ver))
+            out.append(dep("go", mod, ver))
+    return out
+
+
+def parse_go_mod(path):
+    out, replaces, in_block = [], {}, None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if line.endswith("(") and line.split()[0] in ("require", "replace"):
+            in_block = line.split()[0]
+            continue
+        if line == ")":
+            in_block = None
+            continue
+        words = line.split()
+        kind = in_block
+        if words[0] in ("require", "replace") and not in_block:
+            kind, words = words[0], words[1:]
+        if kind == "require" and len(words) >= 2:
+            out.append(dep("go", words[0], words[1]))
+        elif kind == "replace" and "=>" in words:
+            i = words.index("=>")
+            target = words[i + 1] if len(words) > i + 1 else "?"
+            replaces[words[0]] = "file" if target.startswith((".", "/")) else "replace " + target
+    for d in out:
+        if d["name"] in replaces:
+            d["source"], d["official"] = replaces[d["name"]], False
+    return out
+
+
+def toml_blocks(text, header):
+    """The key = value lines of every [[header]] table, as dicts of raw strings."""
+    blocks, cur = [], None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            cur = {} if line == "[[%s]]" % header else None
+            if cur is not None:
+                blocks.append(cur)
+            continue
+        if cur is not None and "=" in line and not line.startswith("#"):
+            k, _, v = line.partition("=")
+            cur.setdefault(k.strip(), v.strip())
+    return blocks
+
+
+def unquote(v):
+    v = v.strip()
+    return v[1:-1] if len(v) >= 2 and v[0] == v[-1] == '"' else v
+
+
+def parse_uv_lock(path):
+    out = []
+    for b in toml_blocks(path.read_text(encoding="utf-8"), "package"):
+        name, version, src = unquote(b.get("name", "")), unquote(b.get("version", "")), b.get("source", "")
+        if re.search(r"\b(editable|virtual)\s*=", src):
+            continue  # the project itself
+        m = re.search(r"registry\s*=\s*\"([^\"]+)\"", src)
+        if m and host_of(m.group(1)) in ("pypi.org", "files.pythonhosted.org"):
+            source = None
+        elif m:
+            source = host_of(m.group(1))
+        elif re.search(r"\bgit\s*=", src):
+            source = "git"
+        elif src:
+            source = "url" if re.search(r"\burl\s*=", src) else "file"
+        else:
+            source = None
+        out.append(dep("pypi", name, version, source))
+    return out
+
+
+def parse_requirements(path, seen=None):
+    seen = set() if seen is None else seen
+    seen.add(path.resolve())
+    out, index = [], None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split(" #", 1)[0].strip()
+        if not line or line.startswith("#") or line == "\\":
+            continue
+        m = re.match(r"^(?:-i|--index-url)[ =]\s*(\S+)", line)
+        if m:
+            h = host_of(m.group(1))
+            index = None if h == "pypi.org" else h
+            continue
+        m = re.match(r"^--extra-index-url[ =]\s*(\S+)", line)
+        if m:
+            index = "extra index " + host_of(m.group(1))
+            continue
+        m = re.match(r"^(?:-r|-c|--requirement|--constraint)(?:[ =]\s*|(?=[^\s=-]))(\S+)$", line)
+        if m:
+            inc = path.parent / m.group(1)
+            if not inc.is_file():
+                raise Usage("%s includes %s, which does not exist" % (path, inc))
+            if inc.resolve() not in seen:
+                out.extend(parse_requirements(inc, seen))
+            continue
+        if line.startswith("--hash"):
+            continue
+        if line.startswith("-e") or "://" in line or line.startswith(("git+", ".", "/")):
+            name = re.split(r"[#=]egg=|\s", line)[-1] if "egg=" in line else line.split()[-1]
+            out.append(dep("pypi", name, "-", "git" if "git+" in line else "url", origin=path))
+            continue
+        spec = re.split(r"\s*;", line, 1)[0].split("\\")[0].strip()
+        spec = re.sub(r"\s--hash\S*", "", spec).strip()
+        m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?\s*(.*)$", spec)
+        if not m:
+            continue
+        name, rest = m.group(1), m.group(3).strip()
+        mm = re.match(r"^===?\s*([^\s,]+)$", rest)
+        d = dep("pypi", name, mm.group(1) if mm else (rest or "-"), index, origin=path)
+        if not mm:
+            d["note"] = "unpinned"
+        out.append(d)
+    return out
+
+
+def parse_cargo_lock(path):
+    out = []
+    for b in toml_blocks(path.read_text(encoding="utf-8"), "package"):
+        src = unquote(b.get("source", ""))
+        if not src:
+            continue  # a workspace member
+        if src in ("registry+https://github.com/rust-lang/crates.io-index",
+                   "sparse+https://index.crates.io/"):
+            source = None
+        elif src.startswith("git+"):
+            source = "git"
+        else:
+            source = host_of(src.split("+", 1)[-1])
+        out.append(dep("crates", unquote(b.get("name", "")), unquote(b.get("version", "")), source))
+    return out
+
+
+PARSERS = {"package-lock.json": parse_package_lock, "pnpm-lock.yaml": parse_pnpm_lock,
+           "go.sum": parse_go_sum, "go.mod": parse_go_mod, "uv.lock": parse_uv_lock,
+           "Cargo.lock": parse_cargo_lock}
+
+
+def parser_for(path):
+    if path.name in PARSERS:
+        return PARSERS[path.name]
+    if path.suffix == ".txt" or path.name.startswith("requirements"):
+        return parse_requirements
+    raise Usage("unknown lockfile type: %s (known: %s)" % (path, ", ".join(LOCKNAMES)))
+
+
+def parse_pkg(spec):
+    m = re.match(r"^(npm|pypi|go|crates):(.+)@([^@]+)$", spec)
+    if not m:
+        raise Usage("--pkg wants ECO:NAME@VERSION with ECO in npm, pypi, go, crates; got %r" % spec)
+    return dep(m.group(1), m.group(2), m.group(3))
+
+
+# ---------- registry lookups ----------
+
+def go_escape(s):
+    return re.sub(r"[A-Z]", lambda m: "!" + m.group(0).lower(), s)
+
+
+def fetch_json(url, timeout):
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 410):
+            return None
+        raise NetworkDown("%s answered HTTP %d" % (host_of(url), e.code))
+    except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as e:
+        raise NetworkDown("%s: %s" % (host_of(url), getattr(e, "reason", e)))
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        start = body[:40].decode("utf-8", "replace").split("\n", 1)[0].strip()
+        raise BadReply("%s answered with something that is not JSON (it starts %r): "
+                       "a login page or a proxy page?" % (host_of(url), start))
+
+
+def parse_time(s):
+    if not s:
+        return None
+    s = s.strip().replace("Z", "+00:00")
+    s = re.sub(r"(\.\d{6})\d+", r"\1", s)
+    try:
+        t = dt.datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            return dt.date.fromisoformat(s[:10])
+        except ValueError:
+            return None
+    return t.date()
+
+
+class Registry:
+    def __init__(self, timeout, dates=None):
+        self.timeout, self.dates, self.npm_cache = timeout, dates, {}
+
+    def released(self, d):
+        """The release date, or None when the registry has no such version."""
+        eco, name, version = d["eco"], d["name"], d["version"]
+        if self.dates is not None:
+            return self.dates.get((eco, name, version))
+        if eco == "npm":
+            if name not in self.npm_cache:
+                q = urllib.parse.quote(name, safe="@").replace("/", "%2f")
+                self.npm_cache[name] = fetch_json(URLS["npm"].format(name=q, version=version), self.timeout)
+            doc = self.npm_cache[name]
+            return parse_time(((doc or {}).get("time") or {}).get(version))
+        if eco == "pypi":
+            doc = fetch_json(URLS["pypi"].format(name=urllib.parse.quote(name), version=urllib.parse.quote(version)),
+                             self.timeout)
+            times = [parse_time(u.get("upload_time_iso_8601") or u.get("upload_time"))
+                     for u in (doc or {}).get("urls", [])]
+            times = [t for t in times if t]
+            return min(times) if times else None
+        if eco == "go":
+            doc = fetch_json(URLS["go"].format(name=go_escape(name), version=go_escape(version)), self.timeout)
+            return parse_time((doc or {}).get("Time"))
+        if eco == "crates":
+            doc = fetch_json(URLS["crates"].format(name=urllib.parse.quote(name), version=urllib.parse.quote(version)),
+                             self.timeout)
+            return parse_time(((doc or {}).get("version") or {}).get("created_at"))
+        return None
+
+
+# ---------- main check ----------
+
+def read_dates(path):
+    dates = {}
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 4 or parse_time(parts[3]) is None:
+            raise Usage("%s:%d: want eco<TAB>name<TAB>version<TAB>YYYY-MM-DD" % (path, n))
+        dates[(parts[0], parts[1], parts[2])] = parse_time(parts[3])
+    return dates
+
+
+def read_exceptions(path):
+    out = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and not line.lstrip().startswith("#"):
+            out.append((parts[0], parts[1]))
+    return out
+
+
+def excepted(d, exceptions):
+    return any(n == d["name"] and v in ("*", d["version"]) for n, v in exceptions)
+
+
+def check(deps, registry, min_days, today, exceptions):
+    rows = []
+    for d in deps:
+        released, age, verdict = None, None, "ok"
+        if d["note"] == "unpinned":
+            verdict = "unpinned"
+        elif d["version"] == "-":
+            verdict = "unofficial"
+        else:
+            released = registry.released(d)
+            if released is None:
+                verdict = "not-found" if d["official"] else "unofficial"
+            else:
+                age = (today - released).days
+                if not d["official"]:
+                    verdict = "unofficial"
+                elif age < min_days:
+                    verdict = "young"
+        if not d["official"] and verdict in ("ok", "young"):
+            verdict = "unofficial"
+        if verdict != "ok" and excepted(d, exceptions):
+            verdict = "excepted"
+        rows.append({"package": d["name"], "ecosystem": d["eco"], "version": d["version"],
+                     "released": released.isoformat() if released else "-",
+                     "age_days": age, "source": d["source"], "verdict": verdict})
+    return rows
+
+
+SUM_NAMES = ("sha256sums", "sha256sums.txt", "checksums.txt", "checksums.sha256", "sha512sums",
+             "sha512sums.txt", "shasums", "shasums256.txt")
+SIG_EXT = (".asc", ".sig", ".minisig", ".sigstore", ".pem", ".cert", ".bundle")
+SUM_EXT = (".sha256", ".sha256sum", ".sha512", ".sha512sum", ".sha1", ".md5")
+HASH_RE = re.compile(r"\b([0-9a-fA-F]{64}|[0-9a-fA-F]{128})\b")
+
+
+def file_check(path):
+    p = Path(path)
+    if not p.is_file():
+        raise Usage("no such file: %s" % path)
+    data = p.read_bytes()
+    sha256, sha512 = hashlib.sha256(data).hexdigest(), hashlib.sha512(data).hexdigest()
+    print("file\t%s" % p.resolve())
+    print("sha256\t%s" % sha256)
+    sums, sigs, verdicts = [], [], []
+    for q in sorted(p.parent.iterdir()):
+        if q == p or not q.is_file():
+            continue
+        low = q.name.lower()
+        if low.startswith(p.name.lower()) and low[len(p.name):] in SIG_EXT:
+            sigs.append(q)
+        elif (low.startswith(p.name.lower()) and low[len(p.name):] in SUM_EXT) or low in SUM_NAMES:
+            sums.append(q)
+        elif low.endswith(SIG_EXT) and low[:-len(Path(low).suffix)] in SUM_NAMES:
+            sigs.append(q)
+    for q in sums:
+        text = q.read_text(encoding="utf-8", errors="replace")
+        own = q.name.lower().startswith(p.name.lower())  # <file>.sha256 names the file by its own name
+        found = []
+        for line in text.splitlines():
+            names = {w.lstrip("*").strip("()").rsplit("/", 1)[-1] for w in line.split()}
+            if own or p.name in names:
+                found += [h.lower() for h in HASH_RE.findall(line)]
+        if not found:
+            state = "does not name this file"
+        elif sha256 in found:
+            state = "matches"
+        elif sha512 in found:
+            state = "SHA-512 matches, no SHA-256 listed"
+        else:
+            state = "MISMATCH"
+        verdicts.append(state)
+        print("checksum\t%s\t%s" % (q.name, state))
+    for q in sigs:
+        if q.stat().st_size == 0:
+            state = "empty (0 bytes): not a signature"
+        elif q.name.lower().startswith(p.name.lower()):
+            state = "present, not verified (run gpg --verify or minisign -V)"
+        else:
+            listed = Path(str(q)[:-len(q.suffix)])
+            names = ""
+            if listed.is_file():
+                names = listed.read_text(encoding="utf-8", errors="replace")
+            named = any(p.name in {w.lstrip("*").strip("()").rsplit("/", 1)[-1] for w in line.split()}
+                        for line in names.splitlines())
+            state = ("present, not verified (run gpg --verify or minisign -V); it signs %s" % listed.name
+                     if named else "signs %s, which does not name this file" % listed.name)
+        print("signature\t%s\t%s" % (q.name, state))
+    if "MISMATCH" in verdicts:
+        print("verdict\tchecksum mismatch: do not run this file")
+        return 1
+    if "matches" in verdicts:
+        print("verdict\tSHA-256 matches a checksum file that names this file")
+        return 0
+    if any(v.startswith("SHA-512 matches") for v in verdicts):
+        print("verdict\tonly a SHA-512 matches; exit 0 needs a matching SHA-256 line that names this file")
+        return 1
+    if sigs:
+        print("verdict\tno matching SHA-256 next to the file; a signature alone is not accepted: "
+              "get the checksum from the official source and verify the signature before running it")
+        return 1
+    print("verdict\tno checksum or signature next to the file: get one from the official source before running it")
+    return 1
+
+
+def main(argv):
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    ap = argparse.ArgumentParser(prog="ctlhq-dep-age", add_help=False)
+    ap.add_argument("--min-days", type=int, default=21)
+    ap.add_argument("--exceptions")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument("--offline", action="store_true")
+    ap.add_argument("--dates")
+    ap.add_argument("--today")
+    ap.add_argument("--pkg", action="append", default=[])
+    ap.add_argument("--file")
+    ap.add_argument("--allow-empty", action="store_true")
+    ap.add_argument("lockfiles", nargs="*")
+    try:
+        a, extra = ap.parse_known_args(argv)
+    except SystemExit:
+        return 2
+    try:
+        if extra:
+            raise Usage("unknown option: %s" % " ".join(extra))
+        if a.file:
+            if a.lockfiles or a.pkg:
+                raise Usage("--file takes one download and nothing else")
+            return file_check(a.file)
+        if a.offline != bool(a.dates):
+            raise Usage("--offline and --dates FILE go together")
+        if a.min_days < 0:
+            raise Usage("--min-days must be 0 or more")
+        today = dt.date.fromisoformat(a.today) if a.today else dt.date.today()
+        paths = [Path(p) for p in a.lockfiles]
+        if not paths and not a.pkg:
+            paths = [Path(n) for n in LOCKNAMES if Path(n).is_file()]
+            if not paths:
+                raise Usage("no lockfile given and none found here (%s)" % ", ".join(LOCKNAMES))
+        deps = [parse_pkg(s) for s in a.pkg]
+        read, empty = {}, []  # packages read per file, in order; lockfiles that gave none
+        if a.pkg:
+            read["--pkg"] = len(a.pkg)
+        for p in paths:
+            if not p.is_file():
+                raise Usage("no such lockfile: %s" % p)
+            parse = parser_for(p)
+            try:
+                got = parse(p)
+            except (ValueError, UnicodeDecodeError) as e:
+                raise Usage("cannot read %s: %s" % (p, e))
+            read.setdefault(str(p), 0)
+            for d in got:
+                key = str(d["origin"]) if d["origin"] is not None else str(p)
+                read[key] = read.get(key, 0) + 1
+            if not got:
+                empty.append(p)
+            deps.extend(got)
+        exceptions = read_exceptions(a.exceptions) if a.exceptions else []
+        dates = read_dates(a.dates) if a.dates else None
+    except (Usage, ValueError, OSError) as e:
+        print("ctlhq-dep-age: %s" % e, file=sys.stderr)
+        return 2
+    try:
+        rows = check(deps, Registry(a.timeout, dates), a.min_days, today, exceptions)
+    except BadReply as e:
+        print("ctlhq-dep-age: unreadable registry reply (%s). No verdict: nothing was checked." % e, file=sys.stderr)
+        return 3
+    except NetworkDown as e:
+        print("ctlhq-dep-age: network unavailable (%s). No verdict: nothing was checked. "
+              "Retry with network, or use --offline --dates FILE." % e, file=sys.stderr)
+        return 3
+    for p in empty:
+        print("ctlhq-dep-age: %s: 0 packages read, so nothing was checked there%s"
+              % (p, " (--allow-empty)" if a.allow_empty else "; pass --allow-empty if that is expected"),
+              file=sys.stderr)
+    flagged = [r for r in rows if r["verdict"] not in ("ok", "excepted")]
+    summary = {"packages": len(rows), "read": read, "empty": [str(p) for p in empty],
+               "flagged": len(flagged),
+               "excepted": sum(r["verdict"] == "excepted" for r in rows),
+               "min_days": a.min_days, "today": today.isoformat()}
+    if a.json:
+        print(json.dumps({"rows": rows, "summary": summary}, indent=2))
+    else:
+        print("#\tpackage\tversion\treleased\tage_days\tsource\tverdict")
+        for i, r in enumerate(rows, 1):
+            print("%d\t%s\t%s\t%s\t%s\t%s\t%s" % (i, r["package"], r["version"], r["released"],
+                                                "-" if r["age_days"] is None else r["age_days"],
+                                                r["source"], r["verdict"]))
+        per_file = ", ".join("%s %d" % (Path(k).name if k != "--pkg" else k, n) for k, n in read.items())
+        print("%d packages read (%s), %d flagged, %d excepted, minimum %d days, counted from %s"
+              % (len(rows), per_file, len(flagged), summary["excepted"], a.min_days, summary["today"]))
+    return 1 if flagged or (empty and not a.allow_empty) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

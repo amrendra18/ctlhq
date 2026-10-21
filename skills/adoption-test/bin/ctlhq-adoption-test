@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""ctlhq-adoption-test: the mechanical steps of the adoption-test skill (README commands, friction log, tier, fresh checkout).
+
+Usage:
+  ctlhq-adoption-test commands <README.md>
+  ctlhq-adoption-test log <friction.tsv> <file> <line> <severity> <what happened...>
+  ctlhq-adoption-test tier [--list] <friction.tsv>
+  ctlhq-adoption-test checkout <repo> <dest>
+
+commands  prints the documented commands in README order, one per line, as
+          n<TAB>README line<TAB>command. Every non-blank, non-comment line of a fenced
+          block tagged sh, bash, zsh, or shell counts. In a block tagged console or text,
+          or untagged, a line counts when it starts with "$ " (the prompt is stripped) or
+          with a known command (git, npm, make, python3, docker, ./script, bin/x, and so
+          on; the KNOWN set in this file). A folder name ending in "/" (a layout tree
+          line) does not count. A line ending in a backslash is joined with the
+          next. Exit 0 with one or more commands, 1 with none, 2 when the file is missing.
+log       appends one row to <friction.tsv>: UTC timestamp, file, line, severity, what
+          happened (tabs and newlines become spaces). It writes the header on first use.
+          <line> is an integer, or "-" when the friction has no line (a missing file).
+          <severity> is blocker, confusing, or cosmetic; anything else exits 2 and writes
+          nothing. Exit 0 after the append.
+tier      counts the rows by severity and declares the tier from the skill's rule:
+            integrated           no rows
+            usable               rows, none a blocker
+            milestones complete  one or more blockers
+          It prints blocker, confusing, cosmetic, rows, tier, and next (what the next tier
+          needs), one key<TAB>value per line. --list then prints every row ordered by
+          severity, blocker first, as severity<TAB>file:line<TAB>what happened (the fix
+          list). An empty or header-only log is integrated. Exit 0 integrated, 1 usable,
+          2 milestones complete, 3 on a usage error (missing log, bad row).
+checkout  makes a fresh copy of <repo> in <dest> and prints the absolute path of <dest>.
+          A git repository is cloned with git clone --local (committed state only, so
+          uncommitted files stay behind); any other folder is copied. <dest> must not
+          exist or must be an empty folder; anything else is refused with exit 2. Exit 1
+          when the clone or copy fails.
+
+Encodes home/AGENTS.md: "Say exactly what is complete before calling work done."
+"""
+from __future__ import annotations
+
+import datetime as dt
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+SEVERITIES = ("blocker", "confusing", "cosmetic")
+HEADER = "timestamp\tfile\tline\tseverity\twhat_happened"
+SHELL_TAGS = {"sh", "bash", "zsh", "shell"}
+MIXED_TAGS = {"", "console", "text", "shell-session", "terminal"}
+KNOWN = {
+    "git", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "node", "deno", "python", "python3", "pip",
+    "pip3", "pipx", "uv", "uvx", "poetry", "pytest", "tox", "ruff", "black", "mypy", "flake8", "make",
+    "cmake", "cargo", "rustup", "go", "java", "mvn", "gradle", "dotnet", "ruby", "gem", "bundle",
+    "swift", "xcodebuild", "brew", "apt", "apt-get", "docker", "docker-compose", "podman", "kubectl",
+    "helm", "terraform", "bash", "sh", "zsh", "source", ".", "cd", "ls", "cat", "mkdir", "cp", "mv",
+    "rm", "touch", "chmod", "chown", "ln", "echo", "printf", "export", "env", "curl", "wget", "tar",
+    "unzip", "ssh", "scp", "rsync", "sudo", "open", "code", "which", "test", "diff", "grep", "find",
+    "sed", "awk", "head", "tail", "less", "pwd", "kill", "ps", "tsc", "eslint", "vite", "next",
+}
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*([^\s`{}]*)")
+PROMPT = re.compile(r"^\s*[\w@.:~/()-]*\$\s+(.*)$")
+ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
+PATHISH = re.compile(r"^(\./|\.\./|/|~/|bin/|scripts?/)")
+
+
+def usage(msg: str, code: int = 2) -> int:
+    print(f"ctlhq-adoption-test: {msg}", file=sys.stderr)
+    print("run ctlhq-adoption-test --help for the usage", file=sys.stderr)
+    return code
+
+
+def is_command(line: str) -> bool:
+    tokens = line.split()
+    while tokens and ASSIGN.match(tokens[0]):
+        tokens = tokens[1:]
+    if not tokens:
+        return False
+    first = tokens[0]
+    return first in KNOWN or (bool(PATHISH.match(first)) and not first.endswith("/"))
+
+
+def readme_commands(text: str) -> list:
+    """[(README line number, command)] in order, from the fenced blocks."""
+    out: list = []
+    fence = None
+    tag = ""
+    pending = None  # (line number, text) of a backslash-continued command
+    for n, raw in enumerate(text.split("\n"), 1):
+        m = FENCE.match(raw)
+        if fence is None:
+            if m:
+                fence = (m.group(1)[0], len(m.group(1)))
+                tag = m.group(2).lower()
+                pending = None
+            continue
+        if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and raw.strip() == m.group(1):
+            fence = None
+            pending = None
+            continue
+        if tag not in SHELL_TAGS and tag not in MIXED_TAGS:
+            continue
+        line = raw.rstrip()
+        if pending is not None:
+            joined = pending[1][:-1].rstrip() + " " + line.strip()
+            if joined.endswith("\\"):
+                pending = (pending[0], joined)
+            else:
+                out.append((pending[0], joined))
+                pending = None
+            continue
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        pm = PROMPT.match(line)
+        if pm:
+            cmd = pm.group(1).strip()
+        elif tag in SHELL_TAGS or is_command(line.strip()):
+            cmd = line.strip()
+        else:
+            continue
+        if not cmd:
+            continue
+        if cmd.endswith("\\"):
+            pending = (n, cmd)
+        else:
+            out.append((n, cmd))
+    if pending is not None:
+        out.append((pending[0], pending[1][:-1].rstrip()))
+    return out
+
+
+def cmd_commands(args: list) -> int:
+    if len(args) != 1:
+        return usage("commands takes one argument, the README path")
+    path = Path(args[0]).expanduser()
+    if not path.is_file():
+        return usage(f"no such file: {path}")
+    rows = readme_commands(path.read_text(encoding="utf-8", errors="replace"))
+    for i, (line, cmd) in enumerate(rows, 1):
+        print(f"{i}\t{line}\t{cmd}")
+    if not rows:
+        print(f"ctlhq-adoption-test: no documented command in {path}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def one_line(s: str) -> str:
+    return " ".join(s.replace("\t", " ").split("\n")).strip()
+
+
+def cmd_log(args: list) -> int:
+    if len(args) < 5:
+        return usage("log needs <friction.tsv> <file> <line> <severity> <what happened...>")
+    tsv, file, line, severity = args[0], args[1], args[2], args[3]
+    what = one_line(" ".join(args[4:]))
+    if severity not in SEVERITIES:
+        return usage(f"severity must be one of {', '.join(SEVERITIES)}; got {severity!r}")
+    if line != "-" and not line.isdigit():
+        return usage(f"line must be an integer or '-'; got {line!r}")
+    if not what:
+        return usage("what happened must not be empty")
+    path = Path(tsv).expanduser()
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh = not path.is_file() or path.stat().st_size == 0
+    with path.open("a", encoding="utf-8") as fh:
+        if fresh:
+            fh.write(HEADER + "\n")
+        fh.write(f"{stamp}\t{one_line(file)}\t{line}\t{severity}\t{what}\n")
+    return 0
+
+
+def read_log(path: Path) -> list:
+    """Rows as (file, line, severity, what); raises ValueError on a bad row."""
+    rows: list = []
+    for n, raw in enumerate(path.read_text(encoding="utf-8", errors="replace").split("\n"), 1):
+        if not raw.strip():
+            continue
+        if n == 1 and raw.startswith("timestamp\t"):
+            continue
+        cols = raw.split("\t")
+        if len(cols) < 5:
+            raise ValueError(f"row {n} has {len(cols)} columns, expected 5")
+        if cols[3] not in SEVERITIES:
+            raise ValueError(f"row {n} has severity {cols[3]!r}, expected one of {', '.join(SEVERITIES)}")
+        rows.append((cols[1], cols[2], cols[3], "\t".join(cols[4:])))
+    return rows
+
+
+def cmd_tier(args: list) -> int:
+    want_list = False
+    rest: list = []
+    for a in args:
+        if a == "--list":
+            want_list = True
+        elif a.startswith("-"):
+            return usage(f"unknown option {a}", 3)
+        else:
+            rest.append(a)
+    if len(rest) != 1:
+        return usage("tier takes one argument, the friction log", 3)
+    path = Path(rest[0]).expanduser()
+    if not path.is_file():
+        return usage(f"friction log not found: {path} (log a row with 'ctlhq-adoption-test log', or touch it for a journey with no friction)", 3)
+    try:
+        rows = read_log(path)
+    except ValueError as e:
+        return usage(f"{path}: {e}", 3)
+    counts = {s: sum(1 for r in rows if r[2] == s) for s in SEVERITIES}
+    if counts["blocker"]:
+        code, nxt = 2, f"usable needs 0 blockers; {counts['blocker']} open"
+    elif rows:
+        code, nxt = 1, f"integrated needs 0 confusing and 0 cosmetic; {len(rows)} open"
+    else:
+        code, nxt = 0, "none, top tier"
+    tier = {0: "integrated", 1: "usable", 2: "milestones complete"}[code]
+    for s in SEVERITIES:
+        print(f"{s}\t{counts[s]}")
+    print(f"rows\t{len(rows)}")
+    print(f"tier\t{tier}")
+    print(f"next\t{nxt}")
+    if want_list:
+        order = {s: i for i, s in enumerate(SEVERITIES)}
+        for file, line, severity, what in sorted(rows, key=lambda r: order[r[2]]):
+            print(f"{severity}\t{file}:{line}\t{what}")
+    return code
+
+
+def is_git_repo(path: Path) -> bool:
+    if shutil.which("git") is None:
+        return False
+    r = subprocess.run(["git", "-C", str(path), "rev-parse", "--git-dir"], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def cmd_checkout(args: list) -> int:
+    if len(args) != 2:
+        return usage("checkout takes <repo> <dest>")
+    repo = Path(args[0]).expanduser()
+    dest = Path(args[1]).expanduser()
+    if not repo.is_dir():
+        return usage(f"no such folder: {repo}")
+    existed = dest.exists()
+    if existed and (not dest.is_dir() or any(dest.iterdir())):
+        return usage(f"refusing a non-empty dest: {dest}")
+    if is_git_repo(repo):
+        r = subprocess.run(["git", "clone", "--quiet", "--local", str(repo), str(dest)], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"ctlhq-adoption-test: git clone failed ({r.returncode}): {r.stderr.strip()}", file=sys.stderr)
+            if not existed and dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            return 1
+    else:
+        try:
+            shutil.copytree(repo, dest, symlinks=True, dirs_exist_ok=True)
+        except (OSError, shutil.Error) as e:
+            print(f"ctlhq-adoption-test: copy failed: {e}", file=sys.stderr)
+            if not existed and dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            return 1
+    print(dest.resolve())
+    return 0
+
+
+def main(argv: list) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        if not argv:
+            return usage("no command")
+        print(__doc__.strip())
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "commands":
+        return cmd_commands(rest)
+    if cmd == "log":
+        return cmd_log(rest)
+    if cmd == "tier":
+        return cmd_tier(rest)
+    if cmd == "checkout":
+        return cmd_checkout(rest)
+    return usage(f"unknown command {cmd!r}")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,455 @@
+#!/usr/bin/env node
+'use strict';
+const HELP = `ctlhq-icon-sheet: render SVG icon marks into a numbered review page with PNG size samples, and export a picked mark as app and site icon files.
+
+Usage:
+  ctlhq-icon-sheet review --marks DIR --out DIR [--palettes FILE] [--fonts LIST] [--name TEXT] [--chrome PATH]
+  ctlhq-icon-sheet export --mark FILE --palette ID --palettes FILE --out DIR [--chrome PATH]
+
+review   reads every *.svg in --marks and writes, under --out:
+           index.html  numbered cards to pick from
+           png/        each mark at 16, 24, 32, 48 and 64 px on a light (#ffffff) and a
+                       dark (#111418) tile, plus a 128 px sample on a transparent background
+           review.png  a full-page screenshot of index.html, 1200 px wide, for the agent to read
+         Without --palettes it is the concepts round: one card per mark ("Concept N"), in
+         neutral greys. With --palettes it is the palette and typeface round: per mark, one
+         card per palette ("Palette M"), then one card per typeface ("Typeface K") showing the
+         first mark in the first palette beside --name set in that typeface.
+         A card's number is the leading number of the mark's file name (3-orbit.svg is
+         Concept 3) when every mark has one, else its place in name order.
+export   writes, under --out: icon-16.png, icon-32.png, icon-64.png, icon-128.png,
+         icon-256.png, icon-512.png and icon-1024.png on a transparent background;
+         favicon.ico holding 16, 32 and 48 px; icon.svg with the palette written in;
+         AppIcon.icns through /usr/bin/iconutil (macOS; elsewhere a note line says it was
+         skipped).
+
+Options:
+  --marks DIR      folder of mark files (*.svg)
+  --mark FILE      the one mark to export
+  --out DIR        output folder, created when missing; files in it are overwritten
+  --palettes FILE  JSON list of {"id", "name", "accent", "ink", "paper"}; colours as #rgb
+                   or #rrggbb; ids use a-z, 0-9 and -
+  --palette ID     the palette to export with
+  --fonts LIST     comma-separated font families for the typeface cards (default:
+                   system-ui,Avenir Next,Futura,DIN Alternate,Seravek,Gill Sans); a card
+                   marks a family this machine lacks as "not installed"
+  --name TEXT      the product name in the typeface cards (default: Name)
+  --chrome PATH    the Chrome binary (default: $CTLHQ_CHROME, else
+                   /Applications/Google Chrome.app/Contents/MacOS/Google Chrome)
+
+Mark rules, checked before Chrome starts: the file holds one <svg> root with a viewBox,
+no <text> element (a name in the mark is unreadable at 16 px), and colours given as
+currentColor (the accent), var(--accent), var(--ink) or var(--paper), so a palette
+recolours it.
+
+Chrome runs headless through ctlhq-browser's library code, once per run, with its own
+temporary profile. Requires Node 22 or later; no packages.
+
+Exit codes: 0 done; 1 a check failed (a mark or palette breaks the rules, an unknown
+palette id, Chrome or iconutil failed, a PNG came back at the wrong size); 2 usage error
+(unknown subcommand or option, a missing flag, file or folder). Every error prints a
+"fix:" line.
+`;
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const { CDP, OwnedChrome, Failure, DEFAULT_CHROME } = require(path.join(__dirname, '..', '..', '..', 'bin', 'ctlhq-browser'));
+
+const REVIEW_SIZES = [64, 48, 32, 24, 16];
+const SAMPLE_SIZE = 128;
+const EXPORT_SIZES = [16, 32, 64, 128, 256, 512, 1024];
+const ICO_SIZES = [16, 32, 48];
+const ICONSET = [[16, '16x16'], [32, '16x16@2x'], [32, '32x32'], [64, '32x32@2x'], [128, '128x128'],
+  [256, '128x128@2x'], [256, '256x256'], [512, '256x256@2x'], [512, '512x512'], [1024, '512x512@2x']];
+const ICONUTIL = '/usr/bin/iconutil';
+const TILES = { light: '#ffffff', dark: '#111418' };
+const NEUTRAL = {
+  light: { accent: '#1f2937', ink: '#111827', paper: '#ffffff' },
+  dark: { accent: '#e5e7eb', ink: '#f3f4f6', paper: '#111418' },
+};
+const DEFAULT_FONTS = ['system-ui', 'Avenir Next', 'Futura', 'DIN Alternate', 'Seravek', 'Gill Sans'];
+const GENERIC_FONTS = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
+  'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', '-apple-system']);
+const PAGE_WIDTH = 1200;
+
+class Usage extends Error { constructor(msg, fix) { super(msg); this.fix = fix; } }
+class Check extends Error { constructor(msg, fix) { super(msg); this.fix = fix; } }
+
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function parseArgs(argv) {
+  const flags = { '--marks': 'marks', '--mark': 'mark', '--out': 'out', '--palettes': 'palettes',
+    '--palette': 'palette', '--fonts': 'fonts', '--name': 'name', '--chrome': 'chrome' };
+  const o = {};
+  const rest = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '-h' || a === '--help') return { help: true };
+    if (flags[a]) {
+      if (i + 1 >= argv.length) throw new Usage(`${a} needs a value`, `ctlhq-icon-sheet --help lists what ${a} takes`);
+      o[flags[a]] = argv[++i];
+    } else if (a.startsWith('-')) {
+      throw new Usage(`unknown option ${JSON.stringify(a)}`, 'ctlhq-icon-sheet --help lists every option');
+    } else rest.push(a);
+  }
+  if (rest.length !== 1 || !['review', 'export'].includes(rest[0])) {
+    throw new Usage(rest.length ? `unknown subcommand ${JSON.stringify(rest.join(' '))}` : 'no subcommand',
+      'start with review or export, for example: ctlhq-icon-sheet review --marks .local/design/marks --out .local/design/round-1');
+  }
+  o.cmd = rest[0];
+  const allowed = o.cmd === 'review' ? ['marks', 'out', 'palettes', 'fonts', 'name', 'chrome'] : ['mark', 'palette', 'palettes', 'out', 'chrome'];
+  const required = o.cmd === 'review' ? ['marks', 'out'] : ['mark', 'palette', 'palettes', 'out'];
+  const flag = (k) => Object.keys(flags).find((f) => flags[f] === k);
+  for (const k of Object.keys(o)) {
+    if (k !== 'cmd' && !allowed.includes(k)) throw new Usage(`${flag(k)} does not belong to ${o.cmd}`, `ctlhq-icon-sheet --help shows the ${o.cmd} line`);
+  }
+  for (const k of required) {
+    if (o[k] === undefined) throw new Usage(`${o.cmd} needs ${flag(k)}`, `ctlhq-icon-sheet --help shows the ${o.cmd} line`);
+  }
+  if (o.cmd === 'review' && !o.palettes && (o.fonts !== undefined || o.name !== undefined)) {
+    throw new Usage('--fonts and --name belong to the palette round', 'add --palettes FILE, or drop --fonts and --name for the concepts round');
+  }
+  const mustExist = o.cmd === 'review' ? [['marks', 'dir'], ['palettes', 'file']] : [['mark', 'file'], ['palettes', 'file']];
+  for (const [k, kind] of mustExist) {
+    if (o[k] === undefined) continue;
+    let st = null;
+    try { st = fs.statSync(o[k]); } catch {}
+    if (!st || (kind === 'dir' ? !st.isDirectory() : !st.isFile())) {
+      throw new Usage(`${flag(k)} ${o[k]}: no such ${kind === 'dir' ? 'folder' : 'file'}`, `pass the path of an existing ${kind === 'dir' ? 'folder of .svg marks' : 'file'}`);
+    }
+  }
+  if (o.fonts !== undefined) {
+    o.fonts = o.fonts.split(',').map((f) => f.trim()).filter(Boolean);
+    if (!o.fonts.length) throw new Usage('--fonts is empty', 'pass family names separated by commas, for example "Futura,Avenir Next"');
+  }
+  return o;
+}
+
+function loadMark(file) {
+  const id = path.basename(file, '.svg');
+  const text = fs.readFileSync(file, 'utf8');
+  const start = text.search(/<svg[\s>]/i);
+  const end = text.lastIndexOf('</svg>');
+  const where = `mark ${file}`;
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Check(`${where}: the file name may hold only letters, digits, - and _`, `rename it, for example to 1-${id.replace(/[^A-Za-z0-9_-]+/g, '-')}.svg`);
+  if (start < 0 || end < start) throw new Check(`${where}: no <svg> ... </svg> element`, 'save the mark as a plain SVG file');
+  const svg = text.slice(start, end + 6);
+  const open = svg.slice(0, svg.indexOf('>') + 1);
+  if (!/\bviewBox\s*=/.test(open)) throw new Check(`${where}: the <svg> element has no viewBox`, 'add viewBox="0 0 64 64" (or the drawing\'s own box) to the <svg> element');
+  if (/<text[\s>]/i.test(svg)) throw new Check(`${where}: holds a <text> element`, 'draw the mark with shapes only; the name goes in the typeface cards (--name)');
+  if (!/currentColor|var\(--(accent|ink|paper)\)/.test(svg)) throw new Check(`${where}: uses no palette colour`, 'fill or stroke with currentColor (the accent), var(--accent), var(--ink) or var(--paper)');
+  const t = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(svg);
+  return { id, file: path.resolve(file), svg, idea: t ? t[1].trim() : '' };
+}
+
+function loadMarks(dir) {
+  const files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.svg')).sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+  if (!files.length) throw new Check(`--marks ${dir}: no .svg file`, 'write 4 to 6 marks into the folder, one .svg file each');
+  const marks = files.map((f) => loadMark(path.join(dir, f)));
+  const leading = marks.map((m) => /^(\d+)[-_]/.exec(m.id));
+  const numbered = leading.every(Boolean);
+  marks.forEach((m, i) => { m.n = numbered ? Number(leading[i][1]) : i + 1; });
+  const seen = new Map();
+  for (const m of marks) {
+    if (seen.has(m.n)) throw new Check(`marks ${seen.get(m.n)} and ${m.id} share the number ${m.n}`, 'give each mark file its own leading number');
+    seen.set(m.n, m.id);
+  }
+  return marks;
+}
+
+function loadPalettes(file) {
+  let list;
+  try { list = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {
+    throw new Check(`--palettes ${file}: not JSON (${e.message})`, 'write a JSON list such as [{"id": "forest", "name": "Forest", "accent": "#23634e", "ink": "#111827", "paper": "#f7f8f8"}]');
+  }
+  const shape = 'each entry needs "id" (a-z, 0-9, -), "name", and "accent", "ink", "paper" as #rgb or #rrggbb';
+  if (!Array.isArray(list) || !list.length) throw new Check(`--palettes ${file}: not a non-empty JSON list`, shape);
+  const ids = new Set();
+  list.forEach((p, i) => {
+    const where = `--palettes ${file}: entry ${i + 1}`;
+    if (!p || typeof p !== 'object') throw new Check(`${where} is not an object`, shape);
+    if (typeof p.id !== 'string' || !/^[a-z0-9-]+$/.test(p.id)) throw new Check(`${where}: id ${JSON.stringify(p.id)}`, shape);
+    if (ids.has(p.id)) throw new Check(`${where}: id ${p.id} appears twice`, 'give each palette its own id');
+    ids.add(p.id);
+    if (typeof p.name !== 'string' || !p.name.trim()) throw new Check(`${where}: no name`, shape);
+    for (const k of ['accent', 'ink', 'paper']) {
+      if (typeof p[k] !== 'string' || !/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(p[k])) throw new Check(`${where}: ${k} ${JSON.stringify(p[k])}`, shape);
+    }
+  });
+  return list;
+}
+
+function pngSize(buf) {
+  if (buf.length < 24 || buf.toString('latin1', 1, 4) !== 'PNG') return null;
+  return [buf.readUInt32BE(16), buf.readUInt32BE(20)];
+}
+
+function writeFile(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, data);
+}
+
+// The renderer that owns Chrome now, and the exit code of a signal that stopped the run,
+// so main() reports the interruption instead of the closed DevTools connection it causes.
+let active = null;
+let interrupted = 0;
+// A hung Chrome must not outlive the run: after this many seconds ctlhq-icon-sheet stops Chrome and exits 1.
+const RUN_BUDGET_S = 600;
+
+class Renderer {
+  async start(chromePath) {
+    this.chrome = new OwnedChrome();
+    active = this;
+    for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+      process.on(sig, () => { interrupted = code; this.stop().finally(() => process.exit(code)); });
+    }
+    const ws = await this.chrome.start(chromePath, false, 20000);
+    this.cdp = await CDP.connect(ws, 10000);
+    const { targetId } = await this.cdp.send('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await this.cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    this.s = sessionId;
+    await this.cdp.send('Page.enable', {}, this.s);
+    await this.cdp.send('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } }, this.s);
+    this.frameId = (await this.cdp.send('Page.getFrameTree', {}, this.s)).frameTree.frame.id;
+  }
+
+  async mark(mark, colours, background, size) {
+    const html = `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;background:${background}}`
+      + `#m{width:${size}px;height:${size}px;color:${colours.accent};--accent:${colours.accent};--ink:${colours.ink};--paper:${colours.paper}}`
+      + `#m>svg{display:block;width:100%;height:100%}</style><div id="m">${mark.svg}</div>`;
+    await this.cdp.send('Emulation.setDeviceMetricsOverride', { width: size, height: size, deviceScaleFactor: 1, mobile: false }, this.s);
+    await this.cdp.send('Page.setDocumentContent', { frameId: this.frameId, html }, this.s);
+    const { data } = await this.cdp.send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 0, width: size, height: size, scale: 1 } }, this.s);
+    const buf = Buffer.from(data, 'base64');
+    const got = pngSize(buf);
+    if (!got || got[0] !== size || got[1] !== size) {
+      throw new Check(`Chrome returned ${got ? got.join('x') : 'no PNG'} for ${mark.id} at ${size} px`, 'rerun once; if it repeats, update Chrome or pass --chrome PATH');
+    }
+    return buf;
+  }
+
+  async page(file) {
+    const loaded = this.cdp.waitFor('Page.loadEventFired', this.s, 30000, `the load event of ${file}`);
+    await this.cdp.send('Emulation.setDeviceMetricsOverride', { width: PAGE_WIDTH, height: 800, deviceScaleFactor: 1, mobile: false }, this.s);
+    await this.cdp.send('Page.navigate', { url: 'file://' + file }, this.s);
+    await loaded;
+    await this.cdp.send('Runtime.evaluate', { expression: 'document.fonts.ready.then(() => true)', awaitPromise: true }, this.s);
+    const { cssContentSize } = await this.cdp.send('Page.getLayoutMetrics', {}, this.s);
+    const height = Math.ceil(cssContentSize.height);
+    await this.cdp.send('Emulation.setDeviceMetricsOverride', { width: PAGE_WIDTH, height, deviceScaleFactor: 1, mobile: false }, this.s);
+    const { data } = await this.cdp.send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 0, width: PAGE_WIDTH, height, scale: 1 } }, this.s);
+    return { buf: Buffer.from(data, 'base64'), height };
+  }
+
+  async stop() {
+    if (this.chrome) await this.chrome.stop(this.cdp);
+    if (this.cdp) this.cdp.close();
+  }
+}
+
+const sizeRow = (tile, srcs) => `<div class="row ${tile}"><span class="tile">${tile}</span>${REVIEW_SIZES.map((sz) =>
+  `<figure><img src="${srcs(sz)}" width="${sz}" height="${sz}" alt=""><figcaption>${sz}</figcaption></figure>`).join('')}</div>`;
+
+function fontCss(f) { return GENERIC_FONTS.has(f) ? f : `"${f.replace(/["\\]/g, '')}"`; }
+
+function reviewHtml(o, marks, palettes, outDir) {
+  const rel = (f) => esc(path.relative(outDir, f).split(path.sep).join('/'));
+  const sections = [];
+  if (!palettes) {
+    sections.push('<h2>Concepts</h2><p class="note">Each card is one idea, drawn in neutral greys. Reply with the concept number.</p>');
+    for (const m of marks) {
+      sections.push(`<article class="card" id="concept-${m.n}" style="--paper:${NEUTRAL.light.paper};--ink:${NEUTRAL.light.ink}">
+<header><h3>Concept ${m.n}</h3><span class="idea">${esc(m.idea || m.id)}</span><nav><a href="${rel(m.file)}">SVG</a><a href="png/${m.id}-${SAMPLE_SIZE}.png">PNG</a></nav></header>
+<div class="body"><img class="sample" src="png/${m.id}-${SAMPLE_SIZE}.png" width="${SAMPLE_SIZE}" height="${SAMPLE_SIZE}" alt="">
+<div class="rows">${sizeRow('light', (sz) => `png/${m.id}-light-${sz}.png`)}${sizeRow('dark', (sz) => `png/${m.id}-dark-${sz}.png`)}</div></div></article>`);
+    }
+  } else {
+    sections.push('<h2>Palettes</h2><p class="note">The same mark in each palette, on the palette\'s paper, and at small sizes on a light and a dark tile.</p>');
+    for (const m of marks) {
+      sections.push(`<h3 class="concept">Concept ${m.n}: ${esc(m.idea || m.id)}</h3>`);
+      palettes.forEach((p, i) => {
+        const base = `png/${m.id}-${p.id}`;
+        sections.push(`<article class="card" id="concept-${m.n}-palette-${i + 1}" style="--paper:${p.paper};--ink:${p.ink};--accent:${p.accent}">
+<header><h3>Palette ${i + 1}</h3><span class="idea">${esc(p.name)}</span><code>${p.accent} · ${p.ink} · ${p.paper}</code><nav><a href="${base}-${SAMPLE_SIZE}.png">PNG</a></nav></header>
+<div class="body"><img class="sample" src="${base}-${SAMPLE_SIZE}.png" width="${SAMPLE_SIZE}" height="${SAMPLE_SIZE}" alt="">
+<div class="rows">${sizeRow('light', (sz) => `${base}-light-${sz}.png`)}${sizeRow('dark', (sz) => `${base}-dark-${sz}.png`)}</div></div></article>`);
+      });
+    }
+    const m = marks[0];
+    const p = palettes[0];
+    sections.push(`<h2>Typefaces</h2><p class="note">Concept ${m.n} in palette 1 (${esc(p.name)}) beside the name. System fonts are for preview; check the licence before shipping one.</p><div class="grid">`);
+    o.fonts.forEach((f, i) => {
+      sections.push(`<article class="card type" id="typeface-${i + 1}" style="--paper:${p.paper};--ink:${p.ink}">
+<header><h3>Typeface ${i + 1}</h3><span class="idea">${esc(f)}</span><span class="missing" data-font="${esc(f)}"></span></header>
+<div class="lockup"><img src="png/${m.id}-${p.id}-${SAMPLE_SIZE}.png" width="64" height="64" alt=""><span style="font-family:${esc(fontCss(f))}">${esc(o.name)}</span></div></article>`);
+    });
+    sections.push('</div>');
+  }
+  const title = palettes ? 'Icon palettes and typefaces' : 'Icon concepts';
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title>
+<style>
+*{box-sizing:border-box}html{background:#eef1f4}body{margin:0;color:#111827;font:14px/1.4 system-ui,-apple-system,sans-serif}
+main{width:min(1120px,calc(100% - 32px));margin:28px auto 48px}h1{margin:0 0 4px;font-size:24px}h2{margin:28px 0 4px;font-size:18px}
+h3.concept{margin:22px 0 0;font-size:15px}.note{margin:0 0 12px;color:#667085}
+.card{margin-top:12px;padding:16px 20px;border:1px solid #d9dee5;border-radius:14px;background:var(--paper);color:var(--ink)}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}header h3{margin:0;font-size:16px}
+.idea{opacity:.75}code{font-size:12px;opacity:.7}nav{margin-left:auto;display:flex;gap:12px}nav a{color:inherit;font-size:12px;font-weight:600}
+.body{display:flex;align-items:center;gap:32px;margin-top:12px;flex-wrap:wrap}.sample{display:block}
+.rows{display:grid;gap:8px}.row{display:flex;align-items:end;gap:18px;padding:10px 14px;border-radius:10px}
+.row.light{background:${TILES.light};color:#475467}.row.dark{background:${TILES.dark};color:#98a2b3}
+.tile{width:36px;font-size:11px;align-self:center}figure{margin:0;display:grid;justify-items:center;gap:4px}figure img{display:block;image-rendering:auto}
+figcaption{font-size:11px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}
+.missing{color:#b42318;font-size:12px;font-weight:600}.lockup{display:flex;align-items:center;gap:16px;margin-top:10px;height:64px}
+.lockup span{font-size:36px;font-weight:650;letter-spacing:.02em;white-space:nowrap}
+@media(max-width:760px){.grid{grid-template-columns:1fr}.body{gap:16px}}
+</style></head><body><main>
+<h1>${title}</h1><p class="note">Made by ctlhq-icon-sheet from ${esc(path.resolve(o.marks))}. Pick by number.</p>
+${sections.join('\n')}
+</main>
+<script>
+const probe = document.createElement('canvas').getContext('2d');
+const width = (font) => { probe.font = '72px ' + font; return probe.measureText('mmmmmmmmmmlli WQ').width; };
+for (const el of document.querySelectorAll('.missing')) {
+  const f = el.dataset.font;
+  const generic = ${JSON.stringify([...GENERIC_FONTS])}.includes(f);
+  const quoted = '"' + f.replace(/["\\\\]/g, '') + '"';
+  if (!generic && width(quoted + ', monospace') === width('monospace') && width(quoted + ', serif') === width('serif')) el.textContent = 'not installed on this machine';
+}
+</script></body></html>
+`;
+}
+
+async function review(o) {
+  const marks = loadMarks(o.marks);
+  const palettes = o.palettes ? loadPalettes(o.palettes) : null;
+  if (palettes) {
+    o.fonts = o.fonts || DEFAULT_FONTS;
+    o.name = o.name === undefined ? 'Name' : o.name;
+  }
+  const out = path.resolve(o.out);
+  const r = new Renderer();
+  let pngs = 0;
+  const save = (rel, buf) => { writeFile(path.join(out, 'png', rel), buf); pngs++; };
+  try {
+    await r.start(o.chrome);
+    for (const m of marks) {
+      const runs = palettes
+        ? palettes.map((p) => ({ prefix: `${m.id}-${p.id}`, light: p, dark: p, sample: p }))
+        : [{ prefix: m.id, light: NEUTRAL.light, dark: NEUTRAL.dark, sample: NEUTRAL.light }];
+      for (const run of runs) {
+        save(`${run.prefix}-${SAMPLE_SIZE}.png`, await r.mark(m, run.sample, 'transparent', SAMPLE_SIZE));
+        for (const tile of ['light', 'dark']) {
+          for (const sz of REVIEW_SIZES) save(`${run.prefix}-${tile}-${sz}.png`, await r.mark(m, run[tile], TILES[tile], sz));
+        }
+      }
+    }
+    const index = path.join(out, 'index.html');
+    writeFile(index, reviewHtml(o, marks, palettes, out));
+    const shot = await r.page(index);
+    writeFile(path.join(out, 'review.png'), shot.buf);
+    const cards = palettes ? `${marks.length * palettes.length} palette cards, ${o.fonts.length} typeface cards` : `${marks.length} concept cards`;
+    console.log(`wrote ${index}: ${cards}`);
+    console.log(`wrote ${pngs} PNGs under ${path.join(out, 'png')}`);
+    console.log(`wrote ${path.join(out, 'review.png')}: PNG ${PAGE_WIDTH}x${shot.height}`);
+  } finally {
+    await r.stop();
+  }
+}
+
+function icoFile(entries) {
+  const head = Buffer.alloc(6 + 16 * entries.length);
+  head.writeUInt16LE(0, 0);
+  head.writeUInt16LE(1, 2);
+  head.writeUInt16LE(entries.length, 4);
+  let offset = head.length;
+  entries.forEach(({ size, png }, i) => {
+    const e = 6 + 16 * i;
+    head.writeUInt8(size >= 256 ? 0 : size, e);
+    head.writeUInt8(size >= 256 ? 0 : size, e + 1);
+    head.writeUInt16LE(1, e + 4);
+    head.writeUInt16LE(32, e + 6);
+    head.writeUInt32LE(png.length, e + 8);
+    head.writeUInt32LE(offset, e + 12);
+    offset += png.length;
+  });
+  return Buffer.concat([head, ...entries.map((e) => e.png)]);
+}
+
+async function exportIcon(o) {
+  const mark = loadMark(o.mark);
+  const palettes = loadPalettes(o.palettes);
+  const p = palettes.find((x) => x.id === o.palette);
+  if (!p) throw new Check(`no palette ${JSON.stringify(o.palette)} in ${o.palettes}`, `pass one of: ${palettes.map((x) => x.id).join(', ')}`);
+  const out = path.resolve(o.out);
+  const r = new Renderer();
+  const bySize = new Map();
+  try {
+    await r.start(o.chrome);
+    for (const sz of [...new Set([...EXPORT_SIZES, ...ICO_SIZES])]) bySize.set(sz, await r.mark(mark, p, 'transparent', sz));
+  } finally {
+    await r.stop();
+  }
+  for (const sz of EXPORT_SIZES) {
+    writeFile(path.join(out, `icon-${sz}.png`), bySize.get(sz));
+    console.log(`wrote ${path.join(out, `icon-${sz}.png`)}: PNG ${sz}x${sz}`);
+  }
+  writeFile(path.join(out, 'favicon.ico'), icoFile(ICO_SIZES.map((size) => ({ size, png: bySize.get(size) }))));
+  console.log(`wrote ${path.join(out, 'favicon.ico')}: ${ICO_SIZES.join(', ')} px`);
+  const style = `<style>svg{color:${p.accent};--accent:${p.accent};--ink:${p.ink};--paper:${p.paper}}</style>`;
+  const cut = mark.svg.indexOf('>') + 1;
+  writeFile(path.join(out, 'icon.svg'), mark.svg.slice(0, cut) + style + mark.svg.slice(cut) + '\n');
+  console.log(`wrote ${path.join(out, 'icon.svg')}: palette ${p.id}`);
+  if (!fs.existsSync(ICONUTIL)) {
+    console.log(`note: ${ICONUTIL} not found (macOS only); AppIcon.icns skipped`);
+    return;
+  }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'icon-sheet-'));
+  try {
+    const set = path.join(tmp, 'AppIcon.iconset');
+    fs.mkdirSync(set);
+    for (const [sz, name] of ICONSET) fs.writeFileSync(path.join(set, `icon_${name}.png`), bySize.get(sz));
+    try {
+      execFileSync(ICONUTIL, ['-c', 'icns', '-o', path.join(out, 'AppIcon.icns'), set], { stdio: ['ignore', 'ignore', 'pipe'] });
+    } catch (e) {
+      throw new Check(`iconutil failed: ${String(e.stderr || e.message).trim()}`, `run ${ICONUTIL} -c icns on an .iconset folder by hand to see the error`);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  console.log(`wrote ${path.join(out, 'AppIcon.icns')}`);
+}
+
+async function main() {
+  let o;
+  try { o = parseArgs(process.argv.slice(2)); } catch (e) {
+    if (!(e instanceof Usage)) throw e;
+    console.error(`ctlhq-icon-sheet: ${e.message}\nfix: ${e.fix}`);
+    return 2;
+  }
+  if (o.help) { process.stdout.write(HELP); return 0; }
+  o.chrome = o.chrome || process.env.CTLHQ_CHROME || DEFAULT_CHROME;
+  if (o.out && fs.existsSync(o.out) && !fs.statSync(o.out).isDirectory()) {
+    console.error(`ctlhq-icon-sheet: --out ${o.out} is a file, not a folder\nfix: pass a folder path; ctlhq-icon-sheet creates it when missing`);
+    return 2;
+  }
+  const watchdog = setTimeout(() => {
+    console.error(`ctlhq-icon-sheet: the run took longer than ${RUN_BUDGET_S} s; Chrome was stopped\nfix: check Chrome with: ctlhq-browser screenshot about:blank --out /tmp/x.png`);
+    (active ? active.stop() : Promise.resolve()).finally(() => process.exit(1));
+  }, RUN_BUDGET_S * 1000);
+  watchdog.unref();
+  try {
+    await (o.cmd === 'review' ? review(o) : exportIcon(o));
+    return 0;
+  } catch (e) {
+    if (interrupted) return interrupted;
+    if (e instanceof Check) console.error(`ctlhq-icon-sheet: ${e.message}\nfix: ${e.fix}`);
+    else if (e instanceof Failure) console.error(`ctlhq-icon-sheet: Chrome: ${e.message}\nfix: check Chrome with: ctlhq-browser screenshot about:blank --out /tmp/x.png; pass --chrome PATH or set CTLHQ_CHROME`);
+    else console.error(`ctlhq-icon-sheet: error: ${e.stack || e}\nfix: report this with the command line that caused it`);
+    return 1;
+  }
+}
+
+main().then((code) => process.exit(code));

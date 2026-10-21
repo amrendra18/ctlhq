@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+"""ctlhq-check: check the ctlhq repository's links, brand words, tools, skills, and principles.
+
+Usage:
+  ctlhq-check [--target DIR] [--no-tools]
+  ctlhq-check --skill <dir> [--target DIR]
+
+Default: --target the repo root (parent of bin/).
+
+Checks, across the target:
+  1. every relative Markdown link resolves
+  2. no leftover brand words (the upstream project's name, the author's handle, two old
+     skill names, this project's two old names, the old host's own tool, plugin, and
+     question-tool names, the port's source folder name, and the old host name, as BRAND
+     and HOST_WORD in this tool spell them) outside LICENSE, this tool, which names them
+     to find them, and the "## Credits" section of README.md (its heading up to the next
+     "## " heading; headings inside fenced code do not count). The host name is also
+     allowed in skills/ctlhq-mode/scripts/check-plan.mjs and
+     skills/ctlhq-mode/scripts/watch-pr/, which use the word as a paging variable
+  3. every executable in bin/ answers --help with exit 0
+  4. every bin/ name starts with "ctlhq-" (also with --no-tools); every bin/* --help
+     first line matches "<name>: "; every skill with bin/ has a "## Tool" (or
+     "## Tools") section; the ctlhq-mode Coding principles section names one entry per
+     skills/principle-* folder, in whole groups (bin/ctlhq-principles check)
+  5. README.md has the headings "## Install", "## What it changes on your machine", and
+     "## Uninstall", each as a whole line outside fenced code and each followed by at least
+     one non-blank line before the next "## " heading; each missing or empty one is named
+
+--skill <dir> validates one skill and runs nothing else: the frontmatter has name and
+description, name equals the folder name, every relative link in its Markdown files
+resolves, a "## Tool" section exists when bin/ exists, and every file under bin/ is
+executable and answers --help with exit 0 and a first line "<name>: ". <dir> is a skill
+folder, or a name under <target>/skills/.
+
+--no-tools skips check 3 and the help lines of check 4.
+
+Each failure is one line; the last line is the summary with every count.
+Exit 0 when every failure count is 0, 1 otherwise, 2 on a usage error.
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+BRAND_ALLOWED = {"LICENSE", "bin/ctlhq-check"}
+# The words are split so that a plain search of the repository for them does not match this file.
+BRAND = re.compile(r"pot" r"eto|\bps" r"tack|\bben" r"ny\b|comment[- ]sic" r"ko"
+                   r"|missi" r"on-control|fna" r"tic"
+                   r"|\bdes" r"lop|cur" r"sor-team-kit|\bcontrol-(?:c" r"li|u" r"i)\b|general" r"Purpose"
+                   r"|\bAsk" r"Question\b|plugi" r"ns-main",
+                   re.IGNORECASE)
+HOST_WORD = "cur" + "sor"
+HOST = re.compile(rf"\b{HOST_WORD}\b", re.IGNORECASE)
+# Path prefixes where the host name may stay: both use it as a paging variable.
+HOST_ALLOWED = ("skills/ctlhq-mode/scripts/check-plan.mjs", "skills/ctlhq-mode/scripts/watch-pr/")
+SKIP_DIRS = {".git", ".local", "node_modules"}
+MODE_SKILL = "skills/ctlhq-mode/SKILL.md"
+# A stranger needs these to install, see what changes, and undo it.
+README_SECTIONS = ("## Install", "## What it changes on your machine", "## Uninstall")
+CREDITS = "## Credits"
+
+LINK = re.compile(r"\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+TOOL_HEADING = re.compile(r"^##\s+Tools?\b")
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+
+
+def walk(root: Path, skip: set[str]) -> list[Path]:
+    """Files under root. When root is a Git work tree, only tracked and unignored files, so ignored
+    local files (such as a PLAN.md linked in from a private folder) are never checked."""
+    listed = None
+    if (root / ".git").exists():
+        listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                                capture_output=True)
+    if listed is not None and listed.returncode == 0:
+        names = [n for n in listed.stdout.decode("utf-8", "surrogateescape").split("\0") if n]
+        files = (root / n for n in names if not set(Path(n).parts) & skip)
+        return sorted(f for f in files if f.exists())
+    out: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for f in filenames:
+            out.append(Path(dirpath) / f)
+    return sorted(out)
+
+
+def frontmatter(text: str) -> dict:
+    """The YAML-ish front matter as {key: value}; folded values are joined with spaces."""
+    lines = text.split("\n")
+    fm: dict = {}
+    if not lines or lines[0].strip() != "---":
+        return fm
+    key = None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if key is not None and line[:1] in (" ", "\t") and line.strip():
+            fm[key] = (fm[key] + " " + line.strip()).strip()
+            continue
+        m = KEY_RE.match(line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2).strip()
+        fm[key] = "" if val in (">", ">-", "|", "|-") else val.strip("\"'")
+    return fm
+
+
+def broken_links(md_file: Path, label: str) -> list[str]:
+    out: list[str] = []
+    text = md_file.read_text(encoding="utf-8", errors="replace")
+    for n, line in enumerate(text.split("\n"), 1):
+        for m in LINK.finditer(line):
+            href = m.group(1)
+            if href.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            path_part = href.split("#", 1)[0]
+            if path_part and not (md_file.parent / path_part).exists():
+                out.append(f"broken link: {label}:{n}  {href}")
+    return out
+
+
+def level2_sections(lines: list[str]) -> dict[str, range]:
+    """Each "## " heading outside fenced code -> its 1-based lines, heading included, up to the next one."""
+    starts, fence = [], ""
+    for i, line in enumerate(lines):
+        m = FENCE.match(line)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not line.strip()[len(m.group(1)):]:
+                fence = ""
+        elif m:
+            fence = m.group(1)
+        elif line.startswith("## "):
+            starts.append(i)
+    out: dict[str, range] = {}
+    for start, end in zip(starts, starts[1:] + [len(lines)]):
+        out.setdefault(lines[start].rstrip(), range(start + 1, end + 1))
+    return out
+
+
+def help_first_line(tool: Path) -> tuple[int, str, str]:
+    """(exit code, first stdout line, stderr) of `tool --help`; exit -1 when it cannot run."""
+    try:
+        r = subprocess.run([str(tool), "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return -1, "", str(e)
+    first = (r.stdout or "").split("\n")[0]
+    return r.returncode, first, (r.stderr or "").strip()
+
+
+def skill_problems(skill_dir: Path, target: Path, run_tools: bool = True) -> list[str]:
+    """Every problem of one skill folder, one line each (the --skill check)."""
+    name = skill_dir.name
+    label = skill_dir.relative_to(target).as_posix() if target in skill_dir.parents else str(skill_dir)
+    problems: list[str] = []
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.is_file():
+        return [f"missing: {label}/SKILL.md"]
+    fm = frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
+    if not fm.get("name"):
+        problems.append(f"frontmatter without name: {label}/SKILL.md")
+    elif fm["name"] != name:
+        problems.append(f"frontmatter name {fm['name']!r} differs from the folder {name!r}: {label}/SKILL.md")
+    if not fm.get("description"):
+        problems.append(f"frontmatter without description: {label}/SKILL.md")
+    for md in sorted(p for p in walk(skill_dir, SKIP_DIRS) if p.suffix.lower() == ".md"):
+        problems += broken_links(md, f"{label}/{md.relative_to(skill_dir).as_posix()}")
+    bin_dir = skill_dir / "bin"
+    if bin_dir.is_dir():
+        text = skill_md.read_text(encoding="utf-8", errors="replace")
+        if not any(TOOL_HEADING.match(l) for l in text.split("\n")):
+            problems.append(f"no '## Tool' section although bin/ exists: {label}/SKILL.md")
+        for tool in sorted(bin_dir.iterdir()):
+            if tool.name.startswith(".") or not tool.is_file():
+                continue
+            if not os.access(tool, os.X_OK):
+                problems.append(f"not executable: {label}/bin/{tool.name}")
+                continue
+            if not run_tools:
+                continue
+            rc, first, err = help_first_line(tool)
+            if rc != 0:
+                problems.append(f"tool --help failed ({rc}): {label}/bin/{tool.name}  {err[:120]}")
+            elif not first.startswith(f"{tool.name}: "):
+                problems.append(f"help first line is not '{tool.name}: ...': {label}/bin/{tool.name}  {first[:100]!r}")
+    return problems
+
+
+def check_skill(arg: str, target: Path) -> int:
+    skill_dir = Path(arg).expanduser()
+    if not skill_dir.is_dir() and (target / "skills" / arg).is_dir():
+        skill_dir = target / "skills" / arg
+    if not skill_dir.is_dir():
+        print(f"not a skill folder: {arg}", file=sys.stderr)
+        return 2
+    skill_dir = skill_dir.resolve()
+    problems = skill_problems(skill_dir, target)
+    for p in problems:
+        print(p)
+    tools = sorted(t.name for t in (skill_dir / "bin").iterdir() if t.is_file()) if (skill_dir / "bin").is_dir() else []
+    tool_note = f", tools {', '.join(tools)}" if tools else ", no bin/"
+    if problems:
+        print(f"skill {skill_dir.name}: {len(problems)} problem(s){tool_note}")
+        return 1
+    print(f"ok: skill {skill_dir.name}{tool_note}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    here = Path(__file__).resolve().parent
+    target = here.parent
+    run_tools = True
+    skill_arg: str | None = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a in ("--target", "--skill"):
+            i += 1
+            if i >= len(argv):
+                print(f"{a} needs a value", file=sys.stderr)
+                return 2
+            if a == "--target":
+                target = Path(argv[i]).resolve()
+            else:
+                skill_arg = argv[i]
+        elif a == "--no-tools":
+            run_tools = False
+        else:
+            print(f"unknown option {a}", file=sys.stderr)
+            return 2
+        i += 1
+    if skill_arg is not None:
+        return check_skill(skill_arg, target)
+
+    problems: list[str] = []
+
+    # 1: links in target markdown
+    broken = 0
+    t_files = [p for p in walk(target, SKIP_DIRS) if p.is_file()]
+    for tp in t_files:
+        if tp.suffix.lower() != ".md":
+            continue
+        found = broken_links(tp, tp.relative_to(target).as_posix())
+        broken += len(found)
+        problems += found
+
+    # 2: brand leftovers
+    brand = 0
+    for tp in t_files:
+        rel_t = tp.relative_to(target).as_posix()
+        if rel_t in BRAND_ALLOWED or tp.suffix.lower() in {".png", ".jpg", ".jpeg", ".lock"}:
+            continue
+        try:
+            text = tp.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        host_ok = rel_t.startswith(HOST_ALLOWED)
+        lines = text.split("\n")
+        credits = level2_sections(lines).get(CREDITS, range(0)) if rel_t == "README.md" else range(0)
+        for n, line in enumerate(lines, 1):
+            if n in credits:
+                continue
+            if BRAND.search(line) or (not host_ok and HOST.search(line)):
+                brand += 1
+                problems.append(f"brand leftover: {rel_t}:{n}  {line.strip()[:100]}")
+
+    # 3: tools answer --help; 4a: the first line is "<name>: "
+    tools_ok = tools_total = help_lines_ok = 0
+    bin_dir = target / "bin"
+    if run_tools and bin_dir.is_dir():
+        for tool in sorted(bin_dir.iterdir()):
+            if tool.name.startswith(".") or not tool.is_file():
+                continue
+            tools_total += 1
+            rc, first, err = help_first_line(tool)
+            if rc != 0:
+                problems.append(f"tool --help failed ({rc}): bin/{tool.name}  {err[:120]}")
+                continue
+            tools_ok += 1
+            if first.startswith(f"{tool.name}: "):
+                help_lines_ok += 1
+            else:
+                problems.append(f"help first line is not '{tool.name}: ...': bin/{tool.name}  {first[:100]!r}")
+
+    # 4d: every bin/ name carries the ctlhq- prefix, so tools on PATH cannot collide with other tools
+    off_prefix = 0
+    if bin_dir.is_dir():
+        for entry in sorted(bin_dir.iterdir()):
+            if not entry.name.startswith((".", "ctlhq-")):
+                off_prefix += 1
+                problems.append(f"bin name does not start with ctlhq-: bin/{entry.name}")
+
+    # 4b: every skill with bin/ has a ## Tool section
+    tool_section_missing = 0
+    skills_root = target / "skills"
+    if skills_root.is_dir():
+        for d in sorted(skills_root.iterdir()):
+            if not d.is_dir() or d.name.startswith(".") or not (d / "SKILL.md").is_file():
+                continue
+            if (d / "bin").is_dir():
+                text = (d / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+                if not any(TOOL_HEADING.match(l) for l in text.split("\n")):
+                    tool_section_missing += 1
+                    problems.append(f"no '## Tool' section although bin/ exists: skills/{d.name}/SKILL.md")
+
+    # 4c: ctlhq-mode principles index == skills/principle-* folders
+    principle_problems = 0
+    principles_tool = bin_dir / "ctlhq-principles"
+    if principles_tool.is_file():
+        r = subprocess.run([str(principles_tool), "check", str(target / MODE_SKILL)], capture_output=True, text=True)
+        if r.returncode != 0:
+            lines = [l for l in (r.stdout + r.stderr).split("\n") if l.strip()]
+            if lines and lines[-1].startswith(f"{len(lines) - 1} difference"):
+                lines = lines[:-1]
+            principle_problems = max(1, len(lines))
+            problems += [f"principles: {l}" for l in lines] or ["principles: ctlhq-principles check failed"]
+    else:
+        principle_problems = 1
+        problems.append("principles: bin/ctlhq-principles not found")
+
+    # 5: README sections
+    readme = target / "README.md"
+    readme_lines = readme.read_text(encoding="utf-8").split("\n") if readme.is_file() else []
+    sections = level2_sections(readme_lines)
+    readme_missing = [h for h in README_SECTIONS if h not in sections]
+    readme_empty = [h for h in README_SECTIONS if h in sections
+                    and not any(readme_lines[n - 1].strip() for n in sections[h][1:])]
+    problems += [f"README section missing: {h}" for h in readme_missing]
+    problems += [f"README section empty: {h}" for h in readme_empty]
+
+    for line in problems:
+        print(line)
+    print(
+        f"broken links {broken} | brand leftovers {brand} | "
+        f"tools {tools_ok}/{tools_total} help ok | help lines {help_lines_ok}/{tools_total} | bin names off prefix {off_prefix} | "
+        f"tool sections missing {tool_section_missing} | "
+        f"readme sections missing {len(readme_missing)} | readme sections empty {len(readme_empty)} | principles {principle_problems}"
+    )
+    failures = (broken + brand + (tools_total - tools_ok) + (tools_ok - help_lines_ok) + off_prefix
+                + tool_section_missing + len(readme_missing) + len(readme_empty) + principle_problems)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

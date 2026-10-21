@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""ctlhq-test: run every tests/*/run.sh and print one numbered line per script with its exit code.
+
+Usage:
+  ctlhq-test [--only NAME ...] [--timeout SECONDS] [--root DIR] [--json]
+
+Each script runs by itself with bash, its stdin closed, from the repository root. The tool
+reads each script's exit code from the process itself, never through a pipe, so a failure
+cannot hide behind `tail` or `grep`. Rule encoded (AGENTS.md): "gate exit line read
+directly (never through `tail` or `grep`)".
+
+After the scripts comes one more row, bun-tests: `bun test` in skills/ctlhq-mode/scripts,
+which runs every *.test.ts there, then `bun run typecheck`, the TypeScript type check. A failed
+test or a type error makes the row exit non-zero. Before them, when node_modules/ is missing
+there, the row runs `bun install --frozen-lockfile`, which downloads the locked packages into
+that folder. Without bun on PATH the row prints "skipped: bun not installed" and does not fail.
+The row exists only when that folder holds a *.test.ts file.
+
+Output, one line per row in order, then one summary line:
+  N. <name>  exit <code>  <seconds> s  <last output line>
+  N. bun-tests  skipped: bun not installed
+  scripts 18 | exit 0: 17 | non-zero: 0 | skipped: 1 | seconds 41.2
+A row that exits non-zero also prints its last 15 output lines, indented. A row that
+runs past --timeout (default 600 seconds) is stopped and shows "exit timeout"; it counts
+as non-zero.
+
+--only NAME     run only tests/NAME/run.sh, or the bun-tests row (repeatable)
+--timeout S     seconds per script before it is stopped
+--root DIR      the folder that holds tests/ (default: the parent of this tool's bin/)
+--json          print a JSON array of {n, name, exit, seconds, last_line} instead; a skipped
+                row has exit "skipped"
+
+Paid runs never happen here: the scripts under tests/ start no model session and cost $0.
+
+Exit 0 when every row exits 0 or is skipped, 1 when any row exits non-zero, times out, or no
+script is found, 2 on a usage error or an unknown --only name.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+TAIL_LINES = 15
+BUN_ROW = "bun-tests"
+BUN_DIR = Path("skills/ctlhq-mode/scripts")
+BUN_CMD = "[ -d node_modules ] || bun install --frozen-lockfile || exit; bun test && bun run typecheck"
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-test: {msg}", file=sys.stderr)
+    print("usage: ctlhq-test [--only NAME ...] [--timeout SECONDS] [--root DIR] [--json]", file=sys.stderr)
+    return 2
+
+
+def run_one(name: str, argv: list, cwd: Path, timeout: float) -> dict:
+    start = time.monotonic()
+    proc = subprocess.Popen(
+        argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+    )
+    try:
+        raw, _ = proc.communicate(timeout=timeout)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # the whole group, so a child holding the pipe ends too
+        except OSError:
+            pass
+        raw, _ = proc.communicate()
+        code = "timeout"
+    out = (raw or b"").decode("utf-8", errors="replace")
+    lines = [l.rstrip() for l in out.split("\n") if l.strip()]
+    return {
+        "name": name,
+        "exit": code,
+        "seconds": round(time.monotonic() - start, 1),
+        "last_line": lines[-1] if lines else "",
+        "tail": lines[-TAIL_LINES:],
+    }
+
+
+def main(argv: list) -> int:
+    root = ROOT
+    only: list = []
+    timeout = 600.0
+    as_json = False
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a in ("--only", "--timeout", "--root"):
+            if i + 1 >= len(argv):
+                return usage(f"{a} needs a value")
+            v = argv[i + 1]
+            if a == "--only":
+                only.append(v.strip("/").split("/")[-1])
+            elif a == "--timeout":
+                try:
+                    timeout = float(v)
+                except ValueError:
+                    return usage(f"--timeout needs a number of seconds, got {v!r}")
+                if timeout <= 0:
+                    return usage("--timeout needs a number above 0")
+            else:
+                root = Path(v).expanduser().resolve()
+            i += 2
+            continue
+        if a == "--json":
+            as_json = True
+            i += 1
+            continue
+        return usage(f"unknown argument {a!r}")
+    tests = root / "tests"
+    scripts = sorted(p for p in tests.glob("*/run.sh") if p.is_file()) if tests.is_dir() else []
+    # (name, argv, cwd) per row; argv None means skipped
+    rows = [(p.parent.name, ["bash", str(p)], root) for p in scripts]
+    bun_dir = root / BUN_DIR
+    if any("node_modules" not in t.parts for t in bun_dir.rglob("*.test.ts")):
+        rows.append((BUN_ROW, ["bash", "-c", BUN_CMD] if shutil.which("bun") else None, bun_dir))
+    if only:
+        known = {name for name, _, _ in rows}
+        unknown = [n for n in only if n not in known]
+        if unknown:
+            return usage(f"no tests/<name>/run.sh for: {', '.join(unknown)}")
+        rows = [r for r in rows if r[0] in only]
+    if not rows:
+        print(f"ctlhq-test: no tests/*/run.sh under {root}", file=sys.stderr)
+        return 1
+    results = []
+    width = max(len(name) for name, _, _ in rows)
+    for n, (name, argv, cwd) in enumerate(rows, 1):
+        if argv is None:
+            res = {"name": name, "exit": "skipped", "seconds": 0.0, "last_line": "skipped: bun not installed", "tail": []}
+        else:
+            res = run_one(name, argv, cwd, timeout)
+        res["n"] = n
+        results.append(res)
+        if not as_json:
+            if res["exit"] == "skipped":
+                print(f"{n}. {name:<{width}}  {res['last_line']}", flush=True)
+                continue
+            print(f"{n}. {name:<{width}}  exit {res['exit']}  {res['seconds']} s  {res['last_line'][:120]}", flush=True)
+            if res["exit"] != 0:
+                for line in res["tail"]:
+                    print(f"     {line[:200]}")
+    skipped = sum(1 for r in results if r["exit"] == "skipped")
+    bad = sum(1 for r in results if r["exit"] not in (0, "skipped"))
+    total = round(sum(r["seconds"] for r in results), 1)
+    if as_json:
+        print(json.dumps([{k: r[k] for k in ("n", "name", "exit", "seconds", "last_line")} for r in results], indent=2))
+    else:
+        print(f"scripts {len(results)} | exit 0: {len(results) - bad - skipped} | non-zero: {bad} | skipped: {skipped} | seconds {total}")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

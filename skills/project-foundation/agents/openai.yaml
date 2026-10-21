@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Foundation"
+  short_description: "Create user-first, implementation-ready foundations"
+  default_prompt: "Use $project-foundation to ground this project in its user journey and actual runtime, then create concise, implementation-ready foundation documents."

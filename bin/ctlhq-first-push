@@ -1,0 +1,1173 @@
+#!/usr/bin/env python3
+"""ctlhq-first-push: check a repository's history for personal data, a README, a LICENSE, and the push owner.
+
+Usage:
+  ctlhq-first-push [--new-only] [--json] [--root DIR] [--remote NAME]
+  ctlhq-first-push hook install [--root DIR]
+  ctlhq-first-push hook status [--root DIR]
+
+Settings: ~/.ctlhq/first-push.toml (HOME is honoured).
+  github_owner = "<your GitHub account>"   the only GitHub account a push may go to (OWNER
+                                           below), matched in any letter case; a "#"
+                                           comment may follow the value. Read only from
+                                           ~/.ctlhq/first-push.toml, never from
+                                           FIRST_PUSH_CONFIG, so all three push tools agree.
+                                           ctlhq-push and ctlhq-preflight read the same
+                                           line. Without it, a GitHub push target is a
+                                           push.owner-not-configured finding.
+  public_terms = ["term", ...]             terms that are not treated as private.
+                                           FIRST_PUSH_CONFIG names another file to read
+                                           this line from.
+
+What it checks, in order:
+  1. Policy. The private-values list (.local/first-commit/private-values.txt) must exist,
+     hold at least one value, be ignored by .gitignore, and not be tracked. A missing list
+     is a finding.
+  2. Push target. A GitHub push address of origin (or --remote NAME) must be
+     github.com/OWNER/... in any address form; another owner is a finding, and so is any
+     GitHub address while github_owner is not configured. A non-GitHub address (another
+     host, a local path, file://) or no such remote is not checked, and the report says so;
+     the other checks still run and can still block.
+  3. Every commit in range, oldest first: each added or changed text file, the message,
+     and the author and committer name and email, with first-commit's personal-data rules
+     (the same rules as first-commit's privacy check): configured private values, unapproved
+     email addresses, home folder paths, private keys and token shapes, forbidden paths.
+     Allowed: emails in public_emails of .repo-policy.json and the contributor record;
+     GitHub no-reply addresses; example and reserved domains; content-matched, count-bound
+     exceptions; public_github_owner_urls; immutable vendor files. gitleaks also scans the
+     same range, taken from ~/.ctlhq/bin/gitleaks, else from the first absolute PATH
+     folder that holds it; without it only the built-in token shapes run, and the report
+     says so. A gitleaks inside the checked repository (such as
+     .local/bin/gitleaks) is never run, because a repository could ship a program there.
+     ~/.ctlhq/bin sits beside the settings file, outside every repository, and a pre-push
+     hook started by a git app may not get your shell's PATH.
+     Identity name and email are checked separately: an email in the allowed list (ignoring
+     case) is not a finding, and neither is a name equal to the account part of an allowed
+     GitHub no-reply email. A no-reply email outside the list allows no name.
+  4. LICENSE, LICENSE.md, LICENSE.txt, or COPYING at the top level of every commit in range,
+     the root commit included.
+  5. A README at the top level of the tip (HEAD), not empty.
+
+Range: by default the whole history (HEAD, all branches, all tags). --new-only checks only
+commits not reachable from any remote-tracking ref; with no remote, the whole history.
+
+Output: one numbered line per finding, "<n>. <commit> <where> <rule>", where <where> is
+"<file>:<line>", "message:<line>", "identity:author", "identity:committer", or a policy
+item. A finding seen again in later commits shows "(+N more commits)". Right under each
+finding, a "fix:" line says why it matters and the exact action, with the file, line,
+commit, or command filled in. Then "ready" or "not ready", then one "next:" line with the
+next command (ready: "ctlhq-first-push hook install" while the hook is missing, then adding a
+GitHub remote, then the push). No output ever holds a private value, an email address,
+or the push address; a file path that holds a private value is shown as "<path redacted>".
+--json prints one object: ready, mode, commits_checked, files_checked, gitleaks,
+push_target, findings (each with a why and a fix field), next.
+
+hook install adds a pre-push hook. A hook is ctlhq's own only when its
+second line is the marker "# first-push hook v1", alone or followed by a colon.
+Any other pre-push hook (for example the pre-commit framework's, set up by first-commit)
+is the user's: it is kept as pre-push.before-first-push and runs first with the same
+arguments and input; ctlhq-first-push runs after it.
+A ctlhq hook is current while the tool path it records exists and can run, even when its
+text differs (for example a hook written by another checkout). It is stale when that path is
+gone or cannot run (for example an old .../bin/first-push), or when the hook file itself is
+not executable. hook install moves a stale hook to pre-push.stale.<n> (the first free n),
+prints that name, and writes a new hook; pre-push.before-first-push stays as it is. A
+symbolic link at pre-push is never written through: unless it leads to a current ctlhq
+hook, hook install changes nothing and exits 3. hook status prints
+"installed", "stale: the hook <why>; ...", or "missing" (also when only the user's own
+hook is there). For such a link, hook status and the next: line say to replace the link
+with a copy of its target (or remove it) before hook install.
+
+Rule encoded (AGENTS.md): "Keep blocked operations, working local actions, and missing
+evidence separate in totals."
+
+Exit 0 ready (hook status: installed), 1 findings (hook status: stale or missing), 2 usage error,
+3 environment problem, so there is no verdict (not a git repository, no commits, an
+unreadable or malformed policy or settings file, git or gitleaks failure, unsafe hook
+folder). Exit 3 prints three lines on stderr: "ctlhq-first-push: <what is wrong>", "why: <why
+there is no verdict>", "fix: <the action or command>". When the fix commits or changes a
+hook, the third line starts "fix (operator decides):": the operator's yes comes first, so
+an agent proposes it and does not run it. Paths under your home folder are
+shown with ~, and no exit-3 line holds a private value or the content of a policy file.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import unicodedata
+from collections import Counter
+from pathlib import Path
+
+OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+GITLEAKS_FOLDER = Path(".ctlhq") / "bin"
+PRIVATE_VALUES_FILE = ".local/first-commit/private-values.txt"
+CONTRIBUTOR_PATH = ".local/first-commit/contributor.json"
+LICENSE_NAMES = ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING")
+README = re.compile(r"(?i)readme(\.[^/]+)?")
+HOOK_MARKER = "# first-push hook v1"
+PREVIOUS_HOOK = "pre-push.before-first-push"
+GITLEAKS_EXIT = 10
+GITLEAKS_TIMEOUT = 300
+
+# The rules below copy first-commit's privacy check (its EMAIL pattern and PATTERNS list).
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+PATTERNS = (
+    ("privacy.private-key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----")),
+    ("privacy.github-token", re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")),
+    ("privacy.aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("privacy.ssh-fingerprint", re.compile(r"SHA256:[A-Za-z0-9+/]{20,}={0,2}")),
+    ("privacy.user-home-path", re.compile(r"(?:/Users|/home)/[A-Za-z0-9._-]+(?:/|\s|$)")),
+)
+EXAMPLE_DOMAINS = {"example.com", "example.net", "example.org"}
+RESERVED_TEST_SUFFIXES = (".invalid", ".test")
+PROTOCOL_DOMAINS = {"openssh.com", "libssh.org"}
+GITHUB_NOREPLY = re.compile(r"(?i)(?:[A-Za-z0-9._%+-]+@users\.noreply\.github\.com|noreply@github\.com)")
+NOREPLY_ACCOUNT = re.compile(r"(?:[0-9]+\+)?([a-z0-9._%-]+)@users\.noreply\.github\.com")
+GITHUB_OWNER_PREFIX = re.compile(r"(?:https?://|ssh://git@|git@)github\.com[/:]$")
+URL_FORMS = (
+    re.compile(r"(?i)^(?:https?|git|ssh|git\+ssh)://(?:[^@/]+@)?(?P<host>[^/:]+)(?::\d*)?/+(?P<owner>[^/]+)/[^/]+"),
+    re.compile(r"(?i)^(?:[^@/]+@)?(?P<host>[^/:]+):/*(?P<owner>[^/]+)/[^/]+"),
+)
+
+
+class EnvError(Exception):
+    """An environment problem (exit 3): what is wrong, why there is no verdict, and the fix."""
+
+    def __init__(self, what: str, why: str, fix: str, operator: bool = False) -> None:
+        super().__init__(what)
+        self.what, self.why, self.fix = what, why, fix
+        # operator: the fix changes the repository (a commit, a hook), so the operator decides.
+        self.label = "fix (operator decides)" if operator else "fix"
+
+
+def shown(path) -> str:
+    """A path for messages, with the home folder written as ~."""
+    text, home = str(path), str(Path.home())
+    if home not in ("", "/") and (text == home or text.startswith(home + os.sep)):
+        return "~" + text[len(home):]
+    return text
+
+
+GIT_FIX = "Run `git status` in the repository to see what git reports, fix that, then run ctlhq-first-push again."
+
+
+class UsageError(Exception):
+    pass
+
+
+def git(root: Path, *args: str, input_bytes: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "-c", "log.showSignature=false", "-c", "core.quotePath=false", *args],
+            input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+    except OSError as error:
+        raise EnvError(f"git cannot be run ({error.strerror or error})",
+                       "ctlhq-first-push reads the history with git.",
+                       "Install git (on macOS: xcode-select --install), then run ctlhq-first-push again.") from error
+    if check and proc.returncode != 0:
+        raise EnvError(f"git {args[0]} failed (exit {proc.returncode})",
+                       "ctlhq-first-push cannot give a verdict on history it could not read.", GIT_FIX)
+    return proc
+
+
+def git_text(root: Path, *args: str) -> str:
+    return git(root, *args).stdout.decode("utf-8", "replace").strip()
+
+
+# ---------------------------------------------------------------- policy
+
+
+class Policy:
+    def __init__(self) -> None:
+        self.allowed_emails: set = set()
+        self.private_values: tuple = ()
+        self.literal_exceptions: list = []  # (path, sha256)
+        self.detector_exceptions: list = []  # (path, rule, sha256)
+        self.forbidden_paths: list = []  # (match, value)
+        self.vendor_hashes: dict = {}
+        self.public_github_owner_urls = False
+        self.findings: list = []  # (file, rule) policy-level findings
+
+
+POLICY_WHY = ("ctlhq-first-push reads the allowed emails, the approved exceptions, and the forbidden paths "
+              "from this file, so it cannot check history against the right rules.")
+
+
+def read_json(path: Path, rel: str) -> dict:
+    try:
+        data = json.loads(path.read_bytes().decode("utf-8"))
+    except OSError as error:
+        raise EnvError(f"policy file {rel} cannot be read ({error.strerror or error})", POLICY_WHY,
+                       f"Check its permission with `ls -l {rel}`, make it readable, then run ctlhq-first-push again.") from error
+    except UnicodeDecodeError as error:
+        raise EnvError(f"policy file {rel} is not UTF-8 text", POLICY_WHY,
+                       f"Save {rel} as UTF-8, then run ctlhq-first-push again.") from error
+    except json.JSONDecodeError as error:
+        raise EnvError(f"policy file {rel} is not valid JSON (line {error.lineno}, column {error.colno}: {error.msg})",
+                       POLICY_WHY,
+                       f"Fix the JSON at line {error.lineno} of {rel} (`python3 -m json.tool {rel}` shows the error), "
+                       "then run ctlhq-first-push again.") from error
+    if not isinstance(data, dict):
+        raise EnvError(f"policy file {rel} is not a JSON object", POLICY_WHY,
+                       f"Make the top level of {rel} a JSON object, such as {{\"schema_version\": 1}}, "
+                       "then run ctlhq-first-push again.")
+    return data
+
+
+def entries(value, fields: tuple, label: str, rel: str) -> list:
+    shape = "[{" + ", ".join(f'"{f}": "<{f}>"' for f in fields) + "}]"
+    fix = f"Write {label} in {rel} as a JSON list of objects, each with text fields {', '.join(fields)}: {shape}."
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise EnvError(f"policy field {label} in {rel} must be a list", POLICY_WHY, fix)
+    out = []
+    for n, item in enumerate(value, 1):
+        if not isinstance(item, dict) or any(not isinstance(item.get(f), str) for f in fields):
+            raise EnvError(f"policy field {label} in {rel} has an invalid entry (entry {n})", POLICY_WHY, fix)
+        out.append(tuple(item[f] for f in fields))
+    return out
+
+
+def text_list(value, label: str, rel: str) -> list:
+    if not isinstance(value, list) or not all(isinstance(e, str) for e in value):
+        raise EnvError(f"policy field {label} in {rel} must be a list of text", POLICY_WHY,
+                       f"Write {label} in {rel} as a JSON list of quoted addresses: [\"<address>\", ...].")
+    return value
+
+
+POLICY_FILE = ".repo-policy.json"
+
+
+def load_policy(root: Path) -> Policy:
+    policy = Policy()
+    baseline = root / POLICY_FILE
+    if baseline.exists():
+        rel = POLICY_FILE
+        data = read_json(baseline, rel)
+        policy.allowed_emails.update(text_list(data.get("public_emails", []), "public_emails", rel))
+        policy.literal_exceptions += entries(data.get("private_literal_exceptions"), ("path", "sha256"), "private_literal_exceptions", rel)
+        policy.detector_exceptions += entries(data.get("privacy_detector_exceptions"), ("path", "rule", "sha256"), "privacy_detector_exceptions", rel)
+        policy.forbidden_paths += entries(data.get("forbidden_paths"), ("match", "value"), "forbidden_paths", rel)
+        policy.vendor_hashes.update(dict(entries(data.get("immutable_vendor_files"), ("path", "sha256"), "immutable_vendor_files", rel)))
+        policy.public_github_owner_urls = data.get("public_github_owner_urls", False) is True
+    contributor = root / CONTRIBUTOR_PATH
+    if contributor.exists():
+        email = read_json(contributor, CONTRIBUTOR_PATH).get("email")
+        if isinstance(email, str):
+            policy.allowed_emails.add(email)
+
+    values: list = []
+    rel = PRIVATE_VALUES_FILE
+    path = root / rel
+    if not path.is_symlink() and path.exists():
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise EnvError(f"the private-values file {rel} is unreadable or not UTF-8 text",
+                           "Without the list, ctlhq-first-push cannot look for your private values.",
+                           "Save the list as UTF-8 text, one value per line, readable by you "
+                           "(check with `ls -l` on the file), then run ctlhq-first-push again.") from error
+        for line in text.splitlines():
+            value = unicodedata.normalize("NFC", line.strip()).casefold()
+            if value and not value.startswith("#") and value not in values:
+                values.append(value)
+        if git(root, "ls-files", "--cached", "--", rel).stdout.strip():
+            policy.findings.append((rel, "policy.private-values-tracked"))
+        elif git(root, "check-ignore", "-q", "--", rel, check=False).returncode != 0:
+            policy.findings.append((rel, "policy.private-values-not-ignored"))
+    if not values:
+        policy.findings.append((rel, "policy.private-values-missing"))
+    public = public_terms()
+    policy.private_values = tuple(value for value in values if value not in public)
+    return policy
+
+
+def owner_file() -> Path:
+    return Path.home() / ".ctlhq" / "first-push.toml"
+
+
+def settings_file() -> Path:
+    return Path(os.environ.get("FIRST_PUSH_CONFIG") or owner_file())
+
+
+def owner_fix(path: Path) -> str:
+    return f'Add the line github_owner = "<your GitHub account>" to {shown(path)}, then run this command again.'
+
+
+def read_github_owner(path: Path) -> str | None:
+    """The github_owner value, or None when the file or the line is missing.
+
+    Raises ValueError when the file is unreadable or the value is not a GitHub account name in double quotes.
+    """
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ValueError(f"{shown(path)} is unreadable or not UTF-8 text") from error
+    line = re.search(r"(?m)^github_owner\s*=(.*)$", text)
+    if not line:
+        return None
+    value = re.fullmatch(r'\s*"([^"]*)"\s*(?:#.*)?', line.group(1))
+    if not value or not OWNER_NAME.fullmatch(value.group(1)):
+        raise ValueError(f"github_owner in {shown(path)} is not a GitHub account name in double quotes")
+    return value.group(1)
+
+
+def configured_owner() -> str | None:
+    path = owner_file()
+    try:
+        return read_github_owner(path)
+    except ValueError as error:
+        raise EnvError(str(error), "ctlhq-first-push stops rather than guess which GitHub account a push may go to.",
+                       owner_fix(path)) from error
+
+
+def public_terms() -> set:
+    """Terms the operator declared public for ctlhq-first-push, from the settings file: a line
+    `public_terms = ["term", ...]`. A missing file means no public terms. These terms are
+    dropped from the private-values list before the check."""
+    path = settings_file()
+    if not path.is_file():
+        return set()
+    why = ("This file lists the terms you declared public; ctlhq-first-push stops rather than guess which "
+           "terms are private.")
+    shape = 'public_terms = ["term one", "term two"] (double quotes, commas between terms, all on one line)'
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise EnvError(f"the public-terms file {shown(path)} is unreadable or not UTF-8 text", why,
+                       f"Save {shown(path)} as UTF-8 text readable by you, with the line {shape}; "
+                       "or point FIRST_PUSH_CONFIG at another file.") from error
+    match = re.search(r"(?m)^public_terms\s*=\s*(\[.*?\])\s*$", text)
+    if not match:
+        return set()
+    line = text.count("\n", 0, match.start()) + 1
+    malformed = EnvError(f"public_terms in {shown(path)} line {line} is not a list of quoted strings", why,
+                         f"Rewrite line {line} of {shown(path)} as {shape}.")
+    try:
+        terms = json.loads(match.group(1))
+    except ValueError as error:
+        raise malformed from error
+    if not isinstance(terms, list) or not all(isinstance(term, str) for term in terms):
+        raise malformed
+    return {unicodedata.normalize("NFC", term.strip()).casefold() for term in terms if term.strip()}
+
+
+# ---------------------------------------------------------------- personal-data rules
+
+
+def line_of(text: str, start: int) -> int:
+    return text.count("\n", 0, start) + 1
+
+
+def digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def approved_lines(raw_lines: list, budget: Counter) -> dict:
+    """Lines whose exact text an exception approves; N exceptions approve the first N copies."""
+    approved: dict = {}
+    if not budget:
+        return approved
+    remaining = Counter(budget)
+    wanted = {d for _, d in budget}
+    for number, raw in enumerate(raw_lines, start=1):
+        d = digest(raw)
+        if d not in wanted:
+            continue
+        for key, key_digest in budget:
+            if key_digest == d and remaining[(key, key_digest)] > 0:
+                remaining[(key, key_digest)] -= 1
+                approved.setdefault(key, set()).add(number)
+    return approved
+
+
+def email_allowed(address: str, policy: Policy) -> bool:
+    if address in policy.allowed_emails or GITHUB_NOREPLY.fullmatch(address):
+        return True
+    domain = address.lower().rpartition("@")[2]
+    return (
+        domain in EXAMPLE_DOMAINS
+        or domain in PROTOCOL_DOMAINS
+        or domain.endswith(RESERVED_TEST_SUFFIXES)
+    )
+
+
+def github_owner(normalized: str, start: int, value: str) -> bool:
+    end = start + len(value)
+    if normalized[end:end + 1] != "/":
+        return False
+    return GITHUB_OWNER_PREFIX.search(normalized[max(0, start - 32):start]) is not None
+
+
+def privacy_findings(text: str, policy: Policy, path: str | None, content: bool, vendor: bool = False) -> list:
+    """Return (line, rule, line text) per finding, with first-commit's privacy_findings semantics."""
+    found = []
+    raw_lines = text.split("\n")
+    detector = approved_lines(raw_lines, Counter(
+        (rule, sha) for p, rule, sha in policy.detector_exceptions if content and p == path))
+    for rule, expression in PATTERNS:
+        if vendor and rule == "privacy.user-home-path":
+            continue
+        for match in expression.finditer(text):
+            line = line_of(text, match.start())
+            if line in detector.get(rule, ()):
+                continue
+            found.append((line, rule))
+            break
+    if "@" in text and not vendor:
+        for match in EMAIL.finditer(text):
+            address = match.group(0)
+            ssh_user = (
+                address == "git" + "@" + "github.com"
+                and text[max(0, match.start() - 6):match.start()] == "ssh://"
+                and text[match.end():match.end() + 1] == "/"
+            )
+            if ssh_user or email_allowed(address, policy):
+                continue
+            line = line_of(text, match.start())
+            if line in detector.get("privacy.unapproved-email", ()):
+                continue
+            found.append((line, "privacy.unapproved-email"))
+    if policy.private_values:
+        normalized = unicodedata.normalize("NFC", text).casefold()
+        literal = approved_lines(raw_lines, Counter(
+            ("literal", sha) for p, sha in policy.literal_exceptions if content and p == path)).get("literal", set())
+        owner_urls = policy.public_github_owner_urls and content
+        for value in policy.private_values:
+            start = normalized.find(value)
+            while start >= 0:
+                public = owner_urls and github_owner(normalized, start, value)
+                if not public and line_of(normalized, start) not in literal:
+                    break
+                start = normalized.find(value, start + 1)
+            if start >= 0:
+                found.append((line_of(normalized, start), "privacy.private-literal"))
+    return [(line, rule, raw_lines[line - 1] if line <= len(raw_lines) else "") for line, rule in found]
+
+
+def identity_findings(name: str, email: str, policy: Policy) -> list:
+    """Rules broken by one author or committer; the name and the email are checked separately.
+
+    An email in the policy's allowed list (exact, ignoring case) is not a finding. A name equal
+    (ignoring case) to the account part of an allowed GitHub no-reply email is not a finding.
+    """
+    allowed = {e.casefold() for e in policy.allowed_emails}
+    accounts = set()
+    for address in allowed:
+        match = NOREPLY_ACCOUNT.fullmatch(address)
+        if match:
+            accounts.add(match.group(1))
+    rules = []
+    if email.casefold() not in allowed:
+        rules += [rule for _, rule, _ in privacy_findings(email, policy, None, content=False)]
+    if name.casefold() not in accounts:
+        rules += [rule for _, rule, _ in privacy_findings(name, policy, None, content=False)]
+    return list(dict.fromkeys(rules))
+
+
+def forbidden(path: str, policy: Policy) -> bool:
+    for match, value in policy.forbidden_paths:
+        if (match == "exact" and path == value) or (match == "prefix" and path.startswith(value)) or (
+                match == "suffix" and path.endswith(value)):
+            return True
+    return False
+
+
+def holds_private_value(text: str, policy: Policy) -> bool:
+    normalized = unicodedata.normalize("NFC", text).casefold()
+    return any(value in normalized for value in policy.private_values)
+
+
+# ---------------------------------------------------------------- history
+
+
+def revisions(new_only: bool) -> list:
+    revs = ["HEAD", "--branches", "--tags"]
+    return revs + ["--not", "--remotes"] if new_only else revs
+
+
+def read_commits(root: Path, new_only: bool) -> list:
+    fmt = "%x00COMMIT%x00%H%x00%P%x00%an%x00%ae%x00%cn%x00%ce%x00%B"
+    raw = git(root, "log", "--reverse", "--topo-order", "--root", "--diff-merges=first-parent", "--raw",
+              "--no-abbrev", "--no-renames", "--no-color", "--no-ext-diff", "-z", f"--format={fmt}",
+              *revisions(new_only), "--").stdout
+    tokens = raw.decode("utf-8", "replace").split("\0")
+    commits = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i].lstrip("\n")
+        if token == "COMMIT":
+            sha, parents, an, ae, cn, ce, body = tokens[i + 1:i + 8]
+            commits.append({"sha": sha, "parents": parents.split(), "author": (an, ae),
+                            "committer": (cn, ce), "message": body, "files": []})
+            i += 8
+            continue
+        if token.startswith(":") and commits:
+            meta = token[1:].split()
+            path = tokens[i + 1]
+            if len(meta) >= 5 and not meta[4].startswith("D") and meta[1] != "160000":
+                commits[-1]["files"].append((path, meta[3], meta[1]))
+            i += 2
+            continue
+        i += 1
+    return commits
+
+
+def read_blobs(root: Path, shas: list, handle) -> None:
+    """Stream every blob through `handle(sha, bytes)` with one git cat-file process."""
+    if not shas:
+        return
+    proc = subprocess.Popen(["git", "-C", str(root), "cat-file", "--batch"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    def feed() -> None:
+        try:
+            proc.stdin.write("".join(s + "\n" for s in shas).encode())
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    writer = threading.Thread(target=feed, daemon=True)
+    writer.start()
+    out = proc.stdout
+    for _ in shas:
+        header = out.readline().decode("utf-8", "replace").split()
+        if len(header) == 2 and header[1] == "missing":
+            continue
+        if len(header) != 3:
+            break
+        size = int(header[2])
+        data = out.read(size)
+        out.read(1)
+        handle(header[0], data)
+    writer.join()
+    proc.wait()
+
+
+def scan_history(root: Path, policy: Policy, commits: list) -> tuple:
+    """Return (findings, files checked). A finding is a dict; repeats across commits are counted."""
+    needs: dict = {}
+    for commit in commits:
+        for path, sha, mode in commit["files"]:
+            if not forbidden(path, policy):
+                needs.setdefault(sha, set()).add((path, mode))
+    by_blob: dict = {}
+
+    def handle(sha: str, data: bytes) -> None:
+        if b"\0" in data:
+            return
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return
+        content_hash = None
+        for path, mode in needs.get(sha, ()):
+            vendor = False
+            if path in policy.vendor_hashes and mode in ("100644", "100755"):
+                content_hash = content_hash or hashlib.sha256(data).hexdigest()
+                vendor = content_hash == policy.vendor_hashes[path]
+            hits = privacy_findings(text, policy, path, content=True, vendor=vendor)
+            if hits:
+                by_blob[(sha, path)] = hits
+
+    read_blobs(root, list(needs), handle)
+
+    findings: dict = {}
+
+    def add(key: tuple, commit: str, where: str, file, line, rule: str) -> None:
+        if key in findings:
+            findings[key]["more_commits"] += 1
+            return
+        findings[key] = {"commit": commit[:7], "where": where, "file": file, "line": line,
+                         "rule": rule, "more_commits": 0}
+
+    files_checked = 0
+    for commit in commits:
+        sha = commit["sha"]
+        for path, blob, _ in commit["files"]:
+            files_checked += 1
+            shown = "<path redacted>" if holds_private_value(path, policy) else path
+            if shown != path:
+                add(("path", path), sha, "file", shown, None, "privacy.private-literal")
+            if forbidden(path, policy):
+                add(("forbidden", path), sha, "file", shown, None, "privacy.forbidden-path")
+                continue
+            for line, rule, text in by_blob.get((blob, path), ()):
+                add(("file", path, rule, digest(text)), sha, "file", shown, line, rule)
+        for line, rule, text in privacy_findings(commit["message"], policy, None, content=False):
+            add(("message", rule, digest(text)), sha, "message", None, line, rule)
+        for role in ("author", "committer"):
+            name, email = commit[role]
+            ident = f"{name} <{email}>"
+            for rule in identity_findings(name, email, policy):
+                add(("identity", role, rule, digest(ident)), sha, "identity", None, role, rule)
+    return list(findings.values()), files_checked
+
+
+def license_findings(root: Path, commits: list) -> list:
+    if not commits:
+        return []
+    query = "".join(f"{c['sha']}:{name}\n" for c in commits for name in LICENSE_NAMES)
+    lines = git(root, "cat-file", "--batch-check", input_bytes=query.encode()).stdout.decode().splitlines()
+    missing = []
+    for index, commit in enumerate(commits):
+        rows = lines[index * len(LICENSE_NAMES):(index + 1) * len(LICENSE_NAMES)]
+        if not any(row.split()[1:2] == ["blob"] for row in rows):
+            missing.append(commit["sha"][:7])
+    if not missing:
+        return []
+    return [{"commit": missing[0], "where": "file", "file": "LICENSE", "line": None,
+             "rule": "license.missing", "more_commits": len(missing) - 1}]
+
+
+def readme_finding(root: Path) -> list:
+    tip = git_text(root, "rev-parse", "--short=7", "HEAD")
+    listing = git(root, "ls-tree", "-l", "-z", "HEAD").stdout.decode("utf-8", "replace").split("\0")
+    for row in listing:
+        meta, _, name = row.partition("\t")
+        parts = meta.split()
+        if len(parts) == 4 and parts[1] == "blob" and README.fullmatch(name) and parts[3] not in ("0", "-"):
+            return []
+    return [{"commit": tip, "where": "file", "file": "README", "line": None,
+             "rule": "readme.missing", "more_commits": 0}]
+
+
+def gitleaks_executable(root: Path) -> str | None:
+    """~/.ctlhq/bin/gitleaks, else the first on PATH; never one that resolves inside the checked repository."""
+    repo = root.resolve()
+    folders = [Path.home() / GITLEAKS_FOLDER] + [Path(f) for f in os.environ.get("PATH", "").split(os.pathsep) if f]
+    for folder in folders:
+        candidate = folder / "gitleaks"
+        # A relative PATH folder would resolve against the working folder, which in a pre-push hook is the repository.
+        if not folder.is_absolute() or not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        real = candidate.resolve()
+        if real != repo and repo not in real.parents:
+            return str(candidate)
+    return None
+
+
+LEAK_WHY = "The secret scan did not complete, so the history is not proven free of keys and tokens."
+LEAK_FIX = "Run `gitleaks git --redact -v` in the repository to see the error, fix it, then run ctlhq-first-push again."
+
+
+def gitleaks_findings(root: Path, exe: str, new_only: bool, policy: Policy) -> list:
+    directory = tempfile.mkdtemp(prefix="first-push-gitleaks-")
+    try:
+        report = Path(directory) / "report.json"
+        args = [exe, "git", "--redact", "--no-banner", f"--exit-code={GITLEAKS_EXIT}", "--ignore-gitleaks-allow",
+                "--report-format=json", f"--report-path={report}", "--log-opts=" + " ".join(revisions(new_only))]
+        if (root / ".gitleaksignore").is_file():
+            args += ["--gitleaks-ignore-path", ".gitleaksignore"]
+        try:
+            proc = subprocess.run(args + [str(root)], cwd=str(root), stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=GITLEAKS_TIMEOUT, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise EnvError(f"gitleaks could not finish its scan (ctlhq-first-push waits {GITLEAKS_TIMEOUT} seconds)",
+                           LEAK_WHY, LEAK_FIX) from error
+        if proc.returncode == 0:
+            return []
+        if proc.returncode != GITLEAKS_EXIT:
+            raise EnvError(f"gitleaks scan failed (exit {proc.returncode})", LEAK_WHY, LEAK_FIX)
+        try:
+            report_entries = json.loads(report.read_text("utf-8"))
+        except (OSError, ValueError):
+            report_entries = None
+        if not isinstance(report_entries, list):
+            return [{"commit": "-", "where": "file", "file": ".git", "line": None,
+                     "rule": "secrets.gitleaks", "more_commits": 0}]
+        out = {}
+        for entry in report_entries:
+            if not isinstance(entry, dict):
+                continue
+            file = entry.get("File") if isinstance(entry.get("File"), str) else ".git"
+            line = entry.get("StartLine") if type(entry.get("StartLine")) is int else None
+            commit = entry.get("Commit") if isinstance(entry.get("Commit"), str) else "-"
+            shown = "<path redacted>" if holds_private_value(file, policy) else file
+            out.setdefault((commit, file, line), {"commit": commit[:7], "where": "file", "file": shown,
+                                                  "line": line, "rule": "secrets.gitleaks", "more_commits": 0})
+        return list(out.values())
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- push target
+
+
+def url_owner_ok(url: str, owner: str | None) -> str:
+    """Return "own", "foreign" (a GitHub address under another owner), "no owner" (a GitHub
+    address while no owner is configured), or "other" (not GitHub)."""
+    for form in URL_FORMS:
+        match = form.match(url.strip())
+        if match:
+            host = match.group("host").lower()
+            if host not in ("github.com", "www.github.com"):
+                return "other"
+            if owner is None:
+                return "no owner"
+            return "own" if match.group("owner").casefold() == owner.casefold() else "foreign"
+    return "other"
+
+
+def push_target(root: Path, remote: str | None, owner: str | None) -> tuple:
+    """Return (state, findings). State: allowed, finding, not configured, not checked, or not github."""
+    name = remote or "origin"
+    configured = git(root, "remote", check=False).stdout.decode("utf-8", "replace").split()
+    if name in configured:
+        proc = git(root, "remote", "get-url", "--push", "--all", name, check=False)
+        urls = proc.stdout.decode("utf-8", "replace").split()
+    elif remote and ("/" in remote or ":" in remote):
+        urls = [remote]
+    elif remote:
+        return "finding", [{"commit": "-", "where": "push-target", "file": "push-target", "line": None,
+                            "rule": "push.unknown-remote", "more_commits": 0}]
+    else:
+        return "not checked", []
+    kinds = {url_owner_ok(u, owner) for u in urls or [""]}
+    if "foreign" in kinds:
+        return "finding", [{"commit": "-", "where": "push-target", "file": "push-target", "line": None,
+                            "rule": "push.foreign-owner", "more_commits": 0}]
+    if "no owner" in kinds:
+        return "not configured", [{"commit": "-", "where": "push-target", "file": "push-target", "line": None,
+                                   "rule": "push.owner-not-configured", "more_commits": 0}]
+    return ("allowed" if kinds == {"own"} else "not github"), []
+
+
+# ---------------------------------------------------------------- hook
+
+
+def hooks_dir(root: Path) -> Path:
+    raw = git_text(root, "rev-parse", "--git-path", "hooks")
+    path = Path(raw) if Path(raw).is_absolute() else root / raw
+    path = path.resolve()
+    common = Path(git_text(root, "rev-parse", "--git-common-dir"))
+    common = (common if common.is_absolute() else root / common).resolve()
+    for base in (common, root.resolve()):
+        try:
+            path.relative_to(base)
+            return path
+        except ValueError:
+            continue
+    raise EnvError("core.hooksPath points outside this repository",
+                   "ctlhq-first-push writes a hook only inside the repository it checks.",
+                   "Install the hook by hand: in the core.hooksPath folder, add a pre-push hook that runs "
+                   f"{shown(Path(__file__).resolve())} --remote \"$1\"; or, when no other tool needs core.hooksPath, "
+                   "run `git config --unset core.hooksPath`, then ctlhq-first-push hook install.", operator=True)
+
+
+def hook_script() -> str:
+    tool = str(Path(__file__).resolve())
+    return f"""#!/usr/bin/env bash
+{HOOK_MARKER}: runs the pre-push hook that was here before, then ctlhq-first-push.
+# Installed by "ctlhq-first-push hook install". The earlier hook, if any, is {PREVIOUS_HOOK}.
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+previous="$here/{PREVIOUS_HOOK}"
+tool={shlex.quote(tool)}
+if [ -x "$previous" ]; then
+	input="$(mktemp)" || exit 1
+	trap 'rm -f "$input"' EXIT
+	cat > "$input"
+	"$previous" "$@" < "$input" || exit $?
+fi
+if [ ! -x "$tool" ]; then
+	echo "ctlhq-first-push hook: $tool is missing; reinstall with ctlhq-first-push hook install" >&2
+	exit 1
+fi
+FIRST_PUSH_FROM_HOOK=1 "$tool" --remote "${{1:-origin}}"
+"""
+
+
+def hook_state(path: Path) -> tuple[str, str]:
+    """("missing", ""), ("other", "") for a hook ctlhq did not write, ("current", ""), or ("stale", why).
+    A hook is ctlhq's only when its second line is the marker, alone or before a colon. A marked hook is current
+    while the tool path it records still runs, even when its text differs, so two checkouts never rewrite each
+    other's hook."""
+    if not os.path.lexists(path):
+        return "missing", ""
+    try:
+        text = path.read_text("utf-8", "replace")
+    except OSError:
+        return "other", ""
+    lines = text.splitlines()
+    if len(lines) < 2 or not (lines[1] == HOOK_MARKER or lines[1].startswith(HOOK_MARKER + ":")):
+        return "other", ""
+    recorded = re.search(r"^tool=(.*)$", text, re.MULTILINE)
+    try:
+        tool = shlex.split(recorded.group(1))[0] if recorded else ""
+    except (ValueError, IndexError):
+        tool = ""
+    if not tool:
+        return "stale", "records no tool path"
+    if not (os.path.isfile(tool) and os.access(tool, os.X_OK)):
+        return "stale", f"runs {shown(tool)}, which is missing or not executable"
+    if not os.access(path, os.X_OK):
+        return "stale", "is not executable, so git skips it"
+    return "current", ""
+
+
+def free_backup(directory: Path) -> Path:
+    n = 1
+    while os.path.lexists(directory / f"pre-push.stale.{n}"):
+        n += 1
+    return directory / f"pre-push.stale.{n}"
+
+
+def link_fix(target: Path) -> str:
+    return (f"replace the symbolic link {shown(target)} with a copy of its target (or remove it), "
+            "then run ctlhq-first-push hook install")
+
+
+def hook_command(root: Path, action: str) -> int:
+    directory = hooks_dir(root)
+    target = directory / "pre-push"
+    previous = directory / PREVIOUS_HOOK
+    state, why = hook_state(target)
+    if action == "status":
+        if state == "current":
+            chained = f", runs {PREVIOUS_HOOK} first" if os.path.lexists(previous) else ""
+            print(f"installed{chained}")
+            return 0
+        if target.is_symlink():
+            print(f"stale: the hook {why}; {link_fix(target)}" if state == "stale"
+                  else f"missing: pre-push links to a hook ctlhq did not write; {link_fix(target)}")
+        else:
+            print(f"stale: the hook {why}; ctlhq-first-push hook install replaces it" if state == "stale" else "missing")
+        return 1
+    if state == "current":
+        print("installed (already present, nothing changed)")
+        return 0
+    if target.is_symlink():
+        raise EnvError(f"pre-push in {shown(directory)} is a symbolic link to {shown(os.readlink(target))}; "
+                       "nothing changed",
+                       "Installing would write through the link into a file that other repositories may share.",
+                       "Replace the link with a copy of its target (or remove it), then run "
+                       "ctlhq-first-push hook install again.", operator=True)
+    moved = None
+    if state == "other":
+        if os.path.lexists(previous):
+            raise EnvError(f"both pre-push and {PREVIOUS_HOOK} exist in {shown(directory)}; nothing changed",
+                           "Installing would overwrite one of the two hooks.",
+                           f"Read both files, merge them into {PREVIOUS_HOOK} or remove one, then run "
+                           "ctlhq-first-push hook install again.", operator=True)
+        moved = previous
+    elif state == "stale":
+        moved = free_backup(directory)
+    renamed = False
+    try:
+        if moved:
+            os.rename(target, moved)
+            renamed = True
+        directory.mkdir(parents=True, exist_ok=True)
+        target.write_text(hook_script(), "utf-8")
+        target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError as error:
+        what = f"the pre-push hook could not be written ({error.strerror or error})"
+        if renamed or not moved:  # after a failed rename, pre-push is still the old hook
+            try:
+                if os.path.lexists(target):
+                    target.unlink()
+                if moved:
+                    os.rename(moved, target)
+                    what += f"; the old hook {moved.name} is back as pre-push"
+            except OSError:
+                what += f"; the old hook is kept as {moved.name}" if moved else ""
+        raise EnvError(what,
+                       "Without the hook, a push runs no check.",
+                       f"Check the folder's permission with `ls -ld {shown(directory)}`, make it writable, then "
+                       "run ctlhq-first-push hook install again.") from error
+    notes = []
+    if state == "stale":
+        notes.append(f"replaced a stale ctlhq hook that {why}; the old file is kept as {moved.name}")
+    if os.path.lexists(previous):
+        notes.append(f"the earlier hook is kept as {PREVIOUS_HOOK} and runs first")
+    print("; ".join(["installed"] + notes))
+    return 0
+
+
+# ---------------------------------------------------------------- fix text
+
+PUBLIC_TERMS_FILE = "~/.ctlhq/first-push.toml"
+DETECTOR_EXCEPTION = "approve this exact line with a privacy_detector_exceptions entry in .repo-policy.json"
+KEY_WHY = "Anyone who reads this key or token can act as you."
+WHY = {
+    "policy.private-values-missing": "Without the private-values list, ctlhq-first-push cannot look for your private values (names, places, account names).",
+    "policy.private-values-not-ignored": "git could commit this list, and a push would then publish every value in it.",
+    "policy.private-values-tracked": "git tracks this list, so a push publishes every value in it.",
+    "push.foreign-owner": "The push would send this history to a GitHub account other than github_owner.",
+    "push.owner-not-configured": "No github_owner is configured, so ctlhq-first-push cannot tell whether this GitHub account is yours.",
+    "push.unknown-remote": "No remote has that name, so the push target cannot be checked.",
+    "privacy.private-literal": "This holds a value from your private-values list, and a push would make it public.",
+    "privacy.unapproved-email": "An email address in git history is public to everyone who can read the repository.",
+    "privacy.user-home-path": "A home folder path shows your account name on this computer.",
+    "privacy.private-key": KEY_WHY,
+    "privacy.github-token": KEY_WHY,
+    "privacy.aws-access-key": KEY_WHY,
+    "privacy.ssh-fingerprint": "An SSH key fingerprint links this repository to your key.",
+    "privacy.forbidden-path": "The forbidden_paths list in .repo-policy.json forbids this path in git.",
+    "secrets.gitleaks": "gitleaks found something shaped like a secret (a token, key, or password).",
+    "license.missing": "Without a LICENSE, nobody else may legally use, copy, or change the code in that version.",
+    "readme.missing": "The README is the first thing a visitor sees; without it, nobody knows what the repository is for.",
+}
+
+
+def history_step(commit: str, tip: str) -> str:
+    if commit == tip:
+        return f"Then run `git commit --amend` so commit {commit}, the newest commit, no longer holds it."
+    return (f"Commit {commit} already holds it, so the operator decides between a history rewrite "
+            "(for example git filter-repo) and a fresh repository.")
+
+
+def remedy(finding: dict) -> str:
+    """The action for one personal-data or gitleaks finding, without the history step."""
+    rule, where, file, line = finding["rule"], finding["where"], finding["file"], finding["line"]
+    if where == "identity":
+        allow = {"privacy.private-literal": f", or add the value to public_terms in {PUBLIC_TERMS_FILE} if it is public",
+                 "privacy.unapproved-email": ", or add the address to public_emails in .repo-policy.json if it is public",
+                 }.get(rule, "")
+        return (f"Set a public {line} identity for new commits with `git config user.name` and "
+                f"`git config user.email` (a GitHub no-reply address works){allow}.")
+    if where == "message":
+        target = f"line {line} of the message of commit {finding['commit']}"
+        verb = "Reword"
+    else:
+        target = f"{file} line {line}" if line is not None else file
+        verb = "Remove it from"
+    redacted = file == "<path redacted>" and line is None
+    if rule == "privacy.private-literal":
+        if redacted:
+            return (f"Rename the file with `git mv` so its path no longer holds the value, or add the value "
+                    f"to public_terms in {PUBLIC_TERMS_FILE} if it is public.")
+        return f"{verb} {target}, or add the value to public_terms in {PUBLIC_TERMS_FILE} if it is public."
+    if rule == "privacy.unapproved-email":
+        return f"{verb} {target}, or add the address to public_emails in .repo-policy.json if it is public."
+    if rule in ("privacy.user-home-path", "privacy.ssh-fingerprint"):
+        return f"{verb} {target}, or {DETECTOR_EXCEPTION}."
+    if rule in ("privacy.private-key", "privacy.github-token", "privacy.aws-access-key"):
+        return f"Revoke and replace the key or token first, then {verb[0].lower() + verb[1:]} {target}."
+    if rule == "privacy.forbidden-path":
+        name = "the file" if redacted else file
+        return f"Run `git rm --cached` on {name} and add it to .gitignore."
+    if rule == "secrets.gitleaks":
+        return (f"If it is a real secret, revoke it and remove it from {target}; if it is a false alarm, "
+                "add its fingerprint (gitleaks prints it) to .gitleaksignore.")
+    return ""
+
+
+def explain(finding: dict, context: dict) -> tuple:
+    """Return (why, fix) for one finding. Every rule ctlhq-first-push emits has an entry in WHY."""
+    rule, commit, file = finding["rule"], finding["commit"], finding["file"]
+    tip, remote = context.get("tip", ""), context.get("remote")
+    owner = context.get("owner") or "<your GitHub account>"
+    why = WHY.get(rule, "")
+    if rule == "policy.private-values-missing":
+        fix = (f"Create {file} with one private value per line, make sure git ignores it "
+               f"(`git check-ignore {file}` must print the path), then run ctlhq-first-push again.")
+    elif rule == "policy.private-values-not-ignored":
+        fix = f"Add the line `{file}` to .gitignore, then run `git check-ignore {file}`; it must print the path."
+    elif rule == "policy.private-values-tracked":
+        fix = (f"Run `git rm --cached {file}`, add `{file}` to .gitignore, and commit. Earlier commits still hold "
+               "the list, so the operator decides between a history rewrite and a fresh repository.")
+    elif rule == "push.foreign-owner":
+        why = f"The push would send this history to a GitHub account other than {owner}."
+        if remote:
+            fix = (f"Point remote {remote} at your account with `git remote set-url --push {remote} "
+                   f"https://github.com/{owner}/<repository>.git`, then run ctlhq-first-push again.")
+        else:
+            fix = f"Pass a --remote address under https://github.com/{owner}/, then run ctlhq-first-push again."
+    elif rule == "push.owner-not-configured":
+        fix = owner_fix(owner_file())
+    elif rule == "push.unknown-remote":
+        why = f"No remote is named {remote}, so the push target cannot be checked." if remote else why
+        fix = (f"Run `git remote -v` to see the remote names and pass one with --remote, or add this one with "
+               f"`git remote add {remote or '<name>'} https://github.com/{owner}/<repository>.git`.")
+    elif rule == "license.missing":
+        more = finding["more_commits"]
+        if commit in context.get("roots", ()):
+            fix = (f"Commit {commit} is the first commit and has no LICENSE, but a LICENSE must be in it. "
+                   f"Add a LICENSE file now; the operator picks the license and decides between a history "
+                   f"rewrite that puts it in {commit} and a fresh repository.")
+        elif commit == tip:
+            fix = f"Commit {commit}, the newest commit, has no LICENSE. Add the LICENSE file back and run `git commit --amend`."
+        else:
+            later = f" and {more} later commit{'s' if more != 1 else ''}" if more else ""
+            fix = (f"Commit {commit}{later} have no LICENSE. Add the LICENSE file back and commit; the operator "
+                   "decides whether to rewrite the commits without it.")
+    elif rule == "readme.missing":
+        fix = f"Add a README.md that is not empty at the top level and commit it (the tip is commit {commit})."
+    elif rule == "secrets.gitleaks" and commit == "-":
+        fix = ("gitleaks reported a finding, but its report could not be read; run "
+               "`gitleaks git --redact -v` in the repository to see it.")
+    else:
+        fix = remedy(finding)
+        if fix and commit != "-":
+            fix += " " + history_step(commit, tip)
+    return why, fix
+
+
+def next_command(ready: bool, root: Path, target_state: str, remote: str | None, owner: str | None) -> str:
+    """The one command to run after this check."""
+    if not ready:
+        return "follow each fix: line above, then run ctlhq-first-push again"
+    if os.environ.get("FIRST_PUSH_FROM_HOOK"):
+        return "none; this push goes ahead"
+    try:
+        target = hooks_dir(root) / "pre-push"
+        hook = hook_state(target)[0] == "current"
+    except EnvError:
+        hook = True
+    if not hook:
+        return link_fix(target) if target.is_symlink() else "ctlhq-first-push hook install"
+    if target_state == "not checked":
+        if owner is None:
+            return owner_fix(owner_file())
+        return f"git remote add origin https://github.com/{owner}/<repository>.git"
+    name = remote or "origin"
+    if "/" in name or ":" in name:
+        return "git push to the --remote address"
+    return f"git push -u {name} HEAD"
+
+
+# ---------------------------------------------------------------- main
+
+
+def describe(finding: dict) -> str:
+    if finding["where"] == "message":
+        where = f"message:{finding['line']}"
+    elif finding["where"] == "identity":
+        where = f"identity:{finding['line']}"
+    elif finding["line"] is not None:
+        where = f"{finding['file']}:{finding['line']}"
+    else:
+        where = finding["file"]
+    more = finding["more_commits"]
+    suffix = f" (+{more} more commit{'s' if more != 1 else ''})" if more else ""
+    return f"{finding['commit']}  {where}  {finding['rule']}{suffix}"
+
+
+def check(root: Path, new_only: bool, as_json: bool, remote: str | None) -> int:
+    if git(root, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False).returncode != 0:
+        raise EnvError(f"the repository at {shown(root)} has no commits",
+                       "A push sends commits, so there is no history to check yet.",
+                       "Add the files by name (git add README.md LICENSE <files>) and commit them through the "
+                       "project's commit sequence (git commit -F <message file>), then run ctlhq-first-push again.",
+                       operator=True)
+    policy = load_policy(root)
+    findings = [{"commit": "-", "where": "policy", "file": file, "line": None, "rule": rule, "more_commits": 0}
+                for file, rule in policy.findings]
+    owner = configured_owner()
+    target_state, target_findings = push_target(root, remote, owner)
+    findings += target_findings
+    commits = read_commits(root, new_only)
+    history, files_checked = scan_history(root, policy, commits)
+    findings += history
+    exe = gitleaks_executable(root)
+    if exe:
+        findings += gitleaks_findings(root, exe, new_only, policy)
+    findings += license_findings(root, commits)
+    findings += readme_finding(root)
+    name = remote or "origin"
+    context = {"tip": git_text(root, "rev-parse", "--short=7", "HEAD"),
+               "roots": {c["sha"][:7] for c in commits if not c["parents"]},
+               "remote": None if "/" in name or ":" in name else name, "owner": owner}
+    for n, finding in enumerate(findings, 1):
+        finding["n"] = n
+        finding["why"], finding["fix"] = explain(finding, context)
+    ready = not findings
+    following = next_command(ready, root, target_state, remote, owner)
+    mode = "new-only" if new_only else "full history"
+    leaks = "ran" if exe else "not installed"
+    if as_json:
+        print(json.dumps({"ready": ready, "mode": mode, "commits_checked": len(commits),
+                          "files_checked": files_checked, "gitleaks": leaks, "push_target": target_state,
+                          "findings": findings, "next": following}, indent=2))
+    else:
+        leak_note = "gitleaks ran" if exe else "gitleaks not installed: built-in token shapes only"
+        target_note = {"allowed": "push target allowed", "finding": "push target refused",
+                       "not configured": "push target not checked (github_owner not configured)",
+                       "not checked": f"push target not checked (no remote named {remote or 'origin'})",
+                       "not github": "push target not checked (not a GitHub address)"}[target_state]
+        print(f"ctlhq-first-push: {len(commits)} commits checked ({mode}), {files_checked} file changes, "
+              f"{leak_note}, {target_note}")
+        for finding in findings:
+            print(f"{finding['n']}. {describe(finding)}")
+            print(f"   fix: {finding['why']} {finding['fix']}")
+        print("ready" if ready else "not ready")
+        print(f"next: {following}")
+    return 0 if ready else 1
+
+
+def parse(argv: list) -> dict:
+    opts = {"new_only": False, "json": False, "root": None, "remote": None, "hook": None}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--new-only":
+            opts["new_only"] = True
+        elif a == "--json":
+            opts["json"] = True
+        elif a in ("--root", "--remote"):
+            if i + 1 >= len(argv) or not argv[i + 1]:
+                raise UsageError(f"{a} needs a value")
+            opts[a[2:]] = argv[i + 1]
+            i += 1
+        elif a == "hook" and opts["hook"] is None:
+            if i + 1 >= len(argv) or argv[i + 1] not in ("install", "status"):
+                raise UsageError("hook needs install or status")
+            opts["hook"] = argv[i + 1]
+            i += 1
+        else:
+            raise UsageError(f"unknown argument {a!r}")
+        i += 1
+    if opts["hook"] and (opts["new_only"] or opts["json"] or opts["remote"]):
+        raise UsageError("hook takes only --root")
+    return opts
+
+
+def main(argv: list) -> int:
+    if any(a in ("-h", "--help") for a in argv):
+        print(__doc__.strip())
+        return 0
+    try:
+        opts = parse(argv)
+    except UsageError as error:
+        print(f"ctlhq-first-push: {error}", file=sys.stderr)
+        print("usage: ctlhq-first-push [--new-only] [--json] [--root DIR] [--remote NAME] | ctlhq-first-push hook install|status [--root DIR]",
+              file=sys.stderr)
+        return 2
+    start = Path(opts["root"]).expanduser() if opts["root"] else Path.cwd()
+    try:
+        if not start.is_dir():
+            raise EnvError(f"--root {shown(start)} is not a folder",
+                           "ctlhq-first-push checks the repository in that folder.",
+                           "Pass the repository folder: ctlhq-first-push --root <path to the repository>.")
+        proc = git(start, "rev-parse", "--show-toplevel", check=False)
+        if proc.returncode != 0:
+            raise EnvError(f"{shown(start.resolve())} is not inside a git repository with a work tree",
+                           "ctlhq-first-push reads the commits a push would send, so it needs the repository.",
+                           "cd into the repository and run ctlhq-first-push, or run ctlhq-first-push --root <path to the "
+                           "repository>. For a new project, the operator decides when to run git init and make the first commit.")
+        root = Path(proc.stdout.decode("utf-8", "surrogateescape").strip())
+        if opts["hook"]:
+            return hook_command(root, opts["hook"])
+        return check(root, opts["new_only"], opts["json"], opts["remote"])
+    except EnvError as error:
+        print(f"ctlhq-first-push: {error.what}\nwhy: {error.why}\n{error.label}: {error.fix}", file=sys.stderr)
+        return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

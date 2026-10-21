@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""ctlhq-catalog: build the catalog of skills, agents, and tools, and open it in a browser.
+
+Usage:
+  ctlhq-catalog build [--out DIR]   write CATALOG.md, skills.html (one line per skill), and
+                                    catalog.html (CATALOG.md rendered) into DIR
+  ctlhq-catalog open [--out DIR]    build, then open skills.html with the macOS `open` command
+
+DIR defaults to .local/catalog/ in this repository, a folder .gitignore ignores, so the
+catalog is never committed. Links in the three files point back into the repository.
+
+Inputs: skills/*/SKILL.md frontmatter (through bin/ctlhq-skills --json), agents/*.md,
+bin/ctlhq-principles (the coding principles with their groups, in the order of the
+ctlhq-mode skill's index), and each tool's first --help line. Each skill's row shows its
+own front-matter description.
+
+Every table gets a leading "#" column with row numbers so a row can be cited (unslop rule
+34). Markdown cells escape |, <, and > outside inline code, and | inside it, so GitHub
+shows them.
+
+Exit 0 on success, 1 when an input is missing or `open` fails, 2 on a usage error.
+"""
+from __future__ import annotations
+
+import functools
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUT = ROOT / ".local" / "catalog"
+
+
+@functools.lru_cache(maxsize=None)
+def group_of() -> dict[str, str]:
+    """principle-<name> -> group, in index order, from the bin/ctlhq-principles index. Read on first use, so --help needs no inputs."""
+    raw = subprocess.run([str(ROOT / "bin" / "ctlhq-principles")], capture_output=True, text=True)
+    if raw.returncode != 0:
+        print(raw.stderr, file=sys.stderr)
+        sys.exit(1)
+    groups: dict[str, str] = {}
+    group = ""
+    for line in raw.stdout.split("\n"):
+        if line.startswith("  "):
+            groups["principle-" + line.strip().split(":")[0]] = group
+        elif line.strip():
+            group = line.strip()
+    return groups
+
+
+def skills_data() -> tuple[list[dict], dict[str, str]]:
+    raw = subprocess.run([str(ROOT / "bin" / "ctlhq-skills"), "--json", "--agents"], capture_output=True, text=True)
+    if raw.returncode != 0:
+        print(raw.stderr, file=sys.stderr)
+        sys.exit(1)
+    items = json.loads(raw.stdout)
+    skills = [i for i in items if "/skills/" in i["path"]]
+    agents = {Path(i["path"]).stem: i["description"] for i in items if "/agents/" in i["path"]}
+    for s in skills:
+        s["dir"] = Path(s["path"]).parent.name
+    order = list(group_of())
+    rank = lambda d: order.index(d) if d in order else len(order)
+    skills.sort(key=lambda s: (s["dir"].startswith("principle-"), rank(s["dir"]) if s["dir"].startswith("principle-") else 0, s["dir"]))
+    return skills, agents
+
+
+def tools_of(name: str) -> list[str]:
+    b = ROOT / "skills" / name / "bin"
+    return sorted(t.name for t in b.iterdir() if t.is_file()) if b.is_dir() else []
+
+
+def tool_one_liners() -> list[tuple[str, str]]:
+    out = []
+    for t in sorted((ROOT / "bin").iterdir()):
+        if t.name.startswith(".") or not t.is_file():
+            continue
+        try:
+            r = subprocess.run([str(t), "--help"], capture_output=True, text=True, timeout=30)
+            first = (r.stdout or r.stderr).strip().split("\n")[0]
+        except (OSError, subprocess.TimeoutExpired):
+            first = "(no --help)"
+        first = re.sub(rf"^{re.escape(t.name)}:\s*", "", first)
+        out.append((t.name, first))
+    return out
+
+
+def md_cell(s: str) -> str:
+    """Escape |, <, and > outside inline code, and | inside it too, so GitHub renders the cell as written.
+
+    A GitHub table splits a row on every unescaped |, even one inside inline code, and shows
+    \\| inside a table's inline code as |. inline(table=True) undoes the escape the same way.
+    """
+    parts = re.split(r"(`[^`]*`)", s.replace("\n", " "))
+    for i in range(len(parts)):
+        parts[i] = parts[i].replace("|", "\\|")
+        if i % 2 == 0:
+            parts[i] = parts[i].replace("<", "\\<").replace(">", "\\>")
+    return "".join(parts)
+
+
+def shown(path: Path) -> str:
+    """The path as the user sees it: relative inside the repository, absolute elsewhere."""
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def base(out_dir: Path) -> str:
+    """The prefix that turns a repository path into a link from out_dir, such as "../../"."""
+    rel = os.path.relpath(ROOT, out_dir)
+    return "" if rel == "." else rel + "/"
+
+
+def numbered(rows: list) -> list:
+    """Prefix each Markdown table row with its 1-based number."""
+    return [f"| {i} {r}" for i, r in enumerate(rows, 1)]
+
+
+def write_md(out_dir: Path) -> None:
+    skills, agents = skills_data()
+    b = base(out_dir)
+    workflow = [s for s in skills if not s["dir"].startswith("principle-")]
+    principles = [s for s in skills if s["dir"].startswith("principle-")]
+    out = ["# ctlhq catalog", "",
+           f"{len(skills)} skills ({len(workflow)} workflow, {len(principles)} principles), {len(agents)} agents, "
+           f"{len(list((ROOT / 'skills' / 'ctlhq-mode' / 'playbooks').glob('*.md')))} playbooks, "
+           f"{len(tool_one_liners())} tools. Generated by `bin/ctlhq-catalog build`; `skills.html` and `catalog.html` are the browser views.",
+           "\"What it does\" is the skill's own description. The `#` column numbers rows for citing.", "",
+           "## Workflow skills", "", "| # | skill | what it does | tool |", "|---|---|---|---|"]
+    rows = []
+    for s in workflow:
+        d = s["dir"]
+        rows.append(f"| [`/{d}`]({b}skills/{d}/SKILL.md) | {md_cell(s['description'])} | "
+                    f"{', '.join(f'`{t}`' for t in tools_of(d))} |")
+    out += numbered(rows)
+    out += ["", "## Coding principles", "", "One rule each. `ctlhq-mode` reads its inline index at task start; `ctlhq-principles` prints the 24 coding principles with their descriptions. Groups and order come from that index.", "",
+            "| # | principle | group | what it does |", "|---|---|---|---|"]
+    rows = []
+    for s in principles:
+        d = s["dir"]
+        rows.append(f"| [`{d}`]({b}skills/{d}/SKILL.md) | {group_of().get(d, '')} | {md_cell(s['description'])} |")
+    out += numbered(rows)
+    out += ["", "## Agents", "", "| # | agent | what it does |", "|---|---|---|"]
+    rows = [f"| [`{a}`]({b}agents/{a}.md) | {md_cell(agents[a])} |" for a in sorted(agents)]
+    out += numbered(rows)
+    out += ["", "## Playbooks", "", f"Inside [`ctlhq-mode`]({b}skills/ctlhq-mode/SKILL.md#playbooks). `ctlhq-playbook list` prints them.", "",
+            "## Tools", "", "Every tool answers `--help`. The first line of each `--help`:", "", "| # | command | does |", "|---|---|---|"]
+    out += numbered([f"| `{name}` | {md_cell(line)} |" for name, line in tool_one_liners()])
+    out.append("")
+    (out_dir / "CATALOG.md").write_text("\n".join(out), encoding="utf-8")
+    print(f"wrote {shown(out_dir / 'CATALOG.md')}: {len(workflow)} workflow, {len(principles)} principles, {len(agents)} agents")
+
+
+CSS = """
+:root{--bg:#fff;--fg:#1b1b1b;--muted:#5f6368;--line:#e3e3e3;--head:#f4f4f4;--code:#f1f1f1;--link:#0b57d0}
+@media (prefers-color-scheme: dark){:root{--bg:#141414;--fg:#e8e8e8;--muted:#a0a0a0;--line:#333;--head:#1f1f1f;--code:#242424;--link:#8ab4f8}}
+body{margin:0;padding:24px 16px;background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+main{max-width:1180px;margin:0 auto}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:28px 0 8px}
+p{margin:6px 0;color:var(--muted)}
+input{width:100%;max-width:420px;padding:8px 10px;margin:12px 0;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+table{border-collapse:collapse;width:100%;margin:8px 0 16px}
+th,td{text-align:left;vertical-align:top;padding:7px 9px;border-bottom:1px solid var(--line)}
+th{background:var(--head);position:sticky;top:0}
+td:nth-child(2){white-space:nowrap}
+td.n{text-align:right}
+code{background:var(--code);padding:1px 5px;border-radius:4px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.n{color:var(--muted);font-size:13px}
+"""
+
+FILTER_JS = """
+const q=document.getElementById('q');q.addEventListener('input',()=>{const v=q.value.toLowerCase();
+document.querySelectorAll('tbody tr').forEach(tr=>{tr.style.display=tr.textContent.toLowerCase().includes(v)?'':'none'});});
+"""
+
+
+def inline(md: str, table: bool = False) -> str:
+    """Escape, then render `code`, [text](href), **bold**."""
+    codes: list[str] = []
+
+    def keep(m: re.Match) -> str:
+        code = m.group(1).replace("\\|", "|") if table else m.group(1)
+        codes.append(f"<code>{html.escape(code)}</code>")
+        return f"\x00{len(codes) - 1}\x00"
+
+    s = re.sub(r"`([^`]*)`", keep, md)
+    s = html.escape(s, quote=False)
+    s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", lambda m: f'<a href="{html.escape(m.group(2), quote=True)}">{m.group(1)}</a>', s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+    s = s.replace("\\|", "|").replace("\\&lt;", "&lt;").replace("\\&gt;", "&gt;")
+    return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], s)
+
+
+def page(title: str, body: str, subtitle: str, with_filter: bool) -> str:
+    f = '<input id="q" type="search" placeholder="Filter rows" autofocus>' if with_filter else ""
+    js = f"<script>{FILTER_JS}</script>" if with_filter else ""
+    return (f"<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body><main><h1>{html.escape(title)}</h1>"
+            f"<p>{subtitle}</p>{f}{body}</main>{js}</body></html>\n")
+
+
+def table(head: list, rows: list) -> str:
+    """An HTML table with a leading # column of row numbers."""
+    th = "".join(f"<th>{h}</th>" for h in ["#"] + head)
+    body = "".join(f'<tr><td class="n">{i}</td>{r}</tr>' for i, r in enumerate(rows, 1))
+    return f"<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>"
+
+
+def write_skills_html(out_dir: Path) -> None:
+    skills, agents = skills_data()
+    b = base(out_dir)
+    workflow = [s for s in skills if not s["dir"].startswith("principle-")]
+    principles = [s for s in skills if s["dir"].startswith("principle-")]
+    rows = []
+    for s in workflow:
+        d = s["dir"]
+        tools = " ".join(f"<code>{t}</code>" for t in tools_of(d))
+        rows.append(f'<td><a href="{b}skills/{d}/SKILL.md">/{d}</a></td>'
+                    f"<td>{inline(s['description'])}</td><td>{tools}</td>")
+    body = "<h2>Workflow skills</h2>" + table(["skill", "what it does", "tool"], rows)
+    rows = []
+    for s in principles:
+        d = s["dir"]
+        rows.append(f'<td><a href="{b}skills/{d}/SKILL.md">{d[len("principle-"):]}</a> '
+                    f'<span class="n">{group_of().get(d, "")}</span></td><td>{inline(s["description"])}</td>')
+    body += "<h2>Coding principles</h2>" + table(["principle", "rule"], rows)
+    rows = [f'<td><a href="{b}agents/{a}.md">{a}</a></td><td>{inline(agents[a])}</td>' for a in sorted(agents)]
+    body += "<h2>Agents</h2>" + table(["agent", "what it does"], rows)
+    rows = [f"<td><code>{n}</code></td><td>{html.escape(l)}</td>" for n, l in tool_one_liners()]
+    body += "<h2>Tools (bin/)</h2>" + table(["command", "does"], rows)
+    sub = (f"{len(workflow)} workflow skills, {len(principles)} principles, {len(agents)} agents, {len(tool_one_liners())} tools. "
+           f"Regenerate with <code>bin/ctlhq-catalog build</code>. "
+           f'Full catalog: <a href="catalog.html">catalog.html</a>.')
+    (out_dir / "skills.html").write_text(page("ctlhq skills", body, sub, True), encoding="utf-8")
+    print(f"wrote {shown(out_dir / 'skills.html')}")
+
+
+def render_md(md: str) -> str:
+    lines = md.split("\n")
+    out: list[str] = []
+    i = 0
+    para: list[str] = []
+
+    def flush() -> None:
+        if para:
+            out.append(f"<p>{inline(' '.join(para))}</p>")
+            para.clear()
+
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("|"):
+            flush()
+            block = []
+            while i < len(lines) and lines[i].startswith("|"):
+                block.append(lines[i])
+                i += 1
+            cells = lambda l: [c.strip() for c in re.split(r"(?<!\\)\|", l.strip().strip("|"))]
+            head = cells(block[0])
+            body_rows = [cells(r) for r in block[2:]] if len(block) > 2 else []
+            out.append("<table><thead><tr>" + "".join(f"<th>{inline(c, table=True)}</th>" for c in head) + "</tr></thead><tbody>"
+                       + "".join("<tr>" + "".join(f"<td>{inline(c, table=True)}</td>" for c in r) + "</tr>" for r in body_rows)
+                       + "</tbody></table>")
+            continue
+        m = re.match(r"^(#{1,3})\s+(.*)$", line)
+        if m:
+            flush()
+            level = len(m.group(1))
+            out.append(f"<h{level}>{inline(m.group(2))}</h{level}>")
+        elif not line.strip():
+            flush()
+        else:
+            para.append(line)
+        i += 1
+    flush()
+    return "\n".join(out)
+
+
+def write_catalog_html(out_dir: Path) -> None:
+    md = (out_dir / "CATALOG.md").read_text(encoding="utf-8")
+    body = render_md(md)
+    body = re.sub(r"^<h1>.*?</h1>\n?", "", body, count=1)
+    sub = 'Rendered from <code>CATALOG.md</code> by <code>bin/ctlhq-catalog build</code>. Quick view: <a href="skills.html">skills.html</a>.'
+    (out_dir / "catalog.html").write_text(page("ctlhq catalog", body, sub, True), encoding="utf-8")
+    print(f"wrote {shown(out_dir / 'catalog.html')}")
+
+
+def build(out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_md(out_dir)
+    write_skills_html(out_dir)
+    write_catalog_html(out_dir)
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    if cmd not in ("build", "open"):
+        print(f"unknown command {cmd}", file=sys.stderr)
+        return 2
+    out_dir = DEFAULT_OUT
+    if rest[:1] == ["--out"] and len(rest) == 2:
+        out_dir = Path(rest[1]).expanduser().resolve()
+    elif rest:
+        print(f"usage: ctlhq-catalog {cmd} [--out DIR]", file=sys.stderr)
+        return 2
+    group_of()  # exit 1 on an unusable principles index before any output is written
+    build(out_dir)
+    if cmd == "open":
+        page_path = out_dir / "skills.html"
+        try:
+            opened = subprocess.run(["open", str(page_path)]).returncode == 0
+        except OSError:
+            opened = False
+        if not opened:
+            print(f"could not open {page_path}; open it in a browser yourself", file=sys.stderr)
+            return 1
+        print(f"opened {shown(page_path)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

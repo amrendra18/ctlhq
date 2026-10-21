@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""ctlhq-repo-map: read-only map of a git repository: languages, entry points, test commands, docs, CI, ports and env vars.
+
+Usage:
+  ctlhq-repo-map [DIR] [--json]
+
+Prints seven numbered sections. Every table has a leading # column so a reply can cite rows.
+  1. Languages     tracked files per language, from `git ls-files` extensions
+  2. Entry points  package.json bin, main and scripts; pyproject scripts; cmd/*/main.go and
+                   main.go; Makefile targets; executables in bin/ and scripts/
+  3. Test commands package scripts named test*; Makefile targets named test*; `go test ./...`
+                   when go.mod exists; pytest config (pytest.ini, pyproject [tool.pytest],
+                   setup.cfg or tox.ini [pytest] sections); tests/*/run.sh
+  4. Docs          README*, AGENTS.md, CLAUDE.md, PLAN.md, NEXT.md, docs/*.md, with word counts
+  5. CI files      .github/workflows/*, .gitlab-ci.yml, .circleci/*, Jenkinsfile,
+                   azure-pipelines.yml, .travis.yml, bitbucket-pipelines.yml, .buildkite/*
+  6. Ports and env .env.example (and .env.sample, .env.template) variable names; port numbers
+                   and ${VAR} or process.env.VAR names in docker-compose, Dockerfile, Procfile,
+                   and *.toml, *.yaml, *.yml, *.ini, *.json config files at the top level or
+                   under config/
+  7. Verification  always three rows, read from disk at the repository top (tracked or not):
+     harness       scripts/verify (present, missing, or present but not executable);
+                   verify/features (the number of *.md feature map files; 0 means no map);
+                   newest evidence (the newest .local/verify/<YYYYMMDDTHHMMSSZ> folder by
+                   name and its age in whole days, or "none")
+
+DIR defaults to the current folder and may be a subfolder; paths are relative to the
+repository top. Sections 1 to 6 count tracked files only, so .gitignore is respected. A
+section with no rows prints "none found". --json prints one object with the seven sections
+as lists of row objects (section 7 under "verification").
+
+Read-only: it runs only `git rev-parse` and `git ls-files` and reads files. Operator rule
+(home/AGENTS.md): "Set bars from a measurement on real data, never from an estimate."
+
+Exit 0 after printing the map, 1 when DIR is not a git repository (or git is missing),
+2 on a usage error. Exit 1 and 2 print three lines on stderr: "ctlhq-repo-map: <what is wrong>",
+"why: <why it stops>", "fix: <the command to run>".
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+LANGS = {
+    ".py": "Python", ".pyi": "Python", ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
+    ".jsx": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript", ".go": "Go", ".rs": "Rust",
+    ".rb": "Ruby", ".java": "Java", ".kt": "Kotlin", ".kts": "Kotlin", ".swift": "Swift",
+    ".c": "C", ".h": "C", ".cc": "C++", ".cpp": "C++", ".cxx": "C++", ".hpp": "C++",
+    ".cs": "C#", ".php": "PHP", ".scala": "Scala", ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell",
+    ".ps1": "PowerShell", ".lua": "Lua", ".r": "R", ".dart": "Dart", ".ex": "Elixir", ".exs": "Elixir",
+    ".erl": "Erlang", ".hs": "Haskell", ".ml": "OCaml", ".clj": "Clojure", ".m": "Objective-C",
+    ".mm": "Objective-C", ".vue": "Vue", ".svelte": "Svelte", ".sql": "SQL",
+    ".html": "HTML", ".htm": "HTML", ".css": "CSS", ".scss": "CSS", ".sass": "CSS", ".less": "CSS",
+    ".md": "Markdown", ".markdown": "Markdown", ".rst": "reStructuredText", ".txt": "Text",
+    ".json": "JSON", ".yaml": "YAML", ".yml": "YAML", ".toml": "TOML", ".ini": "INI", ".cfg": "INI",
+    ".xml": "XML", ".tsv": "TSV", ".csv": "CSV", ".proto": "Protocol Buffers", ".tf": "Terraform",
+}
+NAMES = {"Makefile": "Makefile", "GNUmakefile": "Makefile", "makefile": "Makefile",
+         "Dockerfile": "Dockerfile", "Jenkinsfile": "Groovy", "Rakefile": "Ruby", "Gemfile": "Ruby"}
+SHEBANG = [("python", "Python"), ("node", "JavaScript"), ("bash", "Shell"), ("zsh", "Shell"),
+           ("/sh", "Shell"), (" sh", "Shell"), ("ruby", "Ruby"), ("perl", "Perl")]
+DOC_TOP = ("AGENTS.md", "CLAUDE.md", "PLAN.md", "NEXT.md")
+ENV_EXAMPLES = (".env.example", ".env.sample", ".env.template")
+CI_EXACT = (".gitlab-ci.yml", "Jenkinsfile", "azure-pipelines.yml", ".travis.yml", "bitbucket-pipelines.yml")
+CI_PREFIX = (".github/workflows/", ".circleci/", ".buildkite/")
+CONFIG_SUFFIX = (".toml", ".yaml", ".yml", ".ini", ".json")
+CONFIG_NAMES = ("Dockerfile", "Procfile")
+SECTIONS = ("languages", "entry_points", "test_commands", "docs", "ci", "ports_env", "verification")
+TITLES = ("Languages", "Entry points", "Test commands", "Docs", "CI files", "Ports and env vars",
+          "Verification harness")
+COLUMNS = (("language", "files"), ("kind", "name", "source"), ("command", "source"),
+           ("words", "file"), ("file",), ("kind", "name", "source"), ("item", "state"))
+STAMP = re.compile(r"^\d{8}T\d{6}Z$")
+
+MAKE_TARGET = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.\-/]*)\s*:(?![=:])")
+ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+ENV_REF = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::?[-?][^}]*)?\}|process\.env\.([A-Z_][A-Z0-9_]*)|os\.environ(?:\.get)?\(\s*['\"]([A-Z_][A-Z0-9_]*)")
+PORT_KEY = re.compile(r"(?i)\bport\b[\"']?\s*[:=]\s*[\"']?(\d{2,5})\b")
+PORT_MAP = re.compile(r"[\"']?(\d{2,5}):(\d{2,5})[\"']?")
+EXPOSE = re.compile(r"(?i)^\s*EXPOSE\s+(.+)$")
+LOCALHOST = re.compile(r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})\b")
+
+
+def fail(what: str, why: str, fix: str, rc: int) -> int:
+    print(f"ctlhq-repo-map: {what}\nwhy: {why}\nfix: {fix}", file=sys.stderr)
+    return rc
+
+
+def usage(msg: str, fix: str) -> int:
+    return fail(msg, "ctlhq-repo-map stops rather than guess; usage: ctlhq-repo-map [DIR] [--json]", fix, 2)
+
+
+def git(dir_: Path, *args: str) -> tuple[int, str]:
+    try:
+        r = subprocess.run(["git", "-C", str(dir_), *args], capture_output=True, text=True)
+    except OSError as e:
+        return 127, str(e)
+    return r.returncode, r.stdout
+
+
+def read(top: Path, rel: str) -> str:
+    try:
+        return (top / rel).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def language(top: Path, rel: str) -> str | None:
+    name = rel.rsplit("/", 1)[-1]
+    if name in NAMES:
+        return NAMES[name]
+    if name.startswith("Dockerfile"):
+        return "Dockerfile"
+    suffix = os.path.splitext(name)[1].lower()
+    if suffix:
+        return LANGS.get(suffix)
+    try:
+        with open(top / rel, "rb") as fh:
+            first = fh.readline(200).decode("utf-8", "replace")
+    except OSError:
+        return None
+    if first.startswith("#!"):
+        for key, lang in SHEBANG:
+            if key in first:
+                return lang
+    return None
+
+
+def languages(top: Path, files: list[str]) -> list[dict]:
+    counts: dict[str, int] = {}
+    for rel in files:
+        lang = language(top, rel)
+        if lang:
+            counts[lang] = counts.get(lang, 0) + 1
+    rows = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"language": k, "files": v} for k, v in rows]
+
+
+def load_json(top: Path, rel: str) -> dict:
+    try:
+        data = json.loads(read(top, rel) or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def toml_table(text: str, table: str) -> list[tuple[str, str]]:
+    """key = value pairs inside [table] of a TOML file, without a TOML parser (Python 3.9)."""
+    out, inside = [], False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("["):
+            inside = s.strip("[] ") == table
+            continue
+        if inside and "=" in s and not s.startswith("#"):
+            k, v = s.split("=", 1)
+            out.append((k.strip().strip("\"'"), v.strip().strip("\"'")))
+    return out
+
+
+def make_targets(text: str) -> list[str]:
+    seen = []
+    for line in text.splitlines():
+        m = MAKE_TARGET.match(line)
+        if m:
+            t = m.group(1)
+            if t.startswith(".") or "%" in t or "$" in t:
+                continue
+            if t not in seen:
+                seen.append(t)
+    return seen
+
+
+def entry_points_and_tests(top: Path, files: list[str]) -> tuple[list[dict], list[dict]]:
+    entries: list[dict] = []
+    tests: list[dict] = []
+    for rel in files:
+        name = rel.rsplit("/", 1)[-1]
+        if name == "package.json" and "node_modules/" not in rel:
+            pkg = load_json(top, rel)
+            b = pkg.get("bin")
+            if isinstance(b, str):
+                entries.append({"kind": "package bin", "name": f"{pkg.get('name', '?')} -> {b}", "source": rel})
+            elif isinstance(b, dict):
+                for k, v in b.items():
+                    entries.append({"kind": "package bin", "name": f"{k} -> {v}", "source": rel})
+            for field in ("main", "module"):
+                if isinstance(pkg.get(field), str):
+                    entries.append({"kind": f"package {field}", "name": pkg[field], "source": rel})
+            scripts = pkg.get("scripts")
+            if isinstance(scripts, dict):
+                for k, v in scripts.items():
+                    entries.append({"kind": "package script", "name": f"{k}: {v}", "source": rel})
+                    if k.startswith("test"):
+                        tests.append({"command": f"npm run {k}", "source": rel})
+        elif name == "pyproject.toml":
+            text = read(top, rel)
+            for table in ("project.scripts", "tool.poetry.scripts"):
+                for k, v in toml_table(text, table):
+                    entries.append({"kind": "python script", "name": f"{k} -> {v}", "source": rel})
+            if re.search(r"^\[tool\.pytest", text, re.M):
+                tests.append({"command": "pytest", "source": rel})
+        elif name in ("Makefile", "GNUmakefile", "makefile"):
+            for t in make_targets(read(top, rel)):
+                entries.append({"kind": "make target", "name": t, "source": rel})
+                if t.startswith("test") or t == "check":
+                    prefix = "" if "/" not in rel else f"-C {rel.rsplit('/', 1)[0]} "
+                    tests.append({"command": f"make {prefix}{t}", "source": rel})
+        elif name == "main.go":
+            parts = rel.split("/")
+            if (len(parts) == 3 and parts[0] == "cmd") or len(parts) == 1:
+                entries.append({"kind": "go main", "name": "/".join(parts[:-1]) or ".", "source": rel})
+        elif name == "go.mod":
+            d = rel.rsplit("/", 1)[0] if "/" in rel else "."
+            cmd = "go test ./..." if d == "." else f"(cd {d} && go test ./...)"
+            tests.append({"command": cmd, "source": rel})
+        elif name == "pytest.ini":
+            tests.append({"command": "pytest", "source": rel})
+        elif name in ("setup.cfg", "tox.ini") and re.search(r"^\[(tool:)?pytest\]", read(top, rel), re.M):
+            tests.append({"command": "pytest", "source": rel})
+        parts = rel.split("/")
+        if len(parts) == 2 and parts[0] in ("bin", "scripts"):
+            p = top / rel
+            if os.access(p, os.X_OK) and (p.is_file() or p.is_symlink()):
+                entries.append({"kind": f"{parts[0]}/ executable", "name": parts[1], "source": rel})
+        if len(parts) == 3 and parts[0] == "tests" and parts[2] == "run.sh":
+            tests.append({"command": f"bash {rel}", "source": rel})
+    return entries, tests
+
+
+def docs(top: Path, files: list[str]) -> list[dict]:
+    rows = []
+    for rel in files:
+        parts = rel.split("/")
+        top_doc = len(parts) == 1 and (parts[0] in DOC_TOP or parts[0].upper().startswith("README"))
+        in_docs = len(parts) == 2 and parts[0] == "docs" and parts[1].lower().endswith(".md")
+        if top_doc or in_docs:
+            rows.append({"words": len(read(top, rel).split()), "file": rel})
+    return rows
+
+
+def ci(files: list[str]) -> list[dict]:
+    return [{"file": f} for f in files if f in CI_EXACT or f.startswith(CI_PREFIX)]
+
+
+def config_file(rel: str) -> bool:
+    parts = rel.split("/")
+    name = parts[-1]
+    if not (len(parts) == 1 or (len(parts) == 2 and parts[0] == "config")):
+        return False
+    if name.startswith("docker-compose") or name.startswith("compose.") or name in CONFIG_NAMES or name.startswith("Dockerfile"):
+        return True
+    if name in ("package.json", "package-lock.json", "tsconfig.json") or name.endswith(".lock"):
+        return False
+    return name.endswith(CONFIG_SUFFIX)
+
+
+def ports_env(top: Path, files: list[str]) -> list[dict]:
+    rows: list[dict] = []
+    seen = set()
+
+    def add(kind: str, name: str, src: str) -> None:
+        if (kind, name, src) not in seen:
+            seen.add((kind, name, src))
+            rows.append({"kind": kind, "name": name, "source": src})
+
+    for rel in files:
+        name = rel.rsplit("/", 1)[-1]
+        if name in ENV_EXAMPLES:
+            for line in read(top, rel).splitlines():
+                m = ENV_LINE.match(line)
+                if m:
+                    add("env", m.group(1), rel)
+                    if "PORT" in m.group(1).upper():
+                        val = line.split("=", 1)[1].strip().strip("\"'")
+                        if val.isdigit():
+                            add("port", val, rel)
+        elif config_file(rel):
+            text = read(top, rel)
+            for m in ENV_REF.finditer(text):
+                add("env", next(g for g in m.groups() if g), rel)
+            for line in text.splitlines():
+                for m in PORT_KEY.finditer(line):
+                    add("port", m.group(1), rel)
+                for m in LOCALHOST.finditer(line):
+                    add("port", m.group(1), rel)
+                e = EXPOSE.match(line)
+                if e:
+                    for tok in e.group(1).split():
+                        p = tok.split("/")[0]
+                        if p.isdigit():
+                            add("port", p, rel)
+                if name.startswith(("docker-compose", "compose.")) and line.lstrip().startswith("-"):
+                    for m in PORT_MAP.finditer(line):
+                        add("port", m.group(1), rel)
+    return rows
+
+
+def verification(top: Path, now: dt.datetime | None = None) -> list[dict]:
+    """The verification harness facts: scripts/verify, the feature map, the newest evidence folder."""
+    script = top / "scripts" / "verify"
+    if script.is_file() and os.access(script, os.X_OK):
+        state = "present"
+    elif script.is_file():
+        state = "present but not executable"
+    else:
+        state = "missing"
+    rows = [{"item": "scripts/verify", "state": state}]
+    features = top / "verify" / "features"
+    count = len([p for p in features.glob("*.md") if p.is_file()]) if features.is_dir() else 0
+    rows.append({"item": "verify/features", "state": f"{count} feature map file{'s' if count != 1 else ''}"})
+    evidence = top / ".local" / "verify"
+    stamps = sorted(p.name for p in evidence.iterdir() if p.is_dir() and STAMP.match(p.name)) if evidence.is_dir() else []
+    newest = "none"
+    if stamps:
+        when = dt.datetime.strptime(stamps[-1], "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc)
+        days = ((now or dt.datetime.now(dt.timezone.utc)) - when).days
+        newest = f".local/verify/{stamps[-1]}, {days} day{'s' if days != 1 else ''} old"
+    rows.append({"item": "newest evidence", "state": newest})
+    return rows
+
+
+def build(top: Path, files: list[str]) -> dict:
+    entries, tests = entry_points_and_tests(top, files)
+    return {
+        "languages": languages(top, files),
+        "entry_points": entries,
+        "test_commands": tests,
+        "docs": docs(top, files),
+        "ci": ci(files),
+        "ports_env": ports_env(top, files),
+        "verification": verification(top),
+    }
+
+
+def cell(v) -> str:
+    return str(v).replace("|", "\\|").replace("\n", " ")
+
+
+def render(top: Path, head: str, data: dict) -> str:
+    out = [f"ctlhq-repo-map: {top} (commit {head or 'none'})"]
+    for i, (key, title, cols) in enumerate(zip(SECTIONS, TITLES, COLUMNS), 1):
+        rows = data[key]
+        out.append("")
+        out.append(f"## {i}. {title} ({len(rows)})")
+        if not rows:
+            out.append("none found")
+            continue
+        out.append("| # | " + " | ".join(cols) + " |")
+        out.append("|---|" + "---|" * len(cols))
+        for n, r in enumerate(rows, 1):
+            out.append(f"| {n} | " + " | ".join(cell(r[c]) for c in cols) + " |")
+    return "\n".join(out)
+
+
+def main(argv: list[str]) -> int:
+    as_json = False
+    dirs = []
+    for a in argv:
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--json":
+            as_json = True
+        elif a.startswith("-"):
+            return usage(f"unknown option: {a}", "use --json, or no option; ctlhq-repo-map --help explains it")
+        else:
+            dirs.append(a)
+    if len(dirs) > 1:
+        return usage(f"at most one DIR, got {len(dirs)}: {' '.join(dirs)}", f"ctlhq-repo-map {dirs[0]}")
+    d = Path(dirs[0] if dirs else ".")
+    if not d.is_dir():
+        return usage(f"not a folder: {d}", f"pass a folder that exists, for example: ctlhq-repo-map {d.parent}")
+    rc, out = git(d, "rev-parse", "--show-toplevel")
+    if rc == 127:
+        return fail("git is not installed or not on PATH", "ctlhq-repo-map lists files with `git ls-files`",
+                    "install git (on macOS: xcode-select --install), then rerun", 1)
+    if rc != 0 or not out.strip():
+        return fail(f"not a git repository: {d}",
+                    "ctlhq-repo-map maps tracked files only (`git ls-files`), so .gitignore is respected",
+                    "ctlhq-repo-map <path to the repository>, or cd into the repository and run ctlhq-repo-map", 1)
+    top = Path(out.strip())
+    _, head = git(top, "rev-parse", "--short", "HEAD")
+    head = head.strip() if head.strip() and not head.startswith("HEAD") else ""
+    rc, listing = git(top, "ls-files", "-z")
+    if rc != 0:
+        return fail(f"git ls-files failed in {top}", "ctlhq-repo-map needs the list of tracked files",
+                    f"run `git -C {top} ls-files` yourself to see git's error, fix it, then rerun", 1)
+    files = sorted(f for f in listing.split("\0") if f)
+    data = build(top, files)
+    if as_json:
+        print(json.dumps({"root": str(top), "commit": head, **data}, indent=2))
+    else:
+        print(render(top, head, data))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

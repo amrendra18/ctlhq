@@ -1,0 +1,1 @@
+{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"StatusContext","context":"lint","state":"SUCCESS","targetUrl":"https://example.invalid/run/3"}]}}}}]}}}}}

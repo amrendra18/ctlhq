@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""ctlhq-name-check: collision check for candidate names (commands on PATH, ~/projects folders, ctlhq skills and tools, optional npm and PyPI).
+
+Usage:
+  ctlhq-name-check [--registry] [--projects DIR] [--root DIR] [--timeout 8] [--json] <name> [<name> ...]
+
+For each name it checks, case-insensitively where the place is:
+  command   `command -v <name>` in sh (a program on PATH, a builtin, or a keyword)
+  projects  a folder of that name under --projects (default ~/projects)
+  ctlhq    a skill folder skills/<name> or a tool bin/<name> or skills/*/bin/<name>
+            under --root (default: the ctlhq repository this file lives in)
+  npm       with --registry: the npm registry has a package of that name
+  pypi      with --registry: PyPI has a project of that name (PEP 503 normalised)
+Each cell is "free" or what collides (a path, or "taken"). Without --registry the npm and
+pypi cells read "not checked". The output is a numbered table, tab separated:
+#, name, command, projects, ctlhq, npm, pypi, verdict. The verdict is collides, free, or
+unknown (nothing collides, but a registry was unreachable, so that name was not fully
+checked). --json prints the rows as a JSON list instead.
+
+Exit codes: 0 every name is free; 1 one or more names collide; 2 usage error; 3 no name
+collides but a registry could not be reached, so the check is incomplete.
+
+Encodes home/AGENTS.md: "Use the same clear name for the same thing."
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(os.path.realpath(__file__)).parents[3]
+UA = "ctlhq-name-check/1"
+URLS = {
+    "npm": os.environ.get("NAME_CHECK_NPM_URL", "https://registry.npmjs.org/{name}"),
+    "pypi": os.environ.get("NAME_CHECK_PYPI_URL", "https://pypi.org/pypi/{name}/json"),
+}
+
+
+def on_path(name):
+    r = subprocess.run(["sh", "-c", 'command -v -- "$1"', "sh", name],
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def folder_match(parent, name):
+    if not parent.is_dir():
+        return None
+    for p in sorted(parent.iterdir()):
+        if p.name.lower() == name.lower():
+            return str(p)
+    return None
+
+
+def ctlhq_match(root, name):
+    hits = []
+    skill = folder_match(root / "skills", name)
+    if skill:
+        hits.append("skill " + os.path.relpath(skill, root))
+    bins = [root / "bin"] + sorted((root / "skills").glob("*/bin"))
+    for b in bins:
+        hit = folder_match(b, name)
+        if hit:
+            hits.append("tool " + os.path.relpath(hit, root))
+            break
+    return "; ".join(hits) or None
+
+
+def registry(kind, name, timeout):
+    """'taken', None (free), or raises OSError when the registry cannot be reached."""
+    q = name.lower() if kind == "npm" else re.sub(r"[-_.]+", "-", name).lower()
+    url = URLS[kind].format(name=urllib.parse.quote(q, safe="@"))
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return "taken"
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise OSError("HTTP %d" % e.code)
+    except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+        raise OSError(str(getattr(e, "reason", e)))
+
+
+def main(argv):
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    ap = argparse.ArgumentParser(prog="ctlhq-name-check", add_help=False)
+    ap.add_argument("--registry", action="store_true")
+    ap.add_argument("--projects", default=str(Path.home() / "projects"))
+    ap.add_argument("--root", default=str(ROOT))
+    ap.add_argument("--timeout", type=float, default=8.0)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("names", nargs="*")
+    try:
+        a, extra = ap.parse_known_args(argv)
+    except SystemExit:
+        return 2
+    bad = [n for n in a.names if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", n)]
+    if extra or not a.names or bad:
+        print("ctlhq-name-check: %s" % ("unknown option: " + " ".join(extra) if extra else
+                                  "bad name: " + " ".join(bad) if bad else "give one or more names"),
+              file=sys.stderr)
+        return 2
+    rows, unreachable = [], []
+    for name in a.names:
+        row = {"name": name, "command": on_path(name),
+               "projects": folder_match(Path(a.projects).expanduser(), name),
+               "ctlhq": ctlhq_match(Path(a.root), name), "npm": "not checked", "pypi": "not checked"}
+        for kind in ("npm", "pypi"):
+            if not a.registry:
+                continue
+            try:
+                row[kind] = registry(kind, name, a.timeout)
+            except OSError as e:
+                row[kind] = "unreachable"
+                unreachable.append("%s (%s)" % (kind, e))
+        hits = [row[k] for k in ("command", "projects", "ctlhq", "npm", "pypi")]
+        if any(h and h not in ("not checked", "unreachable") for h in hits):
+            row["verdict"] = "collides"
+        else:
+            row["verdict"] = "unknown" if "unreachable" in hits else "free"
+        rows.append(row)
+    if a.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        print("#\tname\tcommand\tprojects\tctlhq\tnpm\tpypi\tverdict")
+        for i, r in enumerate(rows, 1):
+            cells = [r[k] or "free" for k in ("command", "projects", "ctlhq", "npm", "pypi")]
+            print("\t".join([str(i), r["name"]] + cells + [r["verdict"]]))
+    if any(r["verdict"] == "collides" for r in rows):
+        return 1
+    if unreachable:
+        print("ctlhq-name-check: registry unreachable: %s. The check is incomplete." % ", ".join(sorted(set(unreachable))),
+              file=sys.stderr)
+        return 3
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

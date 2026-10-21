@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""ctlhq-serve: start a dev server, wait until it answers, probe its health, and stop only the process group it started.
+
+Usage:
+  ctlhq-serve start --name NAME --cwd DIR --ready-url URL [--timeout S] -- CMD [ARGS...]
+  ctlhq-serve health --name NAME [--timeout S]
+  ctlhq-serve stop --name NAME [--grace S]
+  ctlhq-serve list [--json]
+
+start   Runs CMD in DIR as the leader of a new process group, with stdin from /dev/null
+        and stdout and stderr to .local/serve/NAME.log. Polls --ready-url every 0.2 s
+        until it answers with an HTTP status below 400, then prints "ready NAME pid N URL"
+        and exits 0; the server keeps running. When the server exits first, or --timeout
+        (default 30 s) passes, it stops the process group, prints the last 10 log lines,
+        and exits 1. A NAME that is already running exits 1.
+health  Exit 0 when the server's process runs and its ready URL answers below 400 within
+        --timeout (default 5 s); otherwise exit 1 with the reason.
+stop    Sends SIGTERM to the process group it started, waits --grace (default 5 s), then
+        sends SIGKILL to what is left, and removes the state file. Before any signal it
+        checks that the group leader is the process it started (same start time), so a
+        reused process number is never signalled. Processes that left the group (their own
+        setsid) are not touched.
+list    One line per known server: name, state (running or dead), pid, ready URL, start
+        time (UTC). --json prints the same as a JSON array. Exit 0, also when empty.
+
+State: .local/serve/NAME.json and NAME.log at the top of the git work tree that holds
+the current directory, or in the current directory when there is none. NAME may hold
+letters, digits, ".", "-", "_".
+
+Operator rule (home/AGENTS.md, Replies): "Before stating the state of a process, agent or window, check it."
+
+Exit codes: 0 done; 1 not ready, not healthy, not running, or unknown NAME; 2 usage error.
+"""
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+USAGE = (
+    "usage: ctlhq-serve start --name NAME --cwd DIR --ready-url URL [--timeout S] -- CMD [ARGS...]\n"
+    "       ctlhq-serve health --name NAME [--timeout S] | stop --name NAME [--grace S] | list [--json]"
+)
+
+
+class UsageError(Exception):
+    pass
+
+
+def say(msg: str) -> None:
+    print(f"ctlhq-serve: {msg}", file=sys.stderr)
+
+
+def state_dir() -> Path:
+    top = None
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            top = Path(r.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return (top or Path.cwd()) / ".local" / "serve"
+
+
+def now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def proc_start(pid: int) -> str | None:
+    """The process's start time as ps prints it, or None when no such process runs."""
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = r.stdout.strip()
+    return out if r.returncode == 0 and out else None
+
+
+def group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):  # macOS answers EPERM for a group of only zombies
+        return False
+
+
+def leader_ours(st: dict) -> bool | None:
+    """True when the leader runs and is ours, False when the number now belongs to another process, None when it is gone."""
+    started = proc_start(st["pid"])
+    if started is None:
+        return None
+    return started == st["proc_start"]
+
+
+def answers(url: str, timeout: float) -> tuple[bool, str]:
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=timeout) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        reason = getattr(e, "reason", e)
+        return False, f"{url} did not answer: {reason}"
+    if code < 400:
+        return True, f"{url} answered {code}"
+    return False, f"{url} answered {code}"
+
+
+def load(d: Path, name: str) -> dict | None:
+    try:
+        return json.loads((d / f"{name}.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def stop_group(st: dict, grace: float, reap=None) -> str:
+    """Stop the group the state names; reap() collects our own child when we are its parent. Returns what happened, in words."""
+    pgid = st["pgid"]
+    ours = leader_ours(st)
+    if ours is False:
+        return f"pid {st['pid']} now belongs to another process; nothing signalled"
+    if not group_alive(pgid):
+        return "not running"
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        until = time.monotonic() + (grace if sig == signal.SIGTERM else 3)
+        while True:
+            if reap:
+                reap()
+            if not group_alive(pgid) or time.monotonic() >= until:
+                break
+            time.sleep(0.1)
+        if not group_alive(pgid):
+            return f"stopped process group {pgid}" + (" (needed SIGKILL)" if sig == signal.SIGKILL else "")
+    return f"process group {pgid} still has processes after SIGKILL" if group_alive(pgid) else f"stopped process group {pgid}"
+
+
+def log_tail(path: Path, n: int = 10) -> list:
+    try:
+        return path.read_text(errors="replace").splitlines()[-n:]
+    except OSError:
+        return []
+
+
+def cmd_start(name: str, cwd: str, ready_url: str, timeout: float, cmd: list) -> int:
+    d = state_dir()
+    old = load(d, name)
+    if old and leader_ours(old):
+        say(f"{name} is already running (pid {old['pid']}); stop it first")
+        return 1
+    if not Path(cwd).is_dir():
+        say(f"--cwd is not a folder: {cwd}")
+        return 2
+    d.mkdir(parents=True, exist_ok=True)
+    log = d / f"{name}.log"
+    with open(log, "wb") as lf:
+        try:
+            p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as e:
+            say(f"cannot start {cmd[0]}: {e.strerror or e}")
+            return 1
+    st = {
+        "name": name, "pid": p.pid, "pgid": p.pid, "proc_start": proc_start(p.pid), "cwd": str(Path(cwd).resolve()),
+        "cmd": cmd, "ready_url": ready_url, "started": now_iso(), "log": str(log),
+    }
+    (d / f"{name}.json").write_text(json.dumps(st, indent=2) + "\n")
+    deadline = time.monotonic() + timeout
+    why = ""
+    while True:
+        rc = p.poll()
+        if rc is not None:
+            why = f"{name} exited with code {rc} before {ready_url} answered"
+            break
+        ok, why = answers(ready_url, 2)
+        if ok:
+            print(f"ready {name} pid {p.pid} {ready_url}")
+            return 0
+        if time.monotonic() >= deadline:
+            why = f"{name} not ready after {timeout:g} s: {why}"
+            break
+        time.sleep(0.2)
+    say(why)
+    say(stop_group(st, 2, p.poll))
+    (d / f"{name}.json").unlink(missing_ok=True)
+    for line in log_tail(log):
+        print(f"  log: {line}", file=sys.stderr)
+    return 1
+
+
+def cmd_health(name: str, timeout: float) -> int:
+    st = load(state_dir(), name)
+    if not st:
+        say(f"no server named {name}")
+        return 1
+    ours = leader_ours(st)
+    if not ours:
+        print(f"unhealthy {name}: process {st['pid']} is not running")
+        return 1
+    ok, why = answers(st["ready_url"], timeout)
+    print(f"{'healthy' if ok else 'unhealthy'} {name}: {why}")
+    return 0 if ok else 1
+
+
+def cmd_stop(name: str, grace: float) -> int:
+    d = state_dir()
+    st = load(d, name)
+    if not st:
+        say(f"no server named {name}")
+        return 1
+    what = stop_group(st, grace)
+    if "still has processes" in what:
+        say(f"{name}: {what}")
+        return 1
+    (d / f"{name}.json").unlink(missing_ok=True)
+    print(f"stopped {name}: {what}")
+    return 0
+
+
+def cmd_list(as_json: bool) -> int:
+    d = state_dir()
+    rows = []
+    for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+        st = load(d, f.stem)
+        if not st:
+            continue
+        rows.append({"name": st["name"], "state": "running" if leader_ours(st) else "dead", "pid": st["pid"],
+                     "ready_url": st["ready_url"], "started": st["started"], "cwd": st["cwd"]})
+    if as_json:
+        print(json.dumps(rows, indent=2))
+    elif not rows:
+        print("no servers")
+    else:
+        w = max(len(r["name"]) for r in rows)
+        for r in rows:
+            print(f"{r['name']:<{w}}  {r['state']:<7}  pid {r['pid']}  {r['ready_url']}  {r['started']}")
+    return 0
+
+
+def parse(argv: list) -> tuple:
+    if not argv:
+        raise UsageError("no subcommand")
+    if argv[0] in ("-h", "--help"):
+        return ("help",)
+    sub, rest = argv[0], argv[1:]
+    cmd: list = []
+    if "--" in rest:
+        i = rest.index("--")
+        rest, cmd = rest[:i], rest[i + 1:]
+    allowed = {"start": {"--name", "--cwd", "--ready-url", "--timeout"}, "health": {"--name", "--timeout"},
+               "stop": {"--name", "--grace"}, "list": {"--json"}}
+    if sub not in allowed:
+        raise UsageError(f"unknown subcommand {sub!r}")
+    opts: dict = {}
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a in ("-h", "--help"):
+            return ("help",)
+        if a not in allowed[sub]:
+            raise UsageError(f"{sub}: unknown argument {a!r}")
+        if a == "--json":
+            opts[a] = True
+            i += 1
+            continue
+        if i + 1 >= len(rest):
+            raise UsageError(f"{a} needs a value")
+        opts[a] = rest[i + 1]
+        i += 2
+    for k in ("--timeout", "--grace"):
+        if k in opts:
+            try:
+                opts[k] = float(opts[k])
+            except ValueError:
+                raise UsageError(f"{k} needs a number of seconds, got {opts[k]!r}")
+            if opts[k] <= 0:
+                raise UsageError(f"{k} needs a number above 0")
+    if sub != "list":
+        name = opts.get("--name")
+        if not name:
+            raise UsageError(f"{sub} needs --name NAME")
+        if not NAME_RE.match(name):
+            raise UsageError(f"--name may hold letters, digits, '.', '-', '_', got {name!r}")
+    if sub == "start":
+        for k in ("--cwd", "--ready-url"):
+            if not opts.get(k):
+                raise UsageError(f"start needs {k}")
+        if not re.match(r"^https?://", opts["--ready-url"]):
+            raise UsageError(f"--ready-url needs an http or https URL, got {opts['--ready-url']!r}")
+        if not cmd:
+            raise UsageError("start needs a command after --")
+    elif cmd:
+        raise UsageError(f"{sub} takes no command")
+    return (sub, opts, cmd)
+
+
+def main(argv: list) -> int:
+    try:
+        parsed = parse(argv)
+    except UsageError as e:
+        say(str(e))
+        print(USAGE, file=sys.stderr)
+        return 2
+    if parsed[0] == "help":
+        print(__doc__.strip())
+        return 0
+    sub, o, cmd = parsed
+    if sub == "start":
+        return cmd_start(o["--name"], o["--cwd"], o["--ready-url"], o.get("--timeout", 30.0), cmd)
+    if sub == "health":
+        return cmd_health(o["--name"], o.get("--timeout", 5.0))
+    if sub == "stop":
+        return cmd_stop(o["--name"], o.get("--grace", 5.0))
+    return cmd_list(bool(o.get("--json")))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

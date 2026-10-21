@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""ctlhq-benchmark-checklist: drive the benchmark checklist from the command line.
+
+Usage:
+  ctlhq-benchmark-checklist print                                 the items with their ids
+  ctlhq-benchmark-checklist record <file.tsv> <id> <answer ...>   append ts, id, answer to a TSV
+  ctlhq-benchmark-checklist status <file.tsv> [--only 4,7]        list the unanswered ids
+  ctlhq-benchmark-checklist env                                   load average, core count, busy warning
+  ctlhq-benchmark-checklist report <file.tsv>                     the one-line report from the answers
+  ctlhq-benchmark-checklist --skill PATH <command> ...            read another SKILL.md
+
+The items are the numbered list entries of the benchmark-checklist skill
+(../SKILL.md next to this tool's bin/ folder), read at run time so the skill
+stays the single source. Ids are 1, 2, ... for the entries and 1a, 1b, ... for
+indented sub-items under an entry. A "Tool" section in the skill is not part of
+the checklist.
+
+record writes the header `ts  id  answer` on first use and replaces tabs and
+newlines in the answer with spaces. Several answer words are joined with spaces.
+Every word after `record <file.tsv> <id>` is answer text, even one that looks like
+an option, so `record bench.tsv 1 see --help` records "see --help". Options
+(--help, --skill, --only) count only before that point.
+Besides the item ids, record accepts the id `verdict` with one of faster, slower,
+no measurable difference, or inconclusive; report reads it.
+status prints the answered count and one line per unanswered id; it exits 1 while
+any id is unanswered and 0 when all are answered. `--only 4,7` restricts the check
+to the listed ids, for the skill's ballpark rule (one run, questions 4 and 7 only).
+env prints the 1, 5, and 15 minute load averages and the core count (the skill's
+`uptime` and `nproc` step). It exits 1 with a busy warning when the 1 minute load
+exceeds the core count, else 0.
+report prints the skill's Report line from the recorded answers: the verdict, then
+answer 5 (the number with its unit, the run count, and the range), then answer 1
+(the limiter). The verdict becomes inconclusive when 1, 2, 4, or 7 is unanswered
+or no verdict is recorded, and the gap is named in parentheses at the end of the
+line. report exits 1 while 4, 5, or 7 is unanswered, else 0.
+
+Exit 2 on a usage error, an unknown id, or a missing SKILL.md.
+"""
+from __future__ import annotations
+
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+DEFAULT_SKILL = Path(__file__).resolve().parent.parent / "SKILL.md"
+VERDICT_ID = "verdict"
+VERDICTS = ("faster", "slower", "no measurable difference", "inconclusive")
+REPORT_EXIT_IDS = ("4", "5", "7")
+INCONCLUSIVE_IDS = ("1", "2", "4", "7")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+NUM = re.compile(r"^(\d+)\.\s+(\S.*)$")
+SUB = re.compile(r"^\s+(?:[-*+]|\d+\.)\s+(\S.*)$")
+CONT = re.compile(r"^\s+(\S.*)$")
+HEADING = re.compile(r"^#{1,6}\s+(.*)$")
+BOLD_LEAD = re.compile(r"^\*\*(.+?)\*\*\s*")
+
+
+def die(msg: str, code: int = 2) -> None:
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def letter(n: int) -> str:
+    out = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        out = chr(ord("a") + r) + out
+    return out
+
+
+def load_items(path: Path) -> list:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        die(
+            f"checklist not found: {path}\n"
+            "The benchmark-checklist skill is not ported yet, or pass --skill PATH."
+        )
+    lines = text.split("\n")
+    start = 0
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                start = i + 1
+                break
+    items: list = []
+    cur = None
+    last = None
+    fence = None
+    skip_section = False
+    for raw in lines[start:]:
+        m = FENCE.match(raw)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and raw.strip() == m.group(1):
+                fence = None
+            continue
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            continue
+        hm = HEADING.match(raw)
+        if hm:
+            skip_section = hm.group(1).strip().lower() == "tool"
+            cur = last = None
+            continue
+        if skip_section:
+            continue
+        nm = NUM.match(raw)
+        if nm:
+            cur = {"id": nm.group(1), "text": nm.group(2).strip(), "subs": 0, "sub": False}
+            items.append(cur)
+            last = cur
+            continue
+        if cur is None:
+            continue
+        sm = SUB.match(raw)
+        if sm:
+            cur["subs"] += 1
+            last = {"id": cur["id"] + letter(cur["subs"]), "text": sm.group(1).strip(), "subs": 0, "sub": True}
+            items.append(last)
+            continue
+        cm = CONT.match(raw)
+        if cm and last is not None:
+            last["text"] += " " + cm.group(1).strip()
+            continue
+        if raw.strip() == "":
+            continue
+        cur = last = None
+    seen: set = set()
+    unique = []
+    for it in items:
+        if it["id"] in seen:
+            print(f"warning: duplicate item id {it['id']} in {path}; keeping the first", file=sys.stderr)
+            continue
+        seen.add(it["id"])
+        unique.append(it)
+    if not unique:
+        die(f"no numbered checklist items found in {path}")
+    return unique
+
+
+def plain(text: str) -> str:
+    return text.replace("**", "")
+
+
+def title(item: dict) -> str:
+    m = BOLD_LEAD.match(item["text"])
+    if m:
+        return m.group(1).strip()
+    first = re.split(r"(?<=[.?!])\s", plain(item["text"]), maxsplit=1)[0]
+    return first.strip()
+
+
+def cmd_print(items: list) -> int:
+    for it in items:
+        indent = "  " if it["sub"] else ""
+        print(f"{indent}{it['id']}. {plain(it['text'])}")
+    return 0
+
+
+def valid_ids(items: list) -> str:
+    return ", ".join(it["id"] for it in items)
+
+
+def cmd_record(tsv: Path, id_: str, words: list, items: list) -> int:
+    if id_ != VERDICT_ID and id_ not in {it["id"] for it in items}:
+        die(f"unknown id {id_!r}. Valid ids: {valid_ids(items)}, {VERDICT_ID}")
+    answer = re.sub(r"[\t\r\n]+", " ", " ".join(words)).strip()
+    if not answer:
+        die("the answer is empty")
+    if id_ == VERDICT_ID:
+        answer = answer.lower()
+        if answer not in VERDICTS:
+            die(f"verdict must be one of: {', '.join(VERDICTS)}")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        new = not tsv.exists() or tsv.stat().st_size == 0
+        with open(tsv, "a", encoding="utf-8") as f:
+            if new:
+                f.write("ts\tid\tanswer\n")
+            f.write(f"{ts}\t{id_}\t{answer}\n")
+    except OSError as e:
+        die(f"cannot write {tsv}: {e}", 1)
+    print(f"recorded {id_} in {tsv}")
+    return 0
+
+
+def read_answers(tsv: Path) -> dict:
+    answers: dict = {}
+    if not tsv.exists():
+        return answers
+    try:
+        lines = tsv.read_text(encoding="utf-8").split("\n")
+    except OSError as e:
+        die(f"cannot read {tsv}: {e}", 1)
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) < 3 or parts[0] == "ts":
+            continue
+        answers[parts[1]] = parts[2]
+    return answers
+
+
+def cmd_status(tsv: Path, items: list, only: str) -> int:
+    scope = ""
+    if only is not None:
+        ids = [s.strip() for s in only.split(",") if s.strip()]
+        known = {it["id"] for it in items}
+        bad = [i for i in ids if i not in known]
+        if not ids or bad:
+            die(f"--only needs item ids, got {only!r}. Valid ids: {valid_ids(items)}")
+        items = [it for it in items if it["id"] in set(ids)]
+        scope = f" (ids {', '.join(ids)})"
+    answers = read_answers(tsv)
+    if not tsv.exists():
+        print(f"{tsv} does not exist yet; nothing answered", file=sys.stderr)
+    unanswered = [it for it in items if it["id"] not in answers]
+    print(f"{len(items) - len(unanswered)} of {len(items)} answered in {tsv}{scope}")
+    for it in unanswered:
+        print(f"unanswered: {it['id']}  {title(it)}")
+    return 1 if unanswered else 0
+
+
+def cmd_env() -> int:
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except (AttributeError, OSError):
+        die("the load average is not available on this platform")
+    cores = os.cpu_count()
+    if cores is None:
+        die("the core count is not available on this platform")
+    print(f"load {load1:.2f} (1 min), {load5:.2f} (5 min), {load15:.2f} (15 min); cores {cores}")
+    if load1 > cores:
+        print(
+            f"busy: the 1 minute load {load1:.2f} exceeds {cores} cores. Find out what is running. "
+            "If you cannot stop it, interleave the sides so both see the same noise, and say so in the report."
+        )
+        return 1
+    return 0
+
+
+def cmd_report(tsv: Path, items: list) -> int:
+    answers = read_answers(tsv)
+    if not tsv.exists():
+        print(f"{tsv} does not exist yet; nothing answered", file=sys.stderr)
+    known = {it["id"] for it in items}
+    unanswered = [i for i in ("1", "2", "4", "5", "7") if i in known and i not in answers]
+    verdict = answers.get(VERDICT_ID)
+    gaps = []
+    if unanswered:
+        gaps.append("unanswered: " + ", ".join(unanswered))
+    if verdict is None:
+        gaps.append("no verdict recorded")
+    if verdict is None or any(i in unanswered for i in INCONCLUSIVE_IDS):
+        verdict = "inconclusive"
+    parts = [answers[i] for i in ("5", "1") if i in answers]
+    line = verdict + (": " + ", ".join(parts) if parts else "")
+    if gaps:
+        line += " (" + "; ".join(gaps) + ")"
+    print(line)
+    return 1 if any(i in unanswered for i in REPORT_EXIT_IDS) else 0
+
+
+def main(argv: list) -> int:
+    skill = DEFAULT_SKILL
+    only = None
+    rest: list = []
+    i = 0
+    while i < len(argv):
+        if rest[:1] == ["record"] and len(rest) >= 3:
+            rest.extend(argv[i:])  # the answer: every word after <file.tsv> <id>, options included
+            break
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--skill":
+            i += 1
+            if i >= len(argv):
+                print("--skill needs a path", file=sys.stderr)
+                return 2
+            skill = Path(argv[i])
+        elif a.startswith("--skill="):
+            skill = Path(a.split("=", 1)[1])
+        elif a == "--only":
+            i += 1
+            if i >= len(argv):
+                print("--only needs a list of ids, like 4,7", file=sys.stderr)
+                return 2
+            only = argv[i]
+        elif a.startswith("--only="):
+            only = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+        i += 1
+    if not rest:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    cmd, args = rest[0], rest[1:]
+    if only is not None and cmd != "status":
+        print("--only belongs to status", file=sys.stderr)
+        return 2
+    if cmd == "print":
+        if args:
+            print("print takes no arguments", file=sys.stderr)
+            return 2
+        return cmd_print(load_items(skill))
+    if cmd == "record":
+        if len(args) < 3:
+            print("record needs <file.tsv> <id> <answer ...>", file=sys.stderr)
+            return 2
+        return cmd_record(Path(args[0]), args[1], args[2:], load_items(skill))
+    if cmd == "status":
+        if len(args) != 1:
+            print("status needs <file.tsv> [--only 4,7]", file=sys.stderr)
+            return 2
+        return cmd_status(Path(args[0]), load_items(skill), only)
+    if cmd == "env":
+        if args:
+            print("env takes no arguments", file=sys.stderr)
+            return 2
+        return cmd_env()
+    if cmd == "report":
+        if len(args) != 1:
+            print("report needs <file.tsv>", file=sys.stderr)
+            return 2
+        return cmd_report(Path(args[0]), load_items(skill))
+    print(f"unknown command {cmd!r}. Run --help.", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

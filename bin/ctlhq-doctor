@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""ctlhq-doctor: report what this machine has and what ctlhq's tools need.
+
+Usage:
+  ctlhq-doctor [--json] [--models PATH] [--no-tools]
+
+One line per check: status, name, detail. Then a summary line.
+  required  python3 (3.9 or newer), node (22.18 or newer), bash, git, the ctlhq
+            repository root, and every executable in bin/ answering --help with exit 0
+  optional  bun, gh, rg, jq, Google Chrome, first-commit, bin/ on PATH, the models
+            file (~/.ctlhq/models.toml) present and valid
+
+Status words: ok; missing; old (present, version below the bar); invalid (present,
+fails its check). A missing tool prints its one-line install command and the ctlhq
+tools that need it. node is needed by ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, and the
+ctlhq-plan-lint and stand-ins tests (the stand-ins test imports .ts files, which node runs
+from 22.18 on); bun by ctlhq-watch-pr and ctlhq-orch; gh by ctlhq-watch-pr, ctlhq-worktree-audit (PR state),
+and the PR playbooks; rg and jq by ctlhq-worktree-audit; Google Chrome by ctlhq-browser,
+ctlhq-icon-sheet, and their tests. Chrome is looked up where ctlhq-browser looks: the
+environment variable CTLHQ_CHROME, else the macOS app path. first-commit, a separate
+tool this repository does not ship, is needed by /start-project and /run-method only;
+the doctor finds it on PATH and never runs it.
+
+The models file is checked with `ctlhq-models validate` on a temporary copy, so
+the doctor never writes under ~/.ctlhq. --models PATH (or the environment
+variable CTLHQ_MODELS) names another file. --no-tools skips the bin/ --help pass.
+--json prints {root, platform, checks, tools, summary} for machines.
+
+Exit 0 when every required check is ok, 1 when a required check fails (optional
+misses never fail), 2 on a usage error.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+MAC = sys.platform == "darwin"
+VERSION = re.compile(r"\d+\.\d+(?:\.\d+)?")
+MIN_VERSION = {"python3": (3, 9), "node": (22, 18)}
+MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+INSTALL = {
+    "python3": ("brew install python3", "apt-get install -y python3"),
+    "bash": ("brew install bash", "apt-get install -y bash"),
+    "git": ("xcode-select --install", "apt-get install -y git"),
+    "node": ("brew install node", "apt-get install -y nodejs"),
+    "bun": ("curl -fsSL https://bun.sh/install | bash", "curl -fsSL https://bun.sh/install | bash"),
+    "gh": ("brew install gh", "apt-get install -y gh"),
+    "rg": ("brew install ripgrep", "apt-get install -y ripgrep"),
+    "jq": ("brew install jq", "apt-get install -y jq"),
+    "Google Chrome": ("brew install --cask google-chrome", "install Google Chrome, then set CTLHQ_CHROME to its binary"),
+    "first-commit": ("install first-commit from https://github.com/amrendra18/first-commit and put it on PATH",) * 2,
+}
+NEEDED_BY = {
+    "python3": "every Python tool in bin/ (ctlhq-models, ctlhq-skills, ctlhq-unslop, ctlhq-playbook, ...)",
+    "bash": "the bin/ wrappers (ctlhq-plan-lint, ctlhq-worktree-audit, ctlhq-watch-pr, ctlhq-orch) and tests/*/run.sh",
+    "git": "ctlhq-worktree-audit, ctlhq-no-comments --diff, every playbook that commits",
+    "node": "ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, the ctlhq-plan-lint and stand-ins tests",
+    "bun": "ctlhq-watch-pr, ctlhq-orch, and the TypeScript unit tests (the bun-tests row of ctlhq-test)",
+    "gh": "ctlhq-watch-pr, ctlhq-worktree-audit (PR state), the PR playbooks (opening-a-pr, babysit, shipping, autopilot)",
+    "rg": "ctlhq-worktree-audit",
+    "jq": "ctlhq-worktree-audit",
+    "Google Chrome": "ctlhq-browser, ctlhq-icon-sheet, and their tests",
+    "first-commit": "/start-project and /run-method only",
+}
+REQUIRED_TOOLS = ("python3", "node", "bash", "git")
+OPTIONAL_TOOLS = ("bun", "gh", "rg", "jq", "Google Chrome", "first-commit")
+
+
+def run(cmd: list, timeout: int = 30):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, "", str(e)
+
+
+def version_of(name: str, path: str) -> str:
+    if name == "python3":
+        rc, out, _ = run([path, "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"])
+        return out.strip() if rc == 0 else ""
+    rc, out, err = run([path, "--version"])
+    first = (out or err).strip().split("\n")[0] if (out or err) else ""
+    m = VERSION.search(first)
+    return m.group(0) if m else first
+
+
+def install_line(name: str) -> str:
+    mac, linux = INSTALL[name]
+    return mac if MAC else linux
+
+
+def locate(name: str) -> str | None:
+    """The tool's path. Chrome is the binary ctlhq-browser would start, when it exists."""
+    if name != "Google Chrome":
+        return shutil.which(name)
+    path = os.environ.get("CTLHQ_CHROME") or MAC_CHROME
+    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+
+
+def check_tool(name: str, required: bool) -> dict:
+    c = {"name": name, "required": required, "status": "missing", "version": "", "path": "",
+         "detail": "", "install": None, "needed_by": NEEDED_BY[name]}
+    path = locate(name)
+    if not path:
+        c["install"] = install_line(name)
+        c["detail"] = f"install: {c['install']}   needed by {c['needed_by']}"
+        return c
+    c["path"] = path
+    c["version"] = "" if name == "first-commit" else version_of(name, path)
+    c["status"] = "ok"
+    if name in MIN_VERSION:
+        least = MIN_VERSION[name]
+        parts = tuple(int(x) for x in c["version"].split(".")[:2]) if VERSION.fullmatch(c["version"]) else (0, 0)
+        if parts < least:
+            c["status"] = "old"
+            c["install"] = install_line(name)
+            c["detail"] = (f"{c['version']} ({path}); needs {least[0]}.{least[1]} or newer; "
+                           f"install: {c['install']}   needed by {c['needed_by']}")
+            return c
+    c["detail"] = f"{c['version'] or 'found'} ({path})   needed by {c['needed_by']}"
+    return c
+
+
+def check_root() -> dict:
+    ok = (ROOT / "skills" / "ctlhq-mode" / "SKILL.md").is_file() and (ROOT / "bin").is_dir()
+    return {"name": "repo root", "required": True, "status": "ok" if ok else "missing",
+            "version": "", "path": str(ROOT), "install": None, "needed_by": "every bin/ tool resolves paths from it",
+            "detail": str(ROOT) if ok else f"{ROOT} has no skills/ctlhq-mode/SKILL.md or bin/; run the tool from a ctlhq checkout"}
+
+
+def check_path() -> dict:
+    bin_dir = ROOT / "bin"
+    real = os.path.realpath(bin_dir)
+    on = any(os.path.realpath(e) == real for e in os.environ.get("PATH", "").split(os.pathsep) if e)
+    add = f'export PATH="{bin_dir}:$PATH"'
+    return {"name": "bin on PATH", "required": False, "status": "ok" if on else "missing",
+            "version": "", "path": str(bin_dir), "install": None if on else add,
+            "needed_by": "running the tools by name (ctlhq-models, ctlhq-unslop, ctlhq-playbook, ...)",
+            "detail": str(bin_dir) if on else f"add: {add}"}
+
+
+def check_models(models: str) -> dict:
+    shown = os.path.expanduser(models)  # printed as given, so a caller's path matches the output
+    path = Path(shown)
+    c = {"name": "models.toml", "required": False, "status": "missing", "version": "", "path": shown,
+         "install": None, "needed_by": "ctlhq-models get (every skill that picks a model by role)", "detail": ""}
+    if not path.is_file():
+        c["install"] = "ctlhq-models init"
+        c["detail"] = f"{shown} not found; create: {c['install']}   (ctlhq-models get falls back to the defaults)"
+        return c
+    validator = ROOT / "bin" / "ctlhq-models"
+    if not validator.is_file():
+        c["status"] = "invalid"
+        c["detail"] = f"{shown} present but bin/ctlhq-models is missing, cannot validate"
+        return c
+    with tempfile.TemporaryDirectory(prefix="ctlhq-doctor.") as tmp:
+        copy = Path(tmp) / "models.toml"
+        shutil.copyfile(path, copy)
+        rc, out, err = run([str(validator), "--file", str(copy), "validate"])
+    lines = [l for l in (out + err).strip().split("\n") if l.strip()]
+    problems = [l for l in lines if l.startswith("problem:")]
+    if rc == 0:
+        c["status"] = "ok"
+        summary = ""
+        for l in lines:
+            if l.startswith("ok:"):
+                summary = l.split("  ", 1)[1].strip() if "  " in l else ""
+        c["detail"] = f"{shown} valid" + (f", {summary}" if summary else "")
+    else:
+        c["status"] = "invalid"
+        c["install"] = "ctlhq-models validate"
+        first = problems[0] if problems else (lines[0] if lines else "validate exit " + str(rc))
+        c["detail"] = f"{shown}: {first}; see: ctlhq-models validate"
+    return c
+
+
+def check_bin_help() -> tuple:
+    bin_dir = ROOT / "bin"
+    tools = []
+    if bin_dir.is_dir():
+        for t in sorted(bin_dir.iterdir()):
+            if t.name.startswith(".") or not t.is_file():
+                continue
+            row = {"name": t.name, "status": "ok", "exit": None, "first_line": "", "error": ""}
+            if not os.access(t, os.X_OK):
+                row["status"] = "invalid"
+                row["error"] = "not executable"
+            else:
+                rc, out, err = run([str(t), "--help"])
+                row["exit"] = rc
+                row["first_line"] = out.strip().split("\n")[0] if out.strip() else ""
+                if rc != 0:
+                    row["status"] = "invalid"
+                    row["error"] = (err.strip() or out.strip()).split("\n")[0][:120] if (err or out) else ""
+            tools.append(row)
+    ok = sum(1 for r in tools if r["status"] == "ok")
+    status = "ok" if tools and ok == len(tools) else "invalid" if tools else "missing"
+    detail = f"{ok} of {len(tools)} answer" if tools else f"no executables in {bin_dir}"
+    agg = {"name": "bin/* --help", "required": True, "status": status, "version": "", "path": str(bin_dir),
+           "install": None, "needed_by": "ctlhq-check check 3 and the catalog", "detail": detail}
+    return agg, tools
+
+
+def main(argv: list) -> int:
+    as_json = False
+    run_tools = True
+    models = os.environ.get("CTLHQ_MODELS") or "~/.ctlhq/models.toml"
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--json":
+            as_json = True
+        elif a == "--no-tools":
+            run_tools = False
+        elif a == "--models":
+            i += 1
+            if i >= len(argv):
+                print("--models needs a path", file=sys.stderr)
+                return 2
+            models = argv[i]
+        elif a.startswith("-"):
+            print(f"unknown option {a}", file=sys.stderr)
+            return 2
+        else:
+            print(f"unexpected argument {a!r}. Run --help.", file=sys.stderr)
+            return 2
+        i += 1
+
+    checks = [check_tool(n, True) for n in REQUIRED_TOOLS]
+    checks += [check_tool(n, False) for n in OPTIONAL_TOOLS]
+    checks.append(check_root())
+    checks.append(check_path())
+    checks.append(check_models(models))
+    tools: list = []
+    if run_tools:
+        agg, tools = check_bin_help()
+        checks.append(agg)
+
+    req = [c for c in checks if c["required"]]
+    opt = [c for c in checks if not c["required"]]
+    req_ok = sum(1 for c in req if c["status"] == "ok")
+    opt_ok = sum(1 for c in opt if c["status"] == "ok")
+    not_ok = [c["name"] for c in checks if c["status"] != "ok"]
+    code = 0 if req_ok == len(req) else 1
+    summary = {"required_ok": req_ok, "required_total": len(req), "optional_ok": opt_ok,
+               "optional_total": len(opt), "not_ok": not_ok, "exit": code}
+
+    if as_json:
+        print(json.dumps({"root": str(ROOT), "platform": sys.platform, "checks": checks,
+                          "tools": tools, "summary": summary}, indent=2))
+        return code
+
+    for c in checks:
+        print(f"{c['status']:<8} {c['name']:<14} {c['detail']}")
+        if c["name"] == "bin/* --help":
+            for t in tools:
+                if t["status"] != "ok":
+                    where = f"exit {t['exit']}" if t["exit"] is not None else "did not run"
+                    print(f"{t['status']:<8} {'bin/' + t['name']:<14} --help {where}: {t['error']}")
+    tail = f"; not ok: {', '.join(not_ok)}" if not_ok else ""
+    print(f"summary: required {req_ok}/{len(req)} ok, optional {opt_ok}/{len(opt)} ok{tail}; exit {code}")
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

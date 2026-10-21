@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""ctlhq-skills: list and find the skills in this ctlhq repository.
+
+Usage:
+  ctlhq-skills [--agents] [--json]                   every skill: name, description (principles last)
+  ctlhq-skills [--agents] [--json] find <word> ...   rows whose name or description has every word
+  ctlhq-skills [--agents] path <name>                the absolute SKILL.md path; exit 2 if unknown
+  ctlhq-skills [--json] [--full] show <name>         one skill: name, description, tools, invocation, path
+                                                      (--full appends the SKILL.md body; help and info are aliases of show)
+
+find matches case-insensitively, all words, in the name, the folder name, or the description.
+--json prints a JSON array of {name, description, path, invocable}; invocable is
+false when the skill sets disable-model-invocation: true. --agents also lists
+agents/*.md (tagged [agent] in the text listing, "kind": "agent" in JSON, and
+accepted by path).
+
+The repository root is resolved from this tool's own real path (the parent of
+its bin/ folder). Skills are skills/*/SKILL.md. A skill without a name in its
+front matter is listed under its folder name; name and folder both work for path.
+A folder without a SKILL.md, or an unreadable file, is skipped with a note on
+stderr, so a partly ported skills/ folder still lists.
+
+"tools" lists the executables under skills/<folder>/bin/.
+
+Exit 0 on success, 1 when find matches nothing, 2 on a usage error or an unknown name.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+
+
+def unquote(v: str) -> str:
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+        inner = v[1:-1]
+        return inner.replace('\\"', '"') if v[0] == '"' else inner
+    return v
+
+
+def parse_frontmatter(text: str) -> dict:
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return {}
+    fm: dict = {}
+    key = None
+    folded = None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if key is not None and line[:1] in (" ", "\t") and line.strip():
+            sep = "\n" if folded == "|" else " "
+            fm[key] = (fm[key] + sep + line.strip()).strip()
+            continue
+        m = KEY_RE.match(line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2).strip()
+        if val in (">", ">-", "|", "|-"):
+            folded = val[0]
+            fm[key] = ""
+        else:
+            folded = None
+            fm[key] = unquote(val)
+    return fm
+
+
+def read_record(path: Path, fallback_name: str, kind: str):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"skipped {path}: {e}", file=sys.stderr)
+        return None
+    fm = parse_frontmatter(text)
+    return {
+        "name": fm.get("name") or fallback_name,
+        "folder": fallback_name,
+        "description": " ".join(str(fm.get("description", "")).split()),
+        "path": str(path),
+        "invocable": str(fm.get("disable-model-invocation", "")).strip().lower() != "true",
+        "kind": kind,
+    }
+
+
+def load(with_agents: bool) -> list:
+    records = []
+    skills = ROOT / "skills"
+    if skills.is_dir():
+        for d in sorted(skills.iterdir()):
+            f = d / "SKILL.md"
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            if not f.is_file():
+                print(f"skipped {d.name}: no SKILL.md yet", file=sys.stderr)
+                continue
+            r = read_record(f, d.name, "skill")
+            if r:
+                records.append(r)
+    else:
+        print(f"no skills folder at {skills}", file=sys.stderr)
+    if with_agents:
+        agents = ROOT / "agents"
+        if agents.is_dir():
+            for f in sorted(agents.glob("*.md")):
+                r = read_record(f, f.stem, "agent")
+                if r:
+                    records.append(r)
+    records.sort(key=lambda r: (r["kind"] == "agent", r["name"].startswith("principle-"), r["name"].lower()))
+    return records
+
+
+def tools_of(folder: str) -> list:
+    b = ROOT / "skills" / folder / "bin"
+    return sorted(t.name for t in b.iterdir() if t.is_file()) if b.is_dir() else []
+
+
+def body_of(path: str) -> str:
+    text = Path(path).read_text(encoding="utf-8")
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4:]
+    return text.strip("\n")
+
+
+def show(r: dict, as_json: bool, full: bool) -> None:
+    tools = tools_of(r["folder"]) if r["kind"] == "skill" else []
+    if as_json:
+        out = {k: r[k] for k in ("name", "description", "path", "invocable", "kind")}
+        out["tools"] = tools
+        if full:
+            out["body"] = body_of(r["path"])
+        print(json.dumps(out, indent=2))
+        return
+    inv = "by the user only (disable-model-invocation: true)" if not r["invocable"] else "by the model or the user"
+    print(f"name:        {r['name']}")
+    if r["kind"] == "agent":
+        print("kind:        agent")
+    print(f"description: {r['description']}")
+    print(f"tools:       {', '.join(tools) if tools else 'none'}")
+    print(f"invocation:  {inv}")
+    print(f"path:        {r['path']}")
+    if full:
+        print()
+        print(body_of(r["path"]))
+
+
+def emit(records: list, as_json: bool) -> None:
+    if as_json:
+        keys = ("name", "description", "path", "invocable", "kind")
+        print(json.dumps([{k: r[k] for k in keys} for r in records], indent=2))
+        return
+    width = max((len(r["name"]) for r in records), default=0)
+    for r in records:
+        line = f"{r['name'].ljust(width)}  {r['description']}".rstrip()
+        if r["kind"] == "agent":
+            line += "  [agent]"
+        print(line)
+
+
+def main(argv: list) -> int:
+    with_agents = False
+    as_json = False
+    full = False
+    rest: list = []
+    for a in argv:
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--agents":
+            with_agents = True
+        elif a == "--json":
+            as_json = True
+        elif a == "--full":
+            full = True
+        elif a.startswith("-"):
+            print(f"unknown option {a}", file=sys.stderr)
+            return 2
+        else:
+            rest.append(a)
+    records = load(with_agents)
+    if not rest:
+        emit(records, as_json)
+        return 0
+    cmd, args = rest[0], rest[1:]
+    if cmd == "find":
+        if not args:
+            print("find needs at least one word", file=sys.stderr)
+            return 2
+        words = [w.lower() for w in args]
+        hits = [r for r in records if all(w in (r["name"] + " " + r["folder"] + " " + r["description"]).lower() for w in words)]
+        emit(hits, as_json)
+        return 0 if hits else 1
+    if cmd == "path":
+        if len(args) != 1:
+            print("path needs exactly one name", file=sys.stderr)
+            return 2
+        want = args[0].lower()
+        for r in records:
+            if want in (r["name"].lower(), r["folder"].lower()):
+                print(r["path"])
+                return 0
+        print(f"unknown skill {args[0]!r}", file=sys.stderr)
+        return 2
+    if cmd in ("show", "help", "info"):
+        if len(args) != 1:
+            print(f"{cmd} needs exactly one name", file=sys.stderr)
+            return 2
+        want = args[0].lower().lstrip("/")
+        for r in load(True):
+            if want in (r["name"].lower(), r["folder"].lower()):
+                show(r, as_json, full)
+                return 0
+        print(f"unknown skill {args[0]!r}", file=sys.stderr)
+        return 2
+    print(f"unknown command {cmd!r}. Run --help.", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

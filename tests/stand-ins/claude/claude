@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""claude: a fake Claude Code command line that replays recorded exchanges and never calls a model.
+
+Usage:
+  claude -p [PROMPT] [--output-format text|json|stream-json] [--verbose] [--model NAME]
+  claude --help | --version
+
+Environment:
+  FAKE_CLAUDE_RECORDINGS  folder of recordings (required)
+  FAKE_CLAUDE_LOG         optional file; each call appends one JSON line
+                          {"argv": [...], "prompt": "...", "recording": "<name or null>"}
+
+A recording is two files in that folder with the same name:
+  <name>.prompt        the exact prompt text (one trailing newline is ignored)
+  <name>.stream.jsonl  the stdout of a real `claude -p --output-format stream-json --verbose`
+                       run: one JSON event per line, ending with a {"type": "result"} event
+
+The prompt is the positional argument after the options, or stdin when there is none. The
+fake picks the recording whose .prompt text equals the prompt, then prints:
+  stream-json  every recorded line, unchanged
+  json         the result event as one JSON line
+  text         the result event's "result" text and a newline (the default)
+--model is accepted and logged; the recording's own model field is printed unchanged.
+Like the real tool, -p with --output-format stream-json needs --verbose.
+
+Exit codes:
+  0  a recording matched and its result event has "is_error": false
+  1  no recording matches the prompt (stderr names the files to add), a broken recording,
+     a result event with "is_error": true, or stream-json without --verbose
+  2  usage error: unknown option, no -p, or FAKE_CLAUDE_RECORDINGS unset or not a folder
+
+Make a recording from one real run:
+  printf '%s' "$prompt" > hello.prompt
+  claude -p "$prompt" --output-format stream-json --verbose > hello.stream.jsonl
+The test recordings in tests/stand-ins/fixtures/claude/ are written by hand in the shape of
+a real stream; no real run was captured.
+
+Not covered: interactive mode, any other flag, tool use (recorded tool calls are printed,
+never run), and model behavior.
+
+It reads files only. It opens no network connection and starts no process.
+"""
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+FORMATS = ("text", "json", "stream-json")
+
+
+def fail(code: int, message: str) -> int:
+    print(f"claude (fake): {message}", file=sys.stderr)
+    return code
+
+
+def parse(argv):
+    opts = {"print": False, "format": "text", "verbose": False, "model": None, "prompt": None}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-p", "--print"):
+            opts["print"] = True
+        elif arg == "--verbose":
+            opts["verbose"] = True
+        elif arg in ("--output-format", "--model"):
+            if i + 1 >= len(argv):
+                raise ValueError(f"{arg} needs a value")
+            i += 1
+            opts["format" if arg == "--output-format" else "model"] = argv[i]
+        elif arg.startswith("--output-format="):
+            opts["format"] = arg.split("=", 1)[1]
+        elif arg.startswith("--model="):
+            opts["model"] = arg.split("=", 1)[1]
+        elif arg.startswith("-") and arg != "-":
+            raise ValueError(f"unknown option {arg} (this stand-in supports -p, --output-format, --verbose, --model)")
+        elif opts["prompt"] is None:
+            opts["prompt"] = arg
+        else:
+            raise ValueError("more than one prompt argument")
+        i += 1
+    if opts["format"] not in FORMATS:
+        raise ValueError(f"--output-format must be one of {', '.join(FORMATS)}")
+    return opts
+
+
+def find(folder: Path, prompt: str):
+    for path in sorted(folder.glob("*.prompt")):
+        text = path.read_text(encoding="utf-8")
+        if text.endswith("\n"):
+            text = text[:-1]
+        if text == prompt:
+            return path.name[: -len(".prompt")]
+    return None
+
+
+def log(argv, prompt, name) -> None:
+    target = os.environ.get("FAKE_CLAUDE_LOG")
+    if target:
+        with open(target, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"argv": argv, "prompt": prompt, "recording": name}) + "\n")
+
+
+def main(argv) -> int:
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip())
+        return 0
+    if "--version" in argv:
+        print("0.0.0 (fake Claude Code stand-in)")
+        return 0
+    try:
+        opts = parse(argv)
+    except ValueError as error:
+        return fail(2, str(error))
+    if not opts["print"]:
+        return fail(2, "only print mode (-p) is supported")
+    folder = os.environ.get("FAKE_CLAUDE_RECORDINGS", "")
+    if not folder or not Path(folder).is_dir():
+        return fail(2, "FAKE_CLAUDE_RECORDINGS must name a folder of recordings")
+    if opts["format"] == "stream-json" and not opts["verbose"]:
+        return fail(1, "Error: When using --print, --output-format=stream-json requires --verbose")
+    prompt = opts["prompt"] if opts["prompt"] is not None else sys.stdin.read()
+    if prompt.endswith("\n"):
+        prompt = prompt[:-1]
+    name = find(Path(folder), prompt)
+    log(argv, prompt, name)
+    if name is None:
+        stem = Path(folder) / hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+        first = prompt.splitlines()[0] if prompt else ""
+        return fail(1, f"no recording for prompt {first[:80]!r}; add {stem}.prompt and {stem}.stream.jsonl")
+    stream = Path(folder) / f"{name}.stream.jsonl"
+    try:
+        lines = [line for line in stream.read_text(encoding="utf-8").splitlines() if line.strip()]
+        events = [json.loads(line) for line in lines]
+    except (OSError, ValueError) as error:
+        return fail(1, f"broken recording {stream}: {error}")
+    results = [event for event in events if isinstance(event, dict) and event.get("type") == "result"]
+    if not results or events[-1] is not results[-1]:
+        return fail(1, f"broken recording {stream}: the last event is not a result event")
+    result = results[-1]
+    if opts["format"] == "stream-json":
+        for line in lines:
+            print(line)
+    elif opts["format"] == "json":
+        print(json.dumps(result))
+    else:
+        print(result.get("result", ""))
+    return 1 if result.get("is_error") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

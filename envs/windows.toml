@@ -1,0 +1,22 @@
+# Recipe for bin/ctlhq-env. Keys: see `bin/ctlhq-env --help`, section "Recipes".
+name = "windows"
+summary = "Windows 11 machine for installer and desktop tests (UTM only)"
+provider = "utm"
+guest = "windows"
+image = "ctlhq-windows-template"
+cpu = 4
+memory_mb = 8192
+disk_gb = 64
+network = "shared"
+user = "SYSTEM"
+root = true
+snapshot_before_risky = true
+screenshot_cmd = 'Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $i = New-Object System.Drawing.Bitmap $b.Width, $b.Height; $g = [System.Drawing.Graphics]::FromImage($i); $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); $m = New-Object System.IO.MemoryStream; $i.Save($m, [System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($m.ToArray())'
+not_covered = [
+  "making the template: you build the UTM machine named by image once, by hand, with the QEMU guest agent installed",
+  "CPU, memory, disk, and network changes: utmctl cannot set them, so the template holds them",
+  "x86-64-only drivers and anti-cheat or kernel software on Windows on Arm",
+  "a reliable screenshot: the guest agent runs outside the signed-in desktop, so the image may be blank",
+  "running over SSH: utmctl needs the logged-in desktop session on the host",
+]
+notes = "image names a UTM machine to clone with utmctl clone. Snapshots need UTM 5.0.6 or later and a QEMU machine."

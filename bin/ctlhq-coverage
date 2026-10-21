@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""ctlhq-coverage: list every skill and tool with the tests that cover it, and flag the ones with none.
+
+Usage:
+  ctlhq-coverage [--json] [--root DIR]
+
+Builds the coverage table at runtime from the repository (this tool's own, or --root DIR):
+one numbered row per skill (skills/*/SKILL.md) and per tool (bin/, without __pycache__ and
+dotfiles), with the tests that cover it. Running it costs nothing: it reads files and runs no
+test and no model.
+
+A tool's tests: tests/<tool>/run.sh, and every tests/<x>/run.sh that the tool's file names.
+A skill's tests: tests/<skill>/run.sh, the test of each command in skills/<skill>/bin/, and
+every test that checks all skills (tests/skill-contract/run.sh checks every SKILL.md).
+
+An item with no test needs a row in tests/coverage/reasons.tsv (item<TAB>kind<TAB>reason,
+header row first). Problems: an item with no test and no reason; a stale reason (its item is
+covered now, or does not exist); a malformed or repeated reason row.
+
+--json   print {root, reasons_file, items, problems} as JSON instead of the table
+--root   the repository to read (default: the parent of this tool's bin/)
+
+Exit 0 when there is no problem, 1 otherwise, 2 on a usage error.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(os.path.realpath(__file__)).parent.parent
+REASONS_FILE = "tests/coverage/reasons.tsv"
+REASONS_HEADER = ["item", "kind", "reason"]
+# Tests that check every skills/*/SKILL.md, so they cover every skill.
+ALL_SKILL_TESTS = ("tests/skill-contract/run.sh",)
+TEST_PATH_RE = re.compile(r"\btests/[A-Za-z0-9_.-]+/run\.sh\b")
+
+
+class Usage(Exception):
+    pass
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise Usage(message)
+
+    def print_help(self, file=None):
+        print(__doc__.strip())
+
+
+def table(headers: list, rows: list) -> list:
+    out = ["| # | " + " | ".join(headers) + " |", "|---|" + "---|" * len(headers)]
+    for i, r in enumerate(rows, 1):
+        out.append(f"| {i} | " + " | ".join(str(c).replace("|", "\\|") for c in r) + " |")
+    return out
+
+
+def named_tests(text: str, root: Path) -> list:
+    """The tests/<x>/run.sh paths a text names that exist under root."""
+    return sorted({m for m in TEST_PATH_RE.findall(text or "") if (root / m).is_file()})
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def coverage_table(root: Path) -> tuple:
+    """(items, problems) for the repository at root. Each item: item, kind, tests, reason, status."""
+    problems = []
+    skills_dir, bin_dir = root / "skills", root / "bin"
+    skills = sorted(p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file()) if skills_dir.is_dir() else []
+    tools = sorted(p.name for p in bin_dir.iterdir()
+                   if not p.name.startswith(".") and p.name != "__pycache__") if bin_dir.is_dir() else []
+    tests = {("skill", s): set() for s in skills}
+    tests.update({("tool", t): set() for t in tools})
+    for kind, name in tests:
+        if (root / "tests" / name / "run.sh").is_file():
+            tests[(kind, name)].add(f"tests/{name}/run.sh")
+    for t in tools:
+        tests[("tool", t)].update(named_tests(read_text(bin_dir / t), root))
+    all_skill = [t for t in ALL_SKILL_TESTS if (root / t).is_file()]
+    for s in skills:
+        tests[("skill", s)].update(all_skill)
+        shipped = skills_dir / s / "bin"
+        if shipped.is_dir():
+            for cmd in shipped.iterdir():
+                if cmd.name.startswith(".") or cmd.name == "__pycache__":
+                    continue
+                if (root / "tests" / cmd.name / "run.sh").is_file():
+                    tests[("skill", s)].add(f"tests/{cmd.name}/run.sh")
+
+    reasons = {}
+    rpath = root / REASONS_FILE
+    rname = rpath.name
+    lines = read_text(rpath).split("\n") if rpath.is_file() else []
+    if lines and lines[-1] == "":
+        lines.pop()
+    if lines:
+        if lines[0].split("\t") != REASONS_HEADER:
+            problems.append(f"{rname}:1: header must be: {' '.join(REASONS_HEADER)}")
+        seen = {}
+        for n, line in enumerate(lines[1:], 2):
+            cells = line.split("\t")
+            if len(cells) != 3:
+                problems.append(f"{rname}:{n}: row has {len(cells)} cells, needs 3 (item, kind, reason)")
+                continue
+            item, kind, reason = (c.strip() for c in cells)
+            if kind not in ("skill", "tool"):
+                problems.append(f"{rname}:{n}: kind `{kind}` must be skill or tool")
+                continue
+            if (item, kind) in seen:
+                problems.append(f"{rname}:{n}: second row for {kind} `{item}` (first on line {seen[(item, kind)]})")
+                continue
+            seen[(item, kind)] = n
+            if not reason:
+                problems.append(f"{rname}:{n}: `{item}`: the reason is empty")
+                continue
+            if (kind, item) not in tests:
+                where = f"skills/{item}/SKILL.md" if kind == "skill" else f"bin/{item}"
+                problems.append(f"{rname}:{n}: stale reason: {kind} `{item}` does not exist ({where}); delete the row")
+                continue
+            have = sorted(tests[(kind, item)])
+            if have:
+                problems.append(f"{rname}:{n}: stale reason: {kind} `{item}` is covered ({', '.join(have)}); delete the row")
+                continue
+            reasons[(kind, item)] = reason
+
+    items = []
+    for kind, names in (("skill", skills), ("tool", tools)):
+        for name in names:
+            t = sorted(tests[(kind, name)])
+            reason = reasons.get((kind, name))
+            status = "covered" if t else ("reason" if reason else "missing")
+            if status == "missing":
+                problems.append(f"{kind} `{name}` has no test and no reason in {REASONS_FILE}")
+            items.append({"item": name, "kind": kind, "tests": t, "reason": reason, "status": status})
+    return items, problems
+
+
+def main(argv: list) -> int:
+    if argv and argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    p = Parser(prog="ctlhq-coverage", add_help=False)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--root")
+    try:
+        args = p.parse_args(argv)
+        root = Path(args.root).resolve() if args.root else ROOT
+        if not root.is_dir():
+            raise Usage(f"--root {args.root} is not a folder")
+    except Usage as e:
+        print(f"ctlhq-coverage: {e}", file=sys.stderr)
+        return 2
+    items, problems = coverage_table(root)
+    if args.json:
+        print(json.dumps({"root": str(root), "reasons_file": REASONS_FILE, "items": items, "problems": problems},
+                         indent=2))
+        return 1 if problems else 0
+    rows = [[i["item"], i["kind"], ", ".join(i["tests"]) or "-", i["reason"] or "-", i["status"]] for i in items]
+    print("\n".join(table(["item", "kind", "tests", "reason", "status"], rows)))
+    for prob in problems:
+        print(f"problem: {prob}")
+    n_sk = sum(1 for i in items if i["kind"] == "skill")
+    print(f"items {len(items)} ({n_sk} skills, {len(items) - n_sk} tools) | "
+          f"covered {sum(1 for i in items if i['status'] == 'covered')} | "
+          f"reason {sum(1 for i in items if i['status'] == 'reason')} | problems {len(problems)}")
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

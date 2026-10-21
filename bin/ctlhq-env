@@ -1,0 +1,1114 @@
+#!/usr/bin/env python3
+"""ctlhq-env: start, snapshot, restore, and drive test machines with one command set.
+
+Usage:
+  ctlhq-env [options] list
+  ctlhq-env [options] up NAME
+  ctlhq-env [options] down NAME
+  ctlhq-env [options] snapshot NAME TAG
+  ctlhq-env [options] restore NAME TAG
+  ctlhq-env [options] exec NAME -- CMD [ARG ...]
+  ctlhq-env [options] screenshot NAME --out FILE
+  ctlhq-env [options] status NAME
+
+Options (anywhere before `--`):
+  --provider P   local, fake, tart, or utm (default: the recipe's provider)
+  --json         print one JSON object (list: a JSON array) instead of text
+  --envs DIR     the recipe folder (default: envs/ next to this tool's bin/)
+  --state DIR    where logs and fake state live (default: .local/env/ in the
+                 repository; the CTLHQ_ENV_STATE variable also sets it)
+
+NAME is a recipe, envs/NAME.toml. The machine has the same name as the recipe.
+
+Commands:
+  list        number every recipe: name, provider, guest, image, summary. With
+              --provider it also asks that provider once for each machine's state.
+  up          create the machine from the image when it is absent, start it, wait
+              for its IP address, and run the recipe's provision commands on a new
+              machine. It prints what the recipe does not cover.
+  down        stop the machine. The machine and its snapshots stay.
+  snapshot    save the machine's disks under TAG. A second snapshot with the same
+              TAG replaces the first.
+  restore     put the machine back to TAG.
+  exec        run CMD in the machine and return CMD's own exit code. Output passes
+              through; with --json it is captured into the JSON object.
+  screenshot  run the recipe's screenshot_cmd in the machine (it prints a base64
+              PNG), decode it, and write FILE. A recipe without one exits 1.
+  status      the machine's state (absent, stopped, running) and IP address.
+
+Providers:
+  local   runs commands on this machine. up and down do nothing and say so;
+          snapshot and restore exit 1; screenshot uses screencapture.
+  fake    runs nothing. It keeps machine state in <state>/fake/state.json, adds
+          one JSON line per call to <state>/fake/calls.jsonl, and prints the steps
+          the recipe's real provider would take. A scripted result comes from
+          <state>/fake/script.json: {"<command>": {"exit": N, "stdout": "...",
+          "stderr": "..."}}. A scripted non-zero exit leaves the state unchanged.
+          exec and screenshot need a running fake machine.
+  tart    Tart, for macOS and Linux guests. UNPROVEN UNTIL THE HOST: written from
+          Tart's public documentation and source, tested only against a fake tart.
+          up: tart list --format json; tart clone IMAGE NAME; tart set NAME --cpu C
+          --memory M --disk-size D; tart run --no-graphics [network flag] NAME (in
+          the background, output in <state>/logs/); tart ip NAME --wait 120.
+          A snapshot is a local clone named NAME-snap-TAG (copy-on-write on APFS,
+          disks only); the machine is stopped for the copy and started again.
+          restore deletes NAME and clones NAME-snap-TAG back to NAME.
+          exec: tart exec NAME CMD (needs the Tart Guest Agent in the guest).
+  utm     UTM's utmctl, for Windows and other guests. UNPROVEN UNTIL THE HOST:
+          written from UTM's public documentation and utmctl source, tested only
+          against a fake utmctl. utmctl cannot create machines or set CPU, memory,
+          disk, or network, so the recipe's image names a UTM machine to clone.
+          up: utmctl status NAME; utmctl clone IMAGE --name NAME; utmctl start NAME
+          --hide; utmctl ip-address NAME (retried until CTLHQ_ENV_WAIT seconds).
+          snapshot: utmctl snapshot list NAME --json, then snapshot create NAME
+          --name TAG, or snapshot overwrite NAME --snapshot TAG. restore: utmctl
+          snapshot restore NAME --snapshot TAG (UTM 5.0.6 or later). exec: utmctl
+          exec NAME --cmd CMD. utmctl needs the logged-in desktop session, not SSH.
+          utmctl is found as CTLHQ_ENV_UTMCTL, on PATH, or in /Applications/UTM.app.
+  A provider binary that is missing exits 127 with an install hint. CTLHQ_ENV_TART
+  names a tart binary to use instead of the one on PATH.
+
+Recipes (envs/<name>.toml, a small TOML subset: strings, integers, booleans,
+arrays, comments):
+  required  name, summary, provider (tart, utm, or local), guest (linux, macos,
+            windows), image, cpu, memory_mb, disk_gb, network (shared, softnet,
+            or bridged:<interface>), not_covered (a non-empty array of strings)
+  optional  user, root, snapshot_before_risky, provision (shell commands run once
+            on a new machine), screenshot_cmd, services, log, notes
+  Linux and macOS commands run as `sh -c CMD`; Windows commands as
+  `powershell.exe -NoProfile -NonInteractive -Command CMD`. Tart refuses a
+  disk_gb below the image's own disk size.
+
+Environment: CTLHQ_ENV_STATE (state folder), CTLHQ_ENV_WAIT (seconds to wait
+for an IP address, default 120), CTLHQ_ENV_TIMEOUT (seconds per provider call,
+default 900), CTLHQ_ENV_RUN_GRACE (seconds to watch a background `tart run`
+for an early failure, default 3).
+
+Exit codes: 0 success; 1 a problem (absent machine, unknown TAG, no screenshot
+command, bad recipe); 2 a usage error; 127 a provider binary is missing. When a
+provider call fails, ctlhq-env names the call and exits with that call's own
+exit code. exec exits with CMD's exit code.
+
+Rule encoded (AGENTS.md): "Keep blocked operations, working local actions, and
+missing evidence separate in totals." The fake provider says "fake provider" on
+every result and never reports a machine as started.
+
+Sources:
+  https://tart.run/quick-start/
+  https://github.com/cirruslabs/tart/tree/main/Sources/tart/Commands
+    (Clone.swift, Run.swift, Set.swift, Stop.swift, Delete.swift, List.swift,
+    IP.swift, Exec.swift; read for Tart 2.41.1, 2026-10-17)
+  https://docs.getutm.app/scripting/scripting/
+  https://github.com/utmapp/UTM/blob/v5.0.8/utmctl/UTMCtl.swift
+    (utmctl --help text; read for UTM 5.0.8, 2026-10-17)
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+PROVIDERS = ("local", "fake", "tart", "utm")
+COMMANDS = ("list", "up", "down", "snapshot", "restore", "exec", "screenshot", "status")
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+USAGE = "usage: ctlhq-env [--provider P] [--json] [--envs DIR] [--state DIR] list|up|down|snapshot|restore|exec|screenshot|status ..."
+
+
+class Fail(Exception):
+    def __init__(self, msg: str, code: int = 1) -> None:
+        super().__init__(msg)
+        self.msg = msg
+        self.code = code
+
+
+class Usage(Exception):
+    pass
+
+
+def env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, default))
+    except ValueError:
+        return default
+
+
+class TomlError(Exception):
+    pass
+
+
+class _Toml:
+    """The TOML subset that recipes use; Python 3.9 has no tomllib."""
+
+    def __init__(self, text: str) -> None:
+        self.t = text
+        self.i = 0
+        self.line = 1
+
+    def err(self, msg: str):
+        raise TomlError(f"line {self.line}: {msg}")
+
+    def peek(self) -> str:
+        return self.t[self.i] if self.i < len(self.t) else ""
+
+    def adv(self) -> str:
+        c = self.t[self.i]
+        self.i += 1
+        if c == "\n":
+            self.line += 1
+        return c
+
+    def skip(self, newlines: bool = False) -> None:
+        while True:
+            c = self.peek()
+            if c in (" ", "\t", "\r"):
+                self.adv()
+            elif c == "#":
+                while self.peek() not in ("", "\n"):
+                    self.adv()
+            elif newlines and c == "\n":
+                self.adv()
+            else:
+                return
+
+    def doc(self) -> dict:
+        root: dict = {}
+        cur = root
+        while True:
+            self.skip(newlines=True)
+            if self.peek() == "":
+                return root
+            if self.peek() == "[":
+                self.adv()
+                key = self.key()
+                self.skip()
+                if self.peek() != "]":
+                    self.err("expected ] after the table name")
+                self.adv()
+                if key in root:
+                    self.err(f"[{key}] is defined twice")
+                cur = root[key] = {}
+            else:
+                key = self.key()
+                self.skip()
+                if self.peek() != "=":
+                    self.err(f"expected = after {key}")
+                self.adv()
+                self.skip()
+                if key in cur:
+                    self.err(f"{key} is set twice")
+                cur[key] = self.value()
+            self.skip()
+            if self.peek() not in ("", "\n"):
+                self.err("unexpected text after the value")
+
+    def key(self) -> str:
+        self.skip()
+        start = self.i
+        while self.peek() and (self.peek().isalnum() or self.peek() in "_-"):
+            self.adv()
+        if self.i == start:
+            self.err("expected a key")
+        return self.t[start:self.i]
+
+    def value(self):
+        c = self.peek()
+        if c == '"':
+            return self.basic()
+        if c == "'":
+            return self.literal()
+        if c == "[":
+            return self.array()
+        start = self.i
+        while self.peek() and self.peek() not in " \t\r\n#,]":
+            self.adv()
+        word = self.t[start:self.i]
+        if word == "true":
+            return True
+        if word == "false":
+            return False
+        if re.fullmatch(r"[+-]?[0-9]+", word):
+            return int(word)
+        self.err(f"unsupported value {word!r}: use a string, an integer, true, false, or an array")
+
+    def basic(self) -> str:
+        self.adv()
+        out = []
+        escapes = {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}
+        while True:
+            c = self.peek()
+            if c in ("", "\n"):
+                self.err("unterminated string")
+            self.adv()
+            if c == '"':
+                return "".join(out)
+            if c == "\\":
+                e = self.peek()
+                if e not in escapes:
+                    self.err(f"unsupported escape \\{e}")
+                self.adv()
+                out.append(escapes[e])
+            else:
+                out.append(c)
+
+    def literal(self) -> str:
+        self.adv()
+        start = self.i
+        while self.peek() != "'":
+            if self.peek() in ("", "\n"):
+                self.err("unterminated string")
+            self.adv()
+        s = self.t[start:self.i]
+        self.adv()
+        return s
+
+    def array(self) -> list:
+        self.adv()
+        items = []
+        while True:
+            self.skip(newlines=True)
+            if self.peek() == "]":
+                self.adv()
+                return items
+            if self.peek() == "":
+                self.err("unterminated array")
+            items.append(self.value())
+            self.skip(newlines=True)
+            if self.peek() == ",":
+                self.adv()
+            elif self.peek() != "]":
+                self.err("expected , or ] in the array")
+
+
+def parse_toml(text: str) -> dict:
+    return _Toml(text).doc()
+
+
+REQUIRED = {
+    "name": str, "summary": str, "provider": str, "guest": str, "image": str,
+    "cpu": int, "memory_mb": int, "disk_gb": int, "network": str, "not_covered": list,
+}
+OPTIONAL = {
+    "user": str, "root": bool, "snapshot_before_risky": bool, "provision": list,
+    "screenshot_cmd": str, "services": list, "log": str, "notes": str,
+}
+
+
+def check_recipe(data: dict, stem: str) -> list:
+    problems = []
+    for key, kind in {**REQUIRED, **OPTIONAL}.items():
+        if key not in data:
+            if key in REQUIRED:
+                problems.append(f"missing {key}")
+            continue
+        v = data[key]
+        if type(v) is not kind:
+            problems.append(f"{key} must be {kind.__name__}")
+        elif kind is list and not all(isinstance(x, str) and x.strip() for x in v):
+            problems.append(f"{key} must hold non-empty strings")
+    for key in data:
+        if key not in REQUIRED and key not in OPTIONAL:
+            problems.append(f"unknown key {key}")
+    if problems:
+        return problems
+    if data["name"] != stem:
+        problems.append(f"name {data['name']!r} differs from the file name {stem!r}")
+    if data["provider"] not in ("tart", "utm", "local"):
+        problems.append("provider must be tart, utm, or local")
+    if data["guest"] not in ("linux", "macos", "windows"):
+        problems.append("guest must be linux, macos, or windows")
+    if data["provider"] == "tart" and data["guest"] == "windows":
+        problems.append("tart runs macOS and Linux guests only; use utm")
+    net = data["network"]
+    if not (net in ("shared", "softnet") or re.fullmatch(r"bridged:[A-Za-z0-9._-]+", net)):
+        problems.append("network must be shared, softnet, or bridged:<interface>")
+    for key in ("cpu", "memory_mb", "disk_gb"):
+        if data[key] <= 0:
+            problems.append(f"{key} must be above 0")
+    if not data["not_covered"]:
+        problems.append("not_covered must name at least one thing")
+    return problems
+
+
+def load_recipe(envs: Path, name: str) -> dict:
+    if not NAME_RE.match(name):
+        raise Usage(f"bad machine name {name!r}")
+    path = envs / f"{name}.toml"
+    if not path.is_file():
+        known = ", ".join(sorted(p.stem for p in envs.glob("*.toml"))) or "none"
+        raise Fail(f"no recipe {path} (recipes: {known})", 1)
+    try:
+        data = parse_toml(path.read_text(encoding="utf-8"))
+    except TomlError as e:
+        raise Fail(f"{path}: {e}", 1)
+    problems = check_recipe(data, name)
+    if problems:
+        raise Fail(f"{path}: " + "; ".join(problems), 1)
+    data["_path"] = str(path)
+    return data
+
+
+def all_recipes(envs: Path) -> list:
+    return [load_recipe(envs, p.stem) for p in sorted(envs.glob("*.toml"))]
+
+
+def guest_shell(recipe: dict, cmd: str) -> list:
+    if recipe["guest"] == "windows":
+        return [r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-NoProfile", "-NonInteractive", "-Command", cmd]
+    return ["sh", "-c", cmd]
+
+
+def show(argv: list) -> str:
+    return shlex.join(str(a) for a in argv)
+
+
+class StepFailed(Fail):
+    pass
+
+
+class Provider:
+    """Shared plumbing. With `assume` set (a FakeState), calls are only recorded,
+    and state questions are answered from that fake state: the plan of a real run."""
+
+    binary = ""
+    install_hint = ""
+    env_override = ""
+
+    def __init__(self, recipe: dict, ctx: dict, assume=None) -> None:
+        self.r = recipe
+        self.name = recipe["name"]
+        self.ctx = ctx
+        self.assume = assume
+        self.steps: list = []
+        self.notes: list = []
+        self.ip = ""
+
+    def exe(self) -> str:
+        override = os.environ.get(self.env_override, "") if self.env_override else ""
+        if override:
+            if os.path.isfile(override) and os.access(override, os.X_OK):
+                return override
+            raise Fail(f"{self.binary} not found at {override} ({self.env_override}). {self.install_hint}", 127)
+        found = shutil.which(self.binary) or self.fallback()
+        if not found:
+            raise Fail(f"{self.binary} not found on PATH. {self.install_hint}", 127)
+        return found
+
+    def fallback(self) -> str:
+        return ""
+
+    def say(self, line: str) -> None:
+        if not self.ctx["json"]:
+            print(line, file=sys.stderr, flush=True)
+
+    def call(self, args: list, passthrough: bool = False, check: bool = True):
+        argv = [self.binary] + args
+        if self.assume is not None:
+            self.steps.append({"argv": argv, "exit": None})
+            return 0, "", ""
+        exe = self.exe()
+        n = len(self.steps) + 1
+        timeout = env_float("CTLHQ_ENV_TIMEOUT", 900)
+        try:
+            if passthrough:
+                p = subprocess.run([exe] + args, timeout=timeout)
+                out, err = "", ""
+            else:
+                p = subprocess.run([exe] + args, capture_output=True, text=True, timeout=timeout,
+                                   stdin=subprocess.DEVNULL)
+                out, err = p.stdout, p.stderr
+        except subprocess.TimeoutExpired:
+            self.steps.append({"argv": argv, "exit": "timeout"})
+            raise Fail(f"step {n} timed out after {timeout:g} s: {show(argv)}", 1)
+        self.steps.append({"argv": argv, "exit": p.returncode})
+        if check and p.returncode != 0:
+            raise StepFailed(f"step {n} failed: {show(argv)} exited {p.returncode}"
+                             + (f": {err.strip()[-400:]}" if err.strip() else ""), p.returncode)
+        return p.returncode, out, err
+
+    def spawn(self, args: list) -> None:
+        argv = [self.binary] + args
+        if self.assume is not None:
+            self.steps.append({"argv": argv, "exit": None, "background": True})
+            return
+        exe = self.exe()
+        n = len(self.steps) + 1
+        logs = self.ctx["state"] / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        log = logs / f"{self.name}-{self.binary}-run.log"
+        with open(log, "ab") as fh:
+            p = subprocess.Popen([exe] + args, stdin=subprocess.DEVNULL, stdout=fh,
+                                 stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            rc = p.wait(timeout=env_float("CTLHQ_ENV_RUN_GRACE", 3))
+        except subprocess.TimeoutExpired:
+            rc = None
+        self.steps.append({"argv": argv, "exit": "running" if rc is None else rc, "background": True, "log": str(log)})
+        if rc not in (None, 0):
+            tail = log.read_text(encoding="utf-8", errors="replace").strip()[-400:]
+            raise StepFailed(f"step {n} failed: {show(argv)} exited {rc}" + (f": {tail}" if tail else ""), rc)
+
+    def provision(self) -> None:
+        for cmd in self.r.get("provision", []):
+            self.call(self.exec_args(guest_shell(self.r, cmd)))
+
+    def screenshot(self, out: Path) -> None:
+        cmd = self.r.get("screenshot_cmd")
+        if not cmd:
+            raise Fail(f"recipe {self.name} has no screenshot_cmd (see its not_covered list)", 1)
+        _, text, _ = self.call(self.exec_args(guest_shell(self.r, cmd)))
+        if self.assume is not None:
+            return
+        try:
+            data = base64.b64decode("".join(text.split()), validate=True)
+        except ValueError:
+            raise Fail("screenshot_cmd did not print base64", 1)
+        if not data.startswith(PNG_MAGIC):
+            raise Fail("screenshot_cmd output is not a PNG image", 1)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+
+    def exec(self, argv: list):
+        passthrough = not self.ctx["json"]
+        rc, out, err = self.call(self.exec_args(argv), passthrough=passthrough, check=False)
+        return rc, out, err
+
+    def require(self, state: str, allowed: tuple, what: str) -> None:
+        if state not in allowed:
+            raise Fail(f"{self.name} is {state}; {what}", 1)
+
+
+class Tart(Provider):
+    binary = "tart"
+    install_hint = "Install it with: brew install cirruslabs/cli/tart (https://tart.run/quick-start/)"
+    env_override = "CTLHQ_ENV_TART"
+
+    def snap(self, tag: str) -> str:
+        return f"{self.name}-snap-{tag}"
+
+    def machines(self) -> dict:
+        _, out, _ = self.call(["list", "--format", "json"])
+        if self.assume is not None:
+            return self.assume.as_tart(self.name)
+        try:
+            rows = json.loads(out or "[]")
+        except ValueError:
+            raise Fail("tart list --format json did not print JSON", 1)
+        found = {}
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or str(row.get("Source", "local")).lower() != "local":
+                continue
+            running = row.get("Running") is True or str(row.get("State", "")).lower() == "running"
+            found[str(row.get("Name", ""))] = "running" if running else "stopped"
+        return found
+
+    def state(self) -> str:
+        return self.machines().get(self.name, "absent")
+
+    def tags(self, machines: dict) -> list:
+        prefix = self.snap("")
+        return sorted(n[len(prefix):] for n in machines if n.startswith(prefix))
+
+    def net_flags(self) -> list:
+        net = self.r["network"]
+        if net == "softnet":
+            return ["--net-softnet"]
+        if net.startswith("bridged:"):
+            return [f"--net-bridged={net.split(':', 1)[1]}"]
+        return []
+
+    def start(self) -> None:
+        self.spawn(["run", "--no-graphics"] + self.net_flags() + [self.name])
+        wait = int(env_float("CTLHQ_ENV_WAIT", 120))
+        _, out, _ = self.call(["ip", self.name, "--wait", str(wait)])
+        self.ip = out.strip().splitlines()[0] if out.strip() else ""
+
+    def stop(self) -> None:
+        self.call(["stop", "--timeout", "60", self.name])
+
+    def up(self) -> str:
+        state = self.state()
+        fresh = state == "absent"
+        if fresh:
+            self.call(["clone", self.r["image"], self.name])
+            self.call(["set", self.name, "--cpu", str(self.r["cpu"]), "--memory", str(self.r["memory_mb"]),
+                       "--disk-size", str(self.r["disk_gb"])])
+        if state == "running":
+            self.notes.append(f"{self.name} was already running")
+            _, out, _ = self.call(["ip", self.name])
+            self.ip = out.strip().splitlines()[0] if out.strip() else ""
+        else:
+            self.start()
+        if fresh:
+            self.provision()
+        return "running"
+
+    def down(self) -> str:
+        state = self.state()
+        self.require(state, ("running", "stopped"), "there is nothing to stop")
+        if state == "running":
+            self.stop()
+        else:
+            self.notes.append(f"{self.name} was already stopped")
+        return "stopped"
+
+    def snapshot(self, tag: str) -> str:
+        machines = self.machines()
+        state = machines.get(self.name, "absent")
+        self.require(state, ("running", "stopped"), "run `ctlhq-env up` first")
+        if state == "running":
+            self.stop()
+        if tag in self.tags(machines):
+            self.call(["delete", self.snap(tag)])
+            self.notes.append(f"replaced the earlier snapshot {tag}")
+        self.call(["clone", self.name, self.snap(tag)])
+        if state == "running":
+            self.start()
+        return state
+
+    def restore(self, tag: str) -> str:
+        machines = self.machines()
+        state = machines.get(self.name, "absent")
+        if tag not in self.tags(machines):
+            raise Fail(f"{self.name} has no snapshot {tag!r} (snapshots: {', '.join(self.tags(machines)) or 'none'})", 1)
+        if state == "running":
+            self.stop()
+        if state != "absent":
+            self.call(["delete", self.name])
+        self.call(["clone", self.snap(tag), self.name])
+        if state == "running":
+            self.start()
+        return "stopped" if state == "absent" else state
+
+    def exec_args(self, argv: list) -> list:
+        return ["exec", self.name] + argv
+
+    def status(self) -> str:
+        state = self.state()
+        if state == "running":
+            rc, out, _ = self.call(["ip", self.name], check=False)
+            self.ip = out.strip().splitlines()[0] if rc == 0 and out.strip() else ""
+        return state
+
+    def list_states(self) -> dict:
+        return self.machines()
+
+
+class Utm(Provider):
+    binary = "utmctl"
+    install_hint = ("Install UTM 5.0.6 or later from https://mac.getutm.app, then link it: "
+                    "sudo ln -s /Applications/UTM.app/Contents/MacOS/utmctl /usr/local/bin/utmctl")
+    env_override = "CTLHQ_ENV_UTMCTL"
+    BUNDLED = "/Applications/UTM.app/Contents/MacOS/utmctl"
+    STOPPED = ("stopped",)
+
+    def fallback(self) -> str:
+        return self.BUNDLED if os.access(self.BUNDLED, os.X_OK) else ""
+
+    def state(self) -> str:
+        rc, out, _ = self.call(["status", self.name], check=False)
+        if self.assume is not None:
+            return self.assume.machine_state(self.name)
+        if rc != 0:
+            return "absent"
+        word = out.strip().split()[0] if out.strip() else "unknown"
+        return "stopped" if word in self.STOPPED else ("running" if word == "started" else word)
+
+    def wait_ip(self) -> None:
+        deadline = time.monotonic() + env_float("CTLHQ_ENV_WAIT", 120)
+        while True:
+            rc, out, err = self.call(["ip-address", self.name], check=False)
+            if rc == 0 and (out.strip() or self.assume is not None):
+                self.ip = out.strip().splitlines()[0] if out.strip() else ""
+                return
+            if time.monotonic() >= deadline:
+                raise StepFailed(f"step {len(self.steps)} failed: utmctl ip-address {self.name} exited {rc}"
+                                 + (f": {err.strip()[-400:]}" if err.strip() else " with no address"), rc or 1)
+            time.sleep(4)
+
+    def up(self) -> str:
+        state = self.state()
+        fresh = state == "absent"
+        if fresh:
+            self.call(["clone", self.r["image"], "--name", self.name])
+            self.notes.append(f"utmctl cannot set CPU, memory, disk, or network; the template {self.r['image']} holds them "
+                              f"(recipe: {self.r['cpu']} CPU, {self.r['memory_mb']} MB, {self.r['disk_gb']} GB, {self.r['network']})")
+        if state == "running":
+            self.notes.append(f"{self.name} was already running")
+        else:
+            self.call(["start", self.name, "--hide"])
+        self.wait_ip()
+        if fresh:
+            self.provision()
+        return "running"
+
+    def down(self) -> str:
+        state = self.state()
+        if state == "absent":
+            raise Fail(f"{self.name} is absent; there is nothing to stop", 1)
+        if state == "stopped":
+            self.notes.append(f"{self.name} was already stopped")
+        else:
+            self.call(["stop", self.name])
+        return "stopped"
+
+    def tags(self) -> list:
+        _, out, _ = self.call(["snapshot", "list", self.name, "--json"])
+        if self.assume is not None:
+            return self.assume.tags(self.name)
+        try:
+            rows = json.loads(out or "[]")
+        except ValueError:
+            raise Fail("utmctl snapshot list --json did not print JSON", 1)
+        names = []
+        for row in rows if isinstance(rows, list) else []:
+            names.append(row.get("name", "") if isinstance(row, dict) else str(row))
+        return names
+
+    def snapshot(self, tag: str) -> str:
+        state = self.state()
+        if state == "absent":
+            raise Fail(f"{self.name} is absent; run `ctlhq-env up` first", 1)
+        if tag in self.tags():
+            self.call(["snapshot", "overwrite", self.name, "--snapshot", tag])
+            self.notes.append(f"replaced the earlier snapshot {tag}")
+        else:
+            self.call(["snapshot", "create", self.name, "--name", tag])
+        return state
+
+    def restore(self, tag: str) -> str:
+        state = self.state()
+        if state == "absent":
+            raise Fail(f"{self.name} is absent; run `ctlhq-env up` first", 1)
+        tags = self.tags()
+        if tag not in tags:
+            raise Fail(f"{self.name} has no snapshot {tag!r} (snapshots: {', '.join(tags) or 'none'})", 1)
+        self.call(["snapshot", "restore", self.name, "--snapshot", tag])
+        return state
+
+    def exec_args(self, argv: list) -> list:
+        return ["exec", self.name, "--cmd"] + argv
+
+    def status(self) -> str:
+        state = self.state()
+        if state == "running":
+            rc, out, _ = self.call(["ip-address", self.name], check=False)
+            self.ip = out.strip().splitlines()[0] if rc == 0 and out.strip() else ""
+        return state
+
+    def list_states(self) -> dict:
+        _, out, _ = self.call(["list"])
+        if self.assume is not None:
+            return {n: self.assume.machine_state(n) for n in self.assume.data["machines"]}
+        found = {}
+        for line in out.splitlines()[1:]:
+            parts = line.split(None, 2)
+            if len(parts) == 3:
+                word = parts[1]
+                found[parts[2].strip()] = "stopped" if word in self.STOPPED else ("running" if word == "started" else word)
+        return found
+
+
+class Local(Provider):
+    binary = "local"
+
+    def call(self, args: list, passthrough: bool = False, check: bool = True):
+        argv = ["(this machine)"] + args
+        if self.assume is not None:
+            self.steps.append({"argv": argv, "exit": None})
+            return 0, "", ""
+        if not shutil.which(args[0]):
+            self.steps.append({"argv": argv, "exit": 127})
+            raise Fail(f"{args[0]} not found on PATH of this machine", 127)
+        if passthrough:
+            p = subprocess.run(args)
+            out, err = "", ""
+        else:
+            p = subprocess.run(args, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            out, err = p.stdout, p.stderr
+        self.steps.append({"argv": argv, "exit": p.returncode})
+        if check and p.returncode != 0:
+            raise StepFailed(f"{show(args)} exited {p.returncode}" + (f": {err.strip()[-400:]}" if err.strip() else ""),
+                             p.returncode)
+        return p.returncode, out, err
+
+    def host(self) -> str:
+        return socket.gethostname()
+
+    def up(self) -> str:
+        self.notes.append(f"local provider: up does nothing; commands run on this machine ({self.host()})")
+        return "running"
+
+    def down(self) -> str:
+        self.notes.append(f"local provider: down does nothing; this machine ({self.host()}) keeps running")
+        return "running"
+
+    def snapshot(self, tag: str) -> str:
+        raise Fail("local provider cannot snapshot this machine; use a tart or utm recipe", 1)
+
+    def restore(self, tag: str) -> str:
+        raise Fail("local provider cannot restore this machine; use a tart or utm recipe", 1)
+
+    def exec_args(self, argv: list) -> list:
+        return argv
+
+    def screenshot(self, out: Path) -> None:
+        if self.assume is None and not shutil.which("screencapture"):
+            raise Fail("screencapture not found on PATH of this machine (macOS only)", 127)
+        if self.assume is None:
+            out.parent.mkdir(parents=True, exist_ok=True)
+        self.call(["screencapture", "-x", "-t", "png", str(out)])
+
+    def status(self) -> str:
+        return "running"
+
+    def list_states(self) -> dict:
+        return {}
+
+
+REAL = {"tart": Tart, "utm": Utm, "local": Local}
+
+
+class FakeState:
+    def __init__(self, folder: Path) -> None:
+        self.folder = folder
+        self.path = folder / "state.json"
+        self.data = {"machines": {}}
+        if self.path.is_file():
+            try:
+                self.data = json.loads(self.path.read_text(encoding="utf-8"))
+            except ValueError:
+                raise Fail(f"{self.path} is not JSON; delete it to start over", 1)
+            self.data.setdefault("machines", {})
+
+    def machine_state(self, name: str) -> str:
+        m = self.data["machines"].get(name)
+        return m["state"] if m else "absent"
+
+    def tags(self, name: str) -> list:
+        m = self.data["machines"].get(name)
+        return list(m.get("snapshots", [])) if m else []
+
+    def as_tart(self, name: str) -> dict:
+        found = {n: m["state"] for n, m in self.data["machines"].items()}
+        for tag in self.tags(name):
+            found[f"{name}-snap-{tag}"] = "stopped"
+        return found
+
+    def save(self) -> None:
+        self.folder.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(self.path)
+
+    def log(self, entry: dict) -> None:
+        self.folder.mkdir(parents=True, exist_ok=True)
+        with open(self.folder / "calls.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    def script(self, op: str):
+        p = self.folder / "script.json"
+        if not p.is_file():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except ValueError:
+            raise Fail(f"{p} is not JSON", 1)
+        return data.get(op)
+
+
+def result(op: str, provider: str, recipe: dict, **kw) -> dict:
+    out = {"op": op, "provider": provider, "name": recipe["name"] if recipe else None, "exit": 0}
+    out.update(kw)
+    return out
+
+
+def run_real(ctx: dict, op: str, recipe: dict, args: list, provider: str) -> dict:
+    p = REAL[provider](recipe, ctx)
+    res = result(op, provider, recipe, fake=False)
+    try:
+        if op == "up":
+            res["state"] = p.up()
+        elif op == "down":
+            res["state"] = p.down()
+        elif op == "snapshot":
+            res["state"] = p.snapshot(args[0])
+            res["tag"] = args[0]
+        elif op == "restore":
+            res["state"] = p.restore(args[0])
+            res["tag"] = args[0]
+        elif op == "exec":
+            rc, out, err = p.exec(args)
+            res["exit"] = rc
+            if rc != 0:
+                res["error"] = f"{show(args)} exited {rc} in {recipe['name']}"
+            if ctx["json"]:
+                res["stdout"], res["stderr"] = out, err
+        elif op == "screenshot":
+            p.screenshot(Path(args[0]))
+            res["file"] = str(Path(args[0]).resolve())
+        elif op == "status":
+            res["state"] = p.status()
+    except Fail as e:
+        res.update(exit=e.code, error=e.msg)
+    res["ip"] = p.ip
+    res["steps"] = p.steps
+    res["notes"] = p.notes
+    return res
+
+
+def plan_for(ctx: dict, op: str, recipe: dict, args: list, fake: FakeState):
+    """The steps the recipe's real provider would take, given the fake state. Return (provider, steps, notes, error)."""
+    real = recipe["provider"]
+    p = REAL[real](recipe, ctx, assume=fake)
+    try:
+        if op in ("up", "down", "status"):
+            getattr(p, op)()
+        elif op in ("snapshot", "restore"):
+            getattr(p, op)(args[0])
+        elif op == "exec":
+            p.call(p.exec_args(args), check=False)
+        elif op == "screenshot":
+            p.screenshot(Path(args[0]))
+    except Fail as e:
+        return real, p.steps, p.notes, e
+    return real, p.steps, p.notes, None
+
+
+def run_fake(ctx: dict, op: str, recipe: dict, args: list) -> dict:
+    fake = FakeState(ctx["state"] / "fake")
+    name = recipe["name"]
+    before = fake.machine_state(name)
+    real, steps, notes, error = plan_for(ctx, op, recipe, args, fake)
+    res = result(op, "fake", recipe, fake=True, real_provider=real, state_file=str(fake.path),
+                 plan=[show(s["argv"]) for s in steps], steps=[], notes=notes, ip="")
+    scripted = fake.script(op)
+    if error is None and op in ("exec", "screenshot") and before != "running":
+        error = Fail(f"{name} is {before} (fake); run `ctlhq-env --provider fake up {name}` first", 1)
+    if error is not None:
+        res.update(exit=error.code, error=error.msg)
+    elif op == "exec":
+        s = scripted or {}
+        res.update(exit=int(s.get("exit", 0)), stdout=str(s.get("stdout", "")), stderr=str(s.get("stderr", "")))
+        if res["exit"] != 0:
+            res["error"] = f"{show(args)} exited {res['exit']} in {name} (fake, scripted)"
+    elif scripted is not None and int(scripted.get("exit", 0)) != 0:
+        res.update(exit=int(scripted["exit"]), error=f"scripted failure for {op} (fake): exit {int(scripted['exit'])}")
+    else:
+        machines = fake.data["machines"]
+        m = machines.get(name)
+        if op == "up":
+            if m is None:
+                m = machines[name] = {"state": "stopped", "snapshots": [], "ip": f"192.0.2.{len(machines) + 9}"}
+            m["state"] = "running"
+            res["ip"] = m["ip"]
+        elif op == "down":
+            m["state"] = "stopped"
+        elif op == "snapshot":
+            if args[0] not in m["snapshots"]:
+                m["snapshots"].append(args[0])
+            res["tag"] = args[0]
+        elif op == "restore":
+            if m is None:
+                raise Fail("fake state lost the machine", 1)
+            res["tag"] = args[0]
+        elif op == "screenshot":
+            out = Path(args[0])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(TINY_PNG)
+            res["file"] = str(out.resolve())
+        if m is not None and op == "status":
+            res["ip"] = m["ip"] if m["state"] == "running" else ""
+        fake.save()
+    res["state"] = fake.machine_state(name)
+    fake.log({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "op": op, "name": name,
+              "args": args, "exit": res["exit"], "plan": res["plan"], "state_before": before,
+              "state_after": res["state"]})
+    return res
+
+
+def cmd_list(ctx: dict) -> int:
+    recipes = all_recipes(ctx["envs"])
+    states: dict = {}
+    provider = ctx["provider"]
+    if provider == "fake":
+        fake = FakeState(ctx["state"] / "fake")
+        states = {r["name"]: fake.machine_state(r["name"]) for r in recipes}
+    elif provider in ("tart", "utm"):
+        holder = {"name": "-", "provider": provider, "guest": "linux", "network": "shared"}
+        p = REAL[provider](holder, ctx)
+        try:
+            states = p.list_states()
+        except Fail as e:
+            print(f"ctlhq-env: {e.msg}", file=sys.stderr)
+            return e.code
+    elif provider == "local":
+        states = {r["name"]: "running (this machine)" for r in recipes}
+    rows = []
+    for r in recipes:
+        row = {k: r[k] for k in ("name", "provider", "guest", "image", "cpu", "memory_mb", "disk_gb",
+                                 "network", "summary", "not_covered")}
+        if provider:
+            row["state"] = states.get(r["name"], "absent")
+        rows.append(row)
+    if ctx["json"]:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if provider == "fake":
+        print("fake provider: states below are fake; no machine runs")
+    width = max((len(r["name"]) for r in rows), default=4)
+    iwidth = max((len(r["image"]) for r in rows), default=5)
+    swidth = max((len(r.get("state", "")) for r in rows), default=0)
+    for n, r in enumerate(rows, 1):
+        state = f"  {r['state']:<{swidth}}" if provider else ""
+        print(f"{n}. {r['name']:<{width}}  {r['provider']:<5}  {r['guest']:<7}  {r['image']:<{iwidth}}{state}  {r['summary']}")
+    return 0
+
+
+def print_text(res: dict, recipe: dict) -> None:
+    op = res["op"]
+    out = sys.stdout if res["exit"] == 0 and op != "exec" else sys.stderr
+    if res.get("fake"):
+        print(f"fake provider: no real machine was started or changed. Fake state: {res['state_file']}", file=out)
+    if op == "exec" and res.get("fake"):
+        sys.stdout.write(res.get("stdout", ""))
+        sys.stderr.write(res.get("stderr", ""))
+    if res["exit"] != 0:
+        print(f"ctlhq-env: {res.get('error', 'failed')}", file=sys.stderr)
+    elif op == "exec" and not res.get("fake"):
+        return
+    elif op == "exec":
+        pass
+    elif op == "screenshot":
+        print(f"{res['name']}: screenshot written to {res['file']}", file=out)
+    else:
+        ip = f"  ip {res['ip']}" if res.get("ip") else ""
+        tag = f"  snapshot {res['tag']}" if res.get("tag") else ""
+        label = "fake" if res.get("fake") else res["provider"]
+        print(f"{res['name']}: {res.get('state', '?')} ({label}){tag}{ip}", file=out)
+    for note in res.get("notes", []):
+        print(f"note: {note}", file=out)
+    if res.get("steps"):
+        print("steps:", file=out)
+        for n, s in enumerate(res["steps"], 1):
+            rc = s["exit"]
+            print(f"  {n}. {show(s['argv'])}  exit {rc}", file=out)
+    if res.get("fake"):
+        plan = res.get("plan", [])
+        print(f"A real run with {res['real_provider']} would take {len(plan)} step{'' if len(plan) == 1 else 's'}:", file=out)
+        for n, line in enumerate(plan, 1):
+            print(f"  {n}. {line}", file=out)
+    if res["exit"] == 0 and op == "up":
+        if recipe.get("snapshot_before_risky"):
+            print(f"note: take a snapshot before risky tests: ctlhq-env snapshot {res['name']} <tag>", file=out)
+        if recipe.get("log"):
+            print(f"note: the machine's log is {recipe['log']}", file=out)
+        print("does not cover: " + "; ".join(recipe["not_covered"]), file=out)
+    if res["exit"] == 0 and op == "status" and recipe.get("log"):
+        print(f"log: {recipe['log']}", file=out)
+
+
+def parse_args(argv: list) -> dict:
+    ctx = {"provider": None, "json": False, "envs": ROOT / "envs",
+           "state": Path(os.environ.get("CTLHQ_ENV_STATE") or ROOT / ".local" / "env"),
+           "out": None, "pos": [], "cmd": None}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            ctx["cmd"] = argv[i + 1:]
+            break
+        if a in ("-h", "--help"):
+            ctx["help"] = True
+        elif a == "--json":
+            ctx["json"] = True
+        elif a in ("--provider", "--envs", "--state", "--out"):
+            if i + 1 >= len(argv):
+                raise Usage(f"{a} needs a value")
+            v = argv[i + 1]
+            i += 1
+            if a == "--provider":
+                if v not in PROVIDERS:
+                    raise Usage(f"unknown provider {v!r} (use {', '.join(PROVIDERS)})")
+                ctx["provider"] = v
+            elif a == "--out":
+                ctx["out"] = v
+            else:
+                ctx[a[2:]] = Path(v)
+        elif a.startswith("-"):
+            raise Usage(f"unknown option {a}")
+        else:
+            ctx["pos"].append(a)
+        i += 1
+    return ctx
+
+
+def main(argv: list) -> int:
+    try:
+        ctx = parse_args(argv)
+        if ctx.get("help"):
+            print(__doc__.rstrip())
+            return 0
+        pos = ctx["pos"]
+        if not pos:
+            raise Usage("name a command")
+        op, rest = pos[0], pos[1:]
+        if op not in COMMANDS:
+            raise Usage(f"unknown command {op!r}")
+        if not ctx["envs"].is_dir():
+            raise Fail(f"recipe folder {ctx['envs']} not found", 1)
+        if op == "list":
+            if rest or ctx["cmd"] is not None or ctx["out"]:
+                raise Usage("list takes no arguments")
+            return cmd_list(ctx)
+        want = {"snapshot": 2, "restore": 2}.get(op, 1)
+        if len(rest) != want:
+            raise Usage(f"{op} needs {'NAME TAG' if want == 2 else 'NAME'}")
+        if (ctx["cmd"] is not None) != (op == "exec"):
+            raise Usage("exec needs `-- CMD`" if op == "exec" else f"{op} takes no `--` command")
+        if op == "exec" and not ctx["cmd"]:
+            raise Usage("exec needs a command after `--`")
+        if (ctx["out"] is not None) != (op == "screenshot"):
+            raise Usage("screenshot needs --out FILE" if op == "screenshot" else "--out belongs to screenshot")
+        if want == 2 and not NAME_RE.match(rest[1]):
+            raise Usage(f"bad TAG {rest[1]!r}: use letters, digits, dot, dash, underscore")
+        recipe = load_recipe(ctx["envs"], rest[0])
+        provider = ctx["provider"] or recipe["provider"]
+        if provider == "tart" and recipe["guest"] == "windows":
+            raise Usage("tart runs macOS and Linux guests only; this recipe needs utm")
+        args = rest[1:] if want == 2 else []
+        if op == "exec":
+            args = ctx["cmd"]
+        if op == "screenshot":
+            args = [ctx["out"]]
+        res = run_fake(ctx, op, recipe, args) if provider == "fake" else run_real(ctx, op, recipe, args, provider)
+    except Usage as e:
+        print(f"ctlhq-env: {e}", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
+    except Fail as e:
+        print(f"ctlhq-env: {e.msg}", file=sys.stderr)
+        return e.code
+    if ctx["json"]:
+        res.pop("_path", None)
+        print(json.dumps(res, indent=2))
+    else:
+        print_text(res, recipe)
+    return int(res["exit"])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

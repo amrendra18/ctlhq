@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# ctlhq-orch: plain-file orchestrate bookkeeping (units, ledger, inbox, gates, frontier, status). Needs bun.
+set -u
+# Resolve this file through symlinks (macOS bash 3 has no readlink -f).
+src="$0"
+while [ -L "$src" ]; do
+	dir="$(cd "$(dirname "$src")" && pwd)"
+	src="$(readlink "$src")"
+	case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+here="$(cd "$(dirname "$src")" && pwd)"
+scripts="$(cd "$here/../scripts" && pwd)"
+
+usage() {
+	cat <<'EOF'
+ctlhq-orch: plain-file orchestrate bookkeeping (units, ledger, inbox, gates, frontier, status). Needs bun.
+
+Usage: ctlhq-orch [--store <dir>] [--json] [--force] <command>
+
+Options:
+  --store <dir>   store directory (or ORCH_STORE)
+  --json          print complete rows as JSON
+  --force         steal an existing store lock
+  -h, --help      display help for command
+
+Commands:
+  init                                                     initialize the store
+  unit add <id> --track <track> [--brief <path>]           add a unit
+  unit set <id> --state <state> [--branch <branch>]
+           [--pr <number>] [--sha <sha>]                   update a unit
+  unit get <id>                                            get a unit
+  unit list [--state <state>] [--track <track>]            list units
+  unit counts                                              count units by state
+  ledger record <pr> <sha> <verdict> --evidence <path>
+           [--verifier <name>]                             record a verification verdict
+  ledger check <pr> <sha>                                  check a verification verdict
+  ledger summary                                           count verification verdicts
+  inbox push <agent> <unit> <status> [--report <path>]     push an inbox pointer
+  inbox drain [--peek]                                     drain inbox pointers
+  inbox count                                              count inbox pointers
+  gate park <id> --question <q> --options <o> --default <a>   park a decision gate
+  gate list                                                list open decision gates
+  gate resolve <id> --answer <answer>                      resolve a decision gate
+  frontier set [--repo <dir>] [--prs <n,...>]
+                                                           resolve the pull request base chain and set the frontier
+  frontier show                                            show the frontier
+  status                                                   render status.md and print a summary
+  standing show                                            show standing orders
+  standing add <line>                                      add a standing order
+
+Verdicts: live-ui-verified | unit-test-verified | type-check-only | verifier-blocked | verifier-failed
+--repo also reads ORCH_REPO.
+
+Exit codes (from scripts/orch/orch.ts handleError):
+  0    success
+  1    usage error: an unknown command or option, a bad value, or a store usage error
+       (the help is printed to stderr)
+  2    a row is not found: unit get or unit set on an unknown id, ledger check with no
+       verdict for that pr and sha (NOT-VERIFIED), gate resolve on an unknown gate
+  127  bun is not installed (this wrapper exits before the script runs)
+
+First run: the script runs `bun install --frozen-lockfile` in skills/ctlhq-mode/scripts
+(it installs commander into scripts/node_modules), then restarts itself with the same
+arguments and exits with the restarted run's code. Later runs skip the install until
+package.json or bun.lock changes.
+
+Needs bun. Runs: bun skills/ctlhq-mode/scripts/orch/orch.ts
+Install bun with: curl -fsSL https://bun.sh/install | bash
+EOF
+}
+for arg in "$@"; do
+	case "$arg" in
+	-h|--help) usage; exit 0 ;;
+	esac
+done
+
+if ! command -v bun >/dev/null 2>&1; then
+	echo "ctlhq-orch needs bun. Install it with: curl -fsSL https://bun.sh/install | bash" >&2
+	exit 127
+fi
+exec bun "$scripts/orch/orch.ts" "$@"

@@ -1,0 +1,928 @@
+#!/usr/bin/env python3
+"""ctlhq-status: where a project stands, in seven numbered blocks read from its repository; writes nothing.
+
+Usage:
+  ctlhq-status [--repo DIR] [--since TIME|REV] [--json]
+  ctlhq-status --next [--repo DIR] [--json]
+
+Blocks, in this order:
+  1. Repository: branch, HEAD hash and subject, commit age, dirty file count
+     (`git status --porcelain` lines, untracked files included).
+  2. Gate: every .local/gate/*.exit (written by ctlhq-run-gate): name, exit code, and the age of
+     the end timestamp in .local/gate/<name>.meta (the file's age when .meta is missing).
+  3. Open decisions: the section of README.md whose heading (any level) contains "open
+     decisions" or "open items", any case. It prints each table row or top-level list
+     entry of that section (20 at most), numbered in section order, then "needs you": the
+     rows the operator owns, marked [needs you]. A row is the operator's when its owner
+     text holds the word "operator" or "you", any case. The owner text is the cell under a
+     header that contains "owner", or, without that column, the words after "owner:" up
+     to the first comma, semicolon, bracket, or sentence end. The tool does not know the
+     operator's name, so a row owned by a name alone is not marked.
+  4. BLOCKED.md: present or absent; when present, its first 8 lines.
+  5. PLAN.md: the last 3 non-empty lines of section 10 (the approvals ledger), when the
+     file exists.
+  6. Agents: when .local/orch/ exists (or ORCH_STORE names a folder), runs `ctlhq-orch status`
+     from this repository's bin/ when bun is installed, else prints "ctlhq-orch store present,
+     bun missing". Otherwise "no agent store".
+  7. Now: seven lines.
+     a. Since your last message: commits since then and changed working-tree files modified
+        since then (10 each at most). The time is --since (an ISO time, or a git revision:
+        then the commits after it). Without --since, the time of the operator's message
+        before the newest one in this workspace's newest Claude Code or Codex session,
+        read with bin/ctlhq-transcripts (`current`, then `turns --role operator`).
+     b. Current item, from the first table of PLAN.md section 7. In a | # | Milestone |
+        Done when | State | table: the first in progress row, else the first planned row,
+        else the first row not done, counted as "N of M milestones done". In an older table:
+        the first row whose state is not committed or accepted.
+     c. Next user-visible milestone: from the current item on, the first milestone whose
+        "Outcome." line in PLAN.md section 6 does not start with "internal" or "none",
+        with its outcome and how many open milestones come before it.
+     d. Lanes: each linked git worktree (branch, last commit age, dirty files) and each
+        running process whose command line names this repository, with its run time.
+     e. Last stop: the last list entry of BLOCKED.md; else the newest gate run with a
+        non-zero exit; else "no stop reason recorded".
+     f. Next step: what --next prints (below).
+     g. Cost, one line. Each number and its source:
+        - worktrees: the folders directly inside .local/worktrees of the main work tree
+          (the folder that holds the git common dir), counted with a directory listing.
+        - disk used: `du -sk` on that .local/worktrees folder ("size unknown" past 5 s).
+        - free disk: the free bytes of the disk that holds the repository
+          (Python shutil.disk_usage).
+        - rounds so far and elapsed time: lines "Round N started: TIME" and "Round N ended:
+          TIME" (any case, inside a list item or table cell too; TIME is ISO, UTC when it has
+          no zone) in PLAN.md, then REPORT.md, at the repository root. Rounds so far is the
+          highest N. Elapsed is the highest round's run time: started to ended, or started to
+          now while it has no end. Without such a line: "rounds: none recorded".
+
+--next prints only the next step, one line, and reads only PLAN.md and BLOCKED.md (fast
+enough for a Stop hook). The milestone list is the first table in PLAN.md, outside code
+fences, whose header is | # | Milestone | Done when | State | (any case; the PLAN template
+puts it first in section 7). States: planned, in progress, done, blocked. The next step is
+the first in progress row, else the first planned row. A row with another state (an old
+plan's committed) is never the next step and is named as skipped. Without a next step it
+prints "next step: none (<reason>)". --json adds blocked_open, the open rows of BLOCKED.md:
+filled table rows and top-level list entries, except a closed row (a cell or entry that is,
+or starts with, closed:, resolved:, done:, or unblocked:, or holds ~~struck~~ text).
+
+--repo DIR reads that repository (default: the git work tree that holds the current
+directory). --json prints the same facts as one JSON object with the keys repository, gate,
+decisions, blocked, plan, agents, now; now.next holds the --next object and now.cost the
+cost line's numbers. ctlhq-status itself writes nothing; `ctlhq-orch status` renders
+status.md inside its own store.
+
+Exit codes: 0 printed; 1 DIR is not a git repository; 2 usage error.
+
+Operator rule (home/AGENTS.md, Replies): "Before stating the state of a process, agent or window, check it." Run this before a status reply; block 3 answers "anything pending on me"; block 7 answers
+"what changed since my last message", "what item now", "how far to something I can see",
+"what runs in parallel", "why did it stop", "what is next", and "what has this cost". It
+runs the same from a Codex session. The reply lint (ctlhq-reply-lint) reads --next --json.
+"""
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+USAGE = "usage: ctlhq-status [--repo DIR] [--since TIME|REV] [--next] [--json]"
+HEADING2 = re.compile(r"^##\s+\S")
+HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+DECISIONS_TITLE = re.compile(r"\bopen\s+(?:decisions|items)\b", re.IGNORECASE)
+OWNER_TEXT = re.compile(r"\bowner\s*:\s*(.*?)(?:[,;(]|\.(?:\s|$)|$)", re.IGNORECASE)
+OPERATOR_OWNER = re.compile(r"\b(?:operator|you)\b", re.IGNORECASE)
+FENCE = re.compile(r"^\s*(```|~~~)")
+MAX_DECISION_ROWS = 20
+SECTION10 = re.compile(r"^##\s+10\b")
+TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+SECTION6 = re.compile(r"^##\s+6\b")
+SECTION7 = re.compile(r"^##\s+7\b")
+MILESTONE_HEAD = re.compile(r"^###\s+(M\d+)\b[:\s]*(.*)$")
+OUTCOME = re.compile(r"^\s*[-*]?\s*\*\*Outcome\.?\*\*\s*(.*)$")
+DONE_STATES = ("committed", "accepted")
+LIST_ENTRY = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+\S")
+SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+MILESTONE_COLUMNS = ["#", "milestone", "done when", "state"]
+STATES = ("planned", "in progress", "done", "blocked")
+MARKUP = re.compile(r"[`*_]")
+CLOSED = re.compile(r"^(?:closed|resolved|done|unblocked)(?::|$)", re.IGNORECASE)
+ROUND_STAMP = re.compile(
+    r"\bround\s+(\d+)\s+(started|ended)\s*:?\s*"
+    r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)",
+    re.IGNORECASE)
+ROUND_FILES = ("PLAN.md", "REPORT.md")
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-status: {msg}", file=sys.stderr)
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+def git(root: Path, args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(root)] + args, capture_output=True, text=True)
+
+
+def age_text(seconds: float) -> str:
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s} second{'s' if s != 1 else ''} ago"
+    if s < 3600:
+        m = s // 60
+        return f"{m} minute{'s' if m != 1 else ''} ago"
+    if s < 86400:
+        h = s // 3600
+        return f"{h} hour{'s' if h != 1 else ''} ago"
+    d = s // 86400
+    return f"{d} day{'s' if d != 1 else ''} ago"
+
+
+def parse_iso(text: str) -> datetime.datetime | None:
+    try:
+        return datetime.datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def read_lines(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8", errors="replace").split("\n")
+
+
+def cells(row: str) -> list[str]:
+    inner = row.strip()
+    if inner.startswith("|"):
+        inner = inner[1:]
+    if inner.endswith("|"):
+        inner = inner[:-1]
+    return [c.strip() for c in inner.split("|")]
+
+
+def repository_block(root: Path, now: datetime.datetime) -> dict:
+    info: dict = {"root": str(root), "branch": None, "head": None, "short": None, "subject": None,
+                  "committed": None, "age_seconds": None, "age": None, "dirty_files": 0}
+    r = git(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    if r.returncode == 0:
+        info["branch"] = r.stdout.strip()
+    else:
+        r2 = git(root, ["symbolic-ref", "--short", "HEAD"])
+        info["branch"] = r2.stdout.strip() if r2.returncode == 0 else None
+    r = git(root, ["log", "-1", "--format=%H%x1f%h%x1f%s%x1f%ct"])
+    if r.returncode == 0 and r.stdout.strip():
+        full, short, subject, ct = (r.stdout.strip().split("\x1f") + ["", "", "", ""])[:4]
+        info.update({"head": full, "short": short, "subject": subject})
+        if ct.isdigit():
+            when = datetime.datetime.fromtimestamp(int(ct), datetime.timezone.utc)
+            info["committed"] = when.strftime("%Y-%m-%dT%H:%M:%SZ")
+            info["age_seconds"] = int((now - when).total_seconds())
+            info["age"] = age_text(info["age_seconds"])
+    r = git(root, ["status", "--porcelain"])
+    info["dirty_files"] = len([l for l in r.stdout.split("\n") if l.strip()]) if r.returncode == 0 else None
+    return info
+
+
+def gate_block(root: Path, now: datetime.datetime) -> list[dict]:
+    gate_dir = root / ".local" / "gate"
+    rows: list[dict] = []
+    if not gate_dir.is_dir():
+        return rows
+    for exit_path in sorted(gate_dir.glob("*.exit")):
+        name = exit_path.name[: -len(".exit")]
+        code = exit_path.read_text(encoding="utf-8", errors="replace").strip()
+        row: dict = {"name": name, "exit": int(code) if code.lstrip("-").isdigit() else code,
+                     "end": None, "command": None, "age_seconds": None, "age": None, "age_source": "meta"}
+        meta_path = gate_dir / f"{name}.meta"
+        end: datetime.datetime | None = None
+        if meta_path.is_file():
+            fields = meta_path.read_text(encoding="utf-8", errors="replace").strip().split("\t")
+            if len(fields) >= 2:
+                end = parse_iso(fields[1])
+                row["end"] = fields[1]
+            if len(fields) >= 4:
+                row["command"] = fields[3]
+        if end is None:
+            end = datetime.datetime.fromtimestamp(exit_path.stat().st_mtime, datetime.timezone.utc)
+            row["age_source"] = "file"
+        row["age_seconds"] = int((now - end).total_seconds())
+        row["age"] = age_text(row["age_seconds"])
+        rows.append(row)
+    return rows
+
+
+def decisions_section(lines: list[str]) -> tuple[str | None, list[str]]:
+    """The heading and body of the first "open decisions" or "open items" section, outside code fences."""
+    fenced = False
+    for i, line in enumerate(lines):
+        if FENCE.match(line):
+            fenced = not fenced
+            continue
+        m = None if fenced else HEADING.match(line)
+        if not m or not DECISIONS_TITLE.search(m.group(2)):
+            continue
+        level = len(m.group(1))
+        body: list[str] = []
+        inner_fence = False
+        for raw in lines[i + 1:]:
+            if FENCE.match(raw):
+                inner_fence = not inner_fence
+            elif not inner_fence:
+                h = HEADING.match(raw)
+                if h and len(h.group(1)) <= level:
+                    break
+            body.append(raw)
+        return line.strip(), body
+    return None, []
+
+
+def owner_needs_you(owner: str) -> bool:
+    return bool(OPERATOR_OWNER.search(owner or ""))
+
+
+def decision_rows(body: list[str]) -> list[dict]:
+    rows: list[dict] = []
+    i = 0
+    while i < len(body):
+        line = body[i]
+        if TABLE_ROW.match(line) and i + 1 < len(body) and SEPARATOR.match(body[i + 1]):
+            header = [c.lower() for c in cells(line)]
+            owner_idx = next((k for k, c in enumerate(header) if "owner" in c), None)
+            num_idx = next((k for k, c in enumerate(header) if c in ("#", "no", "no.", "number", "n")), None)
+            item_idx = next((k for k, c in enumerate(header) if "item" in c or "decision" in c), None)
+            if item_idx is None:
+                item_idx = next((k for k in range(len(header)) if k not in (num_idx, owner_idx)), 0)
+            j = i + 2
+            while j < len(body) and TABLE_ROW.match(body[j]):
+                row = cells(body[j])
+                item = row[item_idx] if len(row) > item_idx else " | ".join(row)
+                if owner_idx is not None:
+                    owner = row[owner_idx] if len(row) > owner_idx else ""
+                else:
+                    found = [OWNER_TEXT.search(c) for c in row]
+                    owner = next((m.group(1).strip() for m in found if m), "")
+                rows.append({"n": len(rows) + 1, "item": item, "owner": owner or None,
+                             "needs_you": owner_needs_you(owner)})
+                j += 1
+            i = j
+            continue
+        m = LIST_ENTRY.match(line)
+        if m and not line.startswith((" ", "\t")):
+            text = [line.strip()]
+            j = i + 1
+            while j < len(body) and body[j].strip() and body[j].startswith((" ", "\t")):
+                text.append(body[j].strip())
+                j += 1
+            joined = " ".join(text)
+            item = re.sub(r"^(?:[-*]|\d+[.)])\s+", "", joined)
+            om = OWNER_TEXT.search(item)
+            owner = om.group(1).strip() if om else ""
+            rows.append({"n": len(rows) + 1, "item": item, "owner": owner or None,
+                         "needs_you": owner_needs_you(owner)})
+            i = j
+            continue
+        i += 1
+    return rows
+
+
+def decisions_block(root: Path) -> dict:
+    path = root / "README.md"
+    info: dict = {"readme": path.is_file(), "heading": None, "rows": [], "more": 0, "needs_you": []}
+    if not info["readme"]:
+        return info
+    heading, body = decisions_section(read_lines(path))
+    info["heading"] = heading
+    if heading is None:
+        return info
+    rows = decision_rows(body)
+    info["rows"] = rows[:MAX_DECISION_ROWS]
+    info["more"] = max(0, len(rows) - MAX_DECISION_ROWS)
+    info["needs_you"] = [r for r in rows if r["needs_you"]]
+    return info
+
+
+def blocked_block(root: Path) -> dict:
+    path = root / "BLOCKED.md"
+    info: dict = {"present": path.is_file(), "first_lines": []}
+    if info["present"]:
+        lines = read_lines(path)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        info["first_lines"] = lines[:8]
+    return info
+
+
+def plan_block(root: Path) -> dict:
+    path = root / "PLAN.md"
+    info: dict = {"present": path.is_file(), "section10": False, "last_lines": []}
+    if not info["present"]:
+        return info
+    lines = read_lines(path)
+    for i, line in enumerate(lines):
+        if SECTION10.match(line):
+            info["section10"] = True
+            body: list[str] = []
+            for raw in lines[i + 1:]:
+                if HEADING2.match(raw):
+                    break
+                if raw.strip():
+                    body.append(raw)
+            info["last_lines"] = body[-3:]
+            break
+    return info
+
+
+def agents_block(root: Path) -> dict:
+    store: Path | None = None
+    if (root / ".local" / "orch").is_dir():
+        store = root / ".local" / "orch"
+    elif os.environ.get("ORCH_STORE") and Path(os.environ["ORCH_STORE"]).is_dir():
+        store = Path(os.environ["ORCH_STORE"])
+    if store is None:
+        return {"store": None, "bun": shutil.which("bun") is not None, "note": "no agent store", "status": None, "exit": None}
+    info: dict = {"store": str(store), "bun": shutil.which("bun") is not None, "note": None, "status": None, "exit": None}
+    if not info["bun"]:
+        info["note"] = "ctlhq-orch store present, bun missing"
+        return info
+    orch = Path(__file__).resolve().parent / "ctlhq-orch"
+    if not orch.exists():
+        info["note"] = f"ctlhq-orch store present, {orch} not found"
+        return info
+    try:
+        r = subprocess.run([str(orch), "--store", str(store), "status"], capture_output=True, text=True, timeout=60)
+        info["status"] = (r.stdout + r.stderr).strip()
+        info["exit"] = r.returncode
+    except (OSError, subprocess.TimeoutExpired) as e:
+        info["note"] = f"ctlhq-orch status failed: {e}"
+    return info
+
+
+def last_message(root: Path) -> dict:
+    """The operator's message before the newest one, from the newest Claude Code or Codex session."""
+    ft = Path(__file__).resolve().parent / "ctlhq-transcripts"
+    best: dict | None = None
+    if not ft.exists():
+        return {"time": None, "source": f"{ft} not found"}
+    for host in ("claude", "codex"):
+        try:
+            r = subprocess.run([sys.executable, str(ft), "current", "--host", host, "--workspace", str(root)],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode != 0 or not r.stdout.strip():
+                continue
+            path = r.stdout.strip().split("\n")[-1]
+            r = subprocess.run([sys.executable, str(ft), "turns", path, "--role", "operator", "--text-only", "--json"],
+                               capture_output=True, text=True, timeout=60)
+            stamps = [parse_iso(t.get("ts") or "") for t in json.loads(r.stdout or "[]")] if r.returncode == 0 else []
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            continue
+        stamps = [t for t in stamps if t is not None]
+        if not stamps:
+            continue
+        prev = stamps[-2] if len(stamps) >= 2 else stamps[-1]
+        if best is None or stamps[-1] > best["newest"]:
+            best = {"newest": stamps[-1], "time": prev, "host": host, "session": path, "operator_turns": len(stamps)}
+    if best is None:
+        return {"time": None, "source": "no Claude Code or Codex session for this workspace"}
+    note = "" if best["operator_turns"] >= 2 else ", the session's only operator message"
+    return {"time": best["time"], "source": f"{best['host']} session {Path(best['session']).name}{note}"}
+
+
+def since_line(root: Path, since: str | None, now: datetime.datetime) -> dict:
+    info: dict = {"since": None, "source": None, "commits": [], "files": []}
+    base_rev = None
+    when: datetime.datetime | None = None
+    if since:
+        info["source"] = "--since"
+        when = parse_iso(since)
+        if when is None:
+            r = git(root, ["rev-parse", "--verify", "--quiet", since + "^{commit}"])
+            if r.returncode != 0:
+                info["source"] = f"--since {since!r} is neither an ISO time nor a git revision"
+                return info
+            base_rev = r.stdout.strip()
+            r = git(root, ["log", "-1", "--format=%ct", base_rev])
+            if r.stdout.strip().isdigit():
+                when = datetime.datetime.fromtimestamp(int(r.stdout.strip()), datetime.timezone.utc)
+    else:
+        found = last_message(root)
+        info["source"] = found["source"]
+        when = found["time"]
+        if when is None:
+            return info
+    if when is not None and when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    info["since"] = since if base_rev else (when.strftime("%Y-%m-%dT%H:%M:%SZ") if when else None)
+    if base_rev:
+        r = git(root, ["log", "--format=%h %s", f"{base_rev}..HEAD"])
+    else:
+        r = git(root, ["log", "--format=%h %s", f"--since={int(when.timestamp())}"])
+    info["commits"] = [l for l in r.stdout.split("\n") if l.strip()] if r.returncode == 0 else []
+    r = git(root, ["status", "--porcelain"])
+    for l in r.stdout.split("\n") if r.returncode == 0 else []:
+        if len(l) < 4:
+            continue
+        name = l[3:].split(" -> ")[-1].strip('"')
+        p = root / name
+        try:
+            mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime, datetime.timezone.utc)
+        except OSError:
+            mtime = now  # a deleted file changed after any earlier time we know of
+        if when is None or mtime >= when:
+            info["files"].append(f"{l[:2].strip() or '?'} {name}")
+    return info
+
+
+def section(lines: list[str], head: re.Pattern) -> list[str]:
+    for i, line in enumerate(lines):
+        if head.match(line):
+            body: list[str] = []
+            for raw in lines[i + 1:]:
+                if HEADING2.match(raw):
+                    break
+                body.append(raw)
+            return body
+    return []
+
+
+def milestone_lines(root: Path) -> dict:
+    path = root / "PLAN.md"
+    info: dict = {"current": None, "visible": None, "open_before": None, "open": [], "total": 0}
+    if not path.is_file():
+        return info
+    lines = read_lines(path)
+    rows: list[dict] = []
+    body = section(lines, SECTION7)
+    contract = False
+    for k in range(len(body) - 1):
+        if TABLE_ROW.match(body[k]) and SEPARATOR.match(body[k + 1]):
+            header = [plain(c).lower() for c in cells(body[k])]
+            contract = header == MILESTONE_COLUMNS
+            state_idx = next((j for j, c in enumerate(header) if "state" in c), 1)
+            for raw in body[k + 2:]:
+                if not TABLE_ROW.match(raw):
+                    break
+                row = cells(raw) + [""] * 4
+                state = row[state_idx]
+                if contract:
+                    state = " ".join(plain(state).lower().replace("-", " ").replace("_", " ").split())
+                rows.append({"milestone": row[0], "name": plain(row[1]) if contract else "", "state": state})
+            break
+    info["done_word"] = "done" if contract else "committed or accepted"
+    outcomes: dict = {}
+    names: dict = {}
+    current_m = None
+    for raw in section(lines, SECTION6):
+        m = MILESTONE_HEAD.match(raw)
+        if m:
+            current_m = m.group(1)
+            names[current_m] = m.group(2).strip()
+            continue
+        o = OUTCOME.match(raw)
+        if o and current_m and current_m not in outcomes:
+            outcomes[current_m] = o.group(1).strip()
+    info["total"] = len(rows)
+    if contract:
+        info["open"] = [r for r in rows if r["state"] != "done"]
+    else:
+        info["open"] = [r for r in rows if not any(d in r["state"].lower() for d in DONE_STATES)]
+    if info["open"]:
+        cur = next((r for r in info["open"] if r["state"] == "in progress"), None) if contract else None
+        cur = cur or (next((r for r in info["open"] if r["state"] == "planned"), None) if contract else None) or info["open"][0]
+        key = cur["milestone"].split()[0] if cur["milestone"] else ""
+        info["current"] = {"milestone": cur["milestone"], "name": cur["name"] or names.get(key, ""), "state": cur["state"]}
+        for n, r in enumerate(info["open"]):
+            k = r["milestone"].split()[0] if r["milestone"] else ""
+            outcome = outcomes.get(k, "")
+            if outcome and not outcome.lower().startswith(("internal", "none")):
+                info["visible"] = {"milestone": r["milestone"], "outcome": outcome}
+                info["open_before"] = n
+                break
+    return info
+
+
+def lanes_line(root: Path, now: datetime.datetime) -> dict:
+    info: dict = {"worktrees": [], "processes": []}
+    r = git(root, ["worktree", "list", "--porcelain"])
+    if r.returncode == 0:
+        entries = [e for e in r.stdout.strip().split("\n\n") if e.strip()]
+        for e in entries[1:]:  # the first entry is the main work tree
+            fields = dict((l.split(" ", 1) + [""])[:2] for l in e.split("\n") if l)
+            wt = Path(fields.get("worktree", ""))
+            row: dict = {"path": str(wt), "branch": fields.get("branch", "").replace("refs/heads/", "") or "(detached)",
+                         "age": None, "dirty_files": None}
+            r2 = git(wt, ["log", "-1", "--format=%ct"])
+            if r2.returncode == 0 and r2.stdout.strip().isdigit():
+                row["age"] = age_text((now - datetime.datetime.fromtimestamp(int(r2.stdout.strip()), datetime.timezone.utc)).total_seconds())
+            r2 = git(wt, ["status", "--porcelain"])
+            if r2.returncode == 0:
+                row["dirty_files"] = len([l for l in r2.stdout.split("\n") if l.strip()])
+            info["worktrees"].append(row)
+    try:
+        r = subprocess.run(["ps", "-Ao", "pid=,etime=,command="], capture_output=True, text=True, timeout=30)
+        me = os.getpid()
+        for l in r.stdout.split("\n"):
+            parts = l.split(None, 2)
+            if len(parts) < 3 or str(root) not in parts[2] or int(parts[0]) in (me, os.getppid()):
+                continue
+            if "ctlhq-status" in parts[2] or "ctlhq-transcripts" in parts[2]:
+                continue
+            info["processes"].append({"pid": int(parts[0]), "elapsed": parts[1], "command": parts[2][:120]})
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return info
+
+
+def stop_line(root: Path, gate: list[dict]) -> dict:
+    blk = root / "BLOCKED.md"
+    if blk.is_file():
+        entries = [l.strip() for l in read_lines(blk) if LIST_ENTRY.match(l)]
+        if entries:
+            return {"reason": entries[-1], "source": "BLOCKED.md, last entry"}
+    failed = [g for g in gate if g["exit"] != 0]
+    if failed:
+        g = min(failed, key=lambda x: x["age_seconds"])
+        return {"reason": f"gate {g['name']} exited {g['exit']} {g['age']}", "source": ".local/gate"}
+    return {"reason": "no stop reason recorded", "source": None}
+
+
+def plain(text: str) -> str:
+    return " ".join(MARKUP.sub("", text).split())
+
+
+def milestone_table(lines: list[str]) -> tuple[int, list[dict]] | None:
+    """The first | # | Milestone | Done when | State | table outside code fences: (header line, rows)."""
+    fenced = False
+    for i, line in enumerate(lines):
+        if FENCE.match(line):
+            fenced = not fenced
+            continue
+        if fenced or not TABLE_ROW.match(line) or i + 1 >= len(lines) or not SEPARATOR.match(lines[i + 1]):
+            continue
+        if [plain(c).lower() for c in cells(line)] != MILESTONE_COLUMNS:
+            continue
+        rows: list[dict] = []
+        for j in range(i + 2, len(lines)):
+            if not TABLE_ROW.match(lines[j]):
+                break
+            c = cells(lines[j]) + ["", "", "", ""]
+            state = plain(c[3]).lower().replace("-", " ").replace("_", " ")
+            rows.append({"number": plain(c[0]), "milestone": plain(c[1]), "done_when": c[2].strip(),
+                         "state": " ".join(state.split()), "line": j + 1})
+        return i + 1, rows
+    return None
+
+
+def blocked_open(root: Path) -> list[str]:
+    """Open rows of BLOCKED.md: filled table rows under a separator, and top-level list entries.
+    A row is closed when a cell (or the entry text) is, or starts with, closed:, resolved:, done:,
+    or unblocked:, or when it holds struck-through text (~~)."""
+    path = root / "BLOCKED.md"
+    if not path.is_file():
+        return []
+    out: list[str] = []
+    in_table = False
+    for line in read_lines(path):
+        if TABLE_ROW.match(line):
+            in_table = in_table or bool(SEPARATOR.match(line))
+            row = cells(line)
+            filled = [c for c in row if c and c != "#"]
+            if (in_table and not SEPARATOR.match(line) and len(filled) > (1 if row[0].isdigit() else 0)
+                    and not any(CLOSED.match(plain(c)) for c in row) and "~~" not in line):
+                out.append(" | ".join(row))
+            continue
+        in_table = False
+        if LIST_ENTRY.match(line) and not line.startswith((" ", "\t")):
+            text = re.sub(r"^\s*(?:[-*]|\d+[.)])\s+", "", line).strip()
+            if not CLOSED.match(plain(text)) and "~~" not in text:
+                out.append(line.strip())
+    return out
+
+
+def next_step(root: Path) -> dict:
+    info: dict = {"step": None, "reason": None, "table_line": None, "counts": {}, "unknown": [],
+                  "blocked_open": blocked_open(root)}
+    path = root / "PLAN.md"
+    if not path.is_file():
+        info["reason"] = "no PLAN.md"
+        return info
+    found = milestone_table(read_lines(path))
+    if found is None:
+        info["reason"] = "no milestone table: PLAN.md has no table with the header | # | Milestone | Done when | State |"
+        return info
+    info["table_line"], rows = found
+    if not rows:
+        info["reason"] = f"the milestone table at PLAN.md line {info['table_line']} has no rows"
+        return info
+    counts: dict = {}
+    for r in rows:
+        key = r["state"] if r["state"] in STATES else "unknown state"
+        counts[key] = counts.get(key, 0) + 1
+    info["counts"] = counts
+    info["unknown"] = [{"number": r["number"], "state": r["state"], "line": r["line"]} for r in rows if r["state"] not in STATES]
+    pick = next((r for r in rows if r["state"] == "in progress"), None) or next((r for r in rows if r["state"] == "planned"), None)
+    if pick is not None:
+        info["step"] = pick
+    elif counts.get("done") == len(rows):
+        info["reason"] = f"all {len(rows)} milestones done"
+    else:
+        info["reason"] = "no row is in progress or planned (" + ", ".join(f"{k} {v}" for k, v in counts.items()) + ")"
+    return info
+
+
+def next_text(nx: dict) -> str:
+    s = nx["step"]
+    unknown = nx.get("unknown") or []
+    skipped = ""
+    if unknown:
+        listed = ", ".join(f"{u['number'] or 'line ' + str(u['line'])} {u['state'] or 'blank'}" for u in unknown)
+        skipped = f"; skipped {len(unknown)} row{'s' if len(unknown) != 1 else ''} with an unknown state ({listed})"
+    if s is None:
+        return f"next step: none ({nx['reason']}){skipped}"
+    num = f"row {s['number']}, " if s["number"] else ""
+    done = f"; done when: {s['done_when']}" if s["done_when"] else ""
+    return f"next step: {num}{s['milestone'] or '(no name)'} ({s['state']}, PLAN.md line {s['line']}){done}{skipped}"
+
+
+def main_worktree(root: Path) -> Path:
+    r = git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    common = Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+    return common.parent if common is not None and common.name == ".git" else root
+
+
+def size_text(nbytes: int) -> str:
+    gib = nbytes / 2 ** 30
+    return f"{gib:.1f} GiB" if gib >= 1 else f"{nbytes / 2 ** 20:.0f} MiB"
+
+
+def duration_text(seconds: float) -> str:
+    s = max(0, int(seconds))
+    if s < 120 * 60:
+        m = s // 60
+        return f"{m} minute{'s' if m != 1 else ''}"
+    if s < 48 * 3600:
+        return f"{s / 3600:.1f} hours"
+    return f"{s / 86400:.1f} days"
+
+
+def round_stamps(root: Path) -> dict:
+    rounds: dict = {}
+    for name in ROUND_FILES:
+        path = root / name
+        if not path.is_file():
+            continue
+        fenced = False
+        for n, line in enumerate(read_lines(path), 1):
+            if FENCE.match(line):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue
+            for m in ROUND_STAMP.finditer(line):
+                when = parse_iso(m.group(3).replace(" ", "T"))
+                if when is None:
+                    continue
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=datetime.timezone.utc)
+                entry = rounds.setdefault(int(m.group(1)), {})
+                entry.setdefault(m.group(2).lower(), {"time": when, "source": f"{name} line {n}"})
+    return rounds
+
+
+def cost_block(root: Path, now: datetime.datetime) -> dict:
+    wt_dir = main_worktree(root) / ".local" / "worktrees"
+    info: dict = {"worktrees_dir": str(wt_dir), "worktrees": 0, "worktrees_bytes": None, "free_bytes": None,
+                  "rounds": None, "round_source": None, "round_running": None, "round_seconds": None}
+    if wt_dir.is_dir():
+        info["worktrees"] = sum(1 for p in wt_dir.iterdir() if p.is_dir())
+        try:
+            r = subprocess.run(["du", "-sk", str(wt_dir)], capture_output=True, text=True, timeout=5)
+            first = r.stdout.split()[0] if r.stdout.split() else ""
+            if first.isdigit():
+                info["worktrees_bytes"] = int(first) * 1024
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        info["worktrees_bytes"] = 0
+    try:
+        info["free_bytes"] = shutil.disk_usage(str(root)).free
+    except OSError:
+        pass
+    rounds = round_stamps(root)
+    if rounds:
+        top = max(rounds)
+        info["rounds"] = top
+        entry = rounds[top]
+        start = entry.get("started")
+        if start is not None:
+            info["round_source"] = start["source"]
+            end = entry.get("ended")
+            info["round_running"] = end is None
+            info["round_seconds"] = int(((end["time"] if end else now) - start["time"]).total_seconds())
+    return info
+
+
+def cost_text(c: dict) -> str:
+    used = size_text(c["worktrees_bytes"]) if c["worktrees_bytes"] is not None else "size unknown, du over 5 s"
+    free = size_text(c["free_bytes"]) if c["free_bytes"] is not None else "unknown"
+    parts = [f"{c['worktrees']} worktrees in .local/worktrees ({used})", f"{free} free on this disk"]
+    if c["rounds"] is None:
+        parts.append("rounds: none recorded")
+    else:
+        text = f"rounds: {c['rounds']} so far"
+        if c["round_seconds"] is not None:
+            verb = "running for" if c["round_running"] else "took"
+            text += f", round {c['rounds']} {verb} {duration_text(c['round_seconds'])} ({c['round_source']})"
+        parts.append(text)
+    return "cost: " + "; ".join(parts)
+
+
+def now_block(root: Path, since: str | None, now: datetime.datetime, gate: list[dict]) -> dict:
+    return {
+        "since": since_line(root, since, now),
+        "milestones": milestone_lines(root),
+        "lanes": lanes_line(root, now),
+        "stop": stop_line(root, gate),
+        "next": next_step(root),
+        "cost": cost_block(root, now),
+    }
+
+
+def print_now(nb: dict) -> None:
+    print("7. Now")
+    sn = nb["since"]
+    if sn["since"] is None:
+        print(f"   since your last message: unknown ({sn['source']}; pass --since TIME)")
+    else:
+        print(f"   since your last message ({sn['since']}, from {sn['source']}): "
+              f"{len(sn['commits'])} commits, {len(sn['files'])} changed files")
+        for c in sn["commits"][:10]:
+            print(f"   - commit {c}")
+        for f in sn["files"][:10]:
+            print(f"   - file {f}")
+    ms = nb["milestones"]
+    if not ms["total"]:
+        print("   current item: unknown (no milestone table in PLAN.md section 7)")
+    elif ms["current"] is None:
+        print(f"   current item: none ({ms['total']} of {ms['total']} milestones {ms['done_word']})")
+    else:
+        c = ms["current"]
+        name = f" {c['name']}" if c["name"] else ""
+        print(f"   current item: {c['milestone']}{name} (state {c['state'] or 'blank'}; "
+              f"{ms['total'] - len(ms['open'])} of {ms['total']} milestones {ms['done_word']})")
+    if ms["visible"] is not None:
+        v = ms["visible"]
+        print(f"   next user-visible milestone: {v['milestone']}, {ms['open_before']} open milestones before it; outcome: {v['outcome']}")
+    elif not ms["total"]:
+        print("   next user-visible milestone: unknown (no milestone table in PLAN.md section 7)")
+    elif ms["open"]:
+        print("   next user-visible milestone: none found (no open milestone has an Outcome line in PLAN.md section 6)")
+    else:
+        print("   next user-visible milestone: none open")
+    ln = nb["lanes"]
+    print(f"   lanes: {len(ln['worktrees'])} worktrees, {len(ln['processes'])} processes naming this repository")
+    for w in ln["worktrees"]:
+        print(f"   - worktree {w['path']} ({w['branch']}), last commit {w['age'] or 'unknown'}, dirty files {w['dirty_files']}")
+    for pr in ln["processes"][:10]:
+        print(f"   - process {pr['pid']} running {pr['elapsed']}: {pr['command']}")
+    st = nb["stop"]
+    src = f" ({st['source']})" if st["source"] else ""
+    print(f"   last stop: {st['reason']}{src}")
+    print(f"   {next_text(nb['next'])}")
+    print(f"   {cost_text(nb['cost'])}")
+
+
+def print_text(facts: dict) -> None:
+    rep = facts["repository"]
+    print("1. Repository")
+    print(f"   branch: {rep['branch'] or '(unknown)'}")
+    if rep["head"]:
+        print(f"   HEAD: {rep['short']} {rep['subject']}")
+        print(f"   committed: {rep['age']} ({rep['committed']})")
+    else:
+        print("   HEAD: no commits yet")
+    print(f"   dirty files: {rep['dirty_files'] if rep['dirty_files'] is not None else '(unknown)'}")
+    print("2. Gate")
+    if facts["gate"]:
+        width = max(len(g["name"]) for g in facts["gate"])
+        for g in facts["gate"]:
+            src = "" if g["age_source"] == "meta" else " (file age, no .meta)"
+            print(f"   {g['name']:<{width}}  exit {g['exit']}  {g['age']}{src}")
+    else:
+        print("   no gate runs (.local/gate/ has no .exit file)")
+    dec = facts["decisions"]
+    print("3. Open decisions (README.md)")
+    if not dec["readme"]:
+        print("   README.md absent")
+    elif dec["heading"] is None:
+        print("   no open decisions section (no heading names \"open decisions\" or \"open items\")")
+    else:
+        print(f"   {dec['heading']}: {len(dec['rows']) + dec['more']} rows")
+        for row in dec["rows"]:
+            owner = f" (owner: {row['owner']})" if row["owner"] and "owner" not in row["item"].lower() else ""
+            mark = " [needs you]" if row["needs_you"] else ""
+            print(f"   {row['n']}. {row['item']}{owner}{mark}")
+        if dec["more"]:
+            print(f"   ... {dec['more']} more rows")
+        if dec["needs_you"]:
+            print(f"   needs you ({len(dec['needs_you'])}): " + ", ".join(f"row {r['n']}" for r in dec["needs_you"]))
+        else:
+            print("   needs you: none in this section (no owner text names the operator or you)")
+    blk = facts["blocked"]
+    print("4. BLOCKED.md")
+    if not blk["present"]:
+        print("   absent")
+    else:
+        print(f"   present (first {len(blk['first_lines'])} lines)")
+        for l in blk["first_lines"]:
+            print(f"   {l}")
+    plan = facts["plan"]
+    print("5. PLAN.md section 10")
+    if not plan["present"]:
+        print("   absent")
+    elif not plan["section10"]:
+        print("   no section 10")
+    elif not plan["last_lines"]:
+        print("   section 10 is empty")
+    else:
+        print(f"   last {len(plan['last_lines'])} lines:")
+        for l in plan["last_lines"]:
+            print(f"   {l}")
+    ag = facts["agents"]
+    print("6. Agents")
+    if ag["note"]:
+        print(f"   {ag['note']}")
+    else:
+        print(f"   ctlhq-orch store {ag['store']} (ctlhq-orch status exit {ag['exit']})")
+        for l in (ag["status"] or "").split("\n"):
+            if l.strip():
+                print(f"   {l}")
+    print_now(facts["now"])
+
+
+def main(argv: list[str]) -> int:
+    repo: str | None = None
+    since: str | None = None
+    as_json = False
+    only_next = False
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--repo":
+            if i + 1 >= len(argv):
+                return usage("--repo needs a value")
+            repo = argv[i + 1]
+            i += 2
+            continue
+        if a == "--since":
+            if i + 1 >= len(argv):
+                return usage("--since needs a value")
+            since = argv[i + 1]
+            i += 2
+            continue
+        if a == "--json":
+            as_json = True
+            i += 1
+            continue
+        if a == "--next":
+            only_next = True
+            i += 1
+            continue
+        return usage(f"unknown option {a!r}")
+    start = Path(repo).expanduser() if repo else Path.cwd()
+    if not start.is_dir():
+        print(f"ctlhq-status: not a folder: {start}", file=sys.stderr)
+        return 1
+    r = git(start, ["rev-parse", "--show-toplevel"])
+    if r.returncode != 0 or not r.stdout.strip():
+        print(f"ctlhq-status: not a git repository: {start}", file=sys.stderr)
+        return 1
+    root = Path(r.stdout.strip())
+    if only_next:
+        if since:
+            return usage("--next takes no --since")
+        nx = next_step(root)
+        print(json.dumps(nx, indent=2, default=str) if as_json else next_text(nx))
+        return 0
+    now = datetime.datetime.now(datetime.timezone.utc)
+    gate = gate_block(root, now)
+    facts = {
+        "repository": repository_block(root, now),
+        "gate": gate,
+        "decisions": decisions_block(root),
+        "blocked": blocked_block(root),
+        "plan": plan_block(root),
+        "agents": agents_block(root),
+        "now": now_block(root, since, now, gate),
+    }
+    if as_json:
+        print(json.dumps(facts, indent=2, default=str))
+    else:
+        print_text(facts)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

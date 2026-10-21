@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# ctlhq-worktree-audit: classify every git worktree by size, merge state, uncommitted work, and PR state; never deletes.
+set -u
+# Resolve this file through symlinks (macOS bash 3 has no readlink -f).
+src="$0"
+while [ -L "$src" ]; do
+	dir="$(cd "$(dirname "$src")" && pwd)"
+	src="$(readlink "$src")"
+	case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+here="$(cd "$(dirname "$src")" && pwd)"
+scripts="$(cd "$here/../scripts" && pwd)"
+
+usage() {
+	cat <<'EOF'
+ctlhq-worktree-audit: classify every git worktree by size, merge state, uncommitted work, and PR state; never deletes.
+
+Usage: ctlhq-worktree-audit [-b|--base <ref>] [--no-fetch] [--recent-days <n>] [repo-path]
+
+Worktree prune audit. Classifies every git worktree by size, merge state,
+uncommitted work, remote/PR state, and the most recent chat that operated in
+it. Emits a table sorted by size with a suggested bucket. Never deletes
+anything; deletion stays a human-gated step in the playbook.
+
+  repo-path          defaults to the current repo.
+  -b <ref>           sets the ref the MERGED column checks against (e.g. origin/integration).
+                     Without it the base is origin/HEAD, then origin/main, then origin/master.
+                     origin/HEAD is the remote's default branch, not necessarily the branch PRs
+                     merge into; pass -b when they differ.
+  --no-fetch         skip the fetch of the base. By default, when the base is an origin/*
+                     ref, the audit runs `git fetch origin` for it first. That uses the
+                     network and writes remote-tracking refs, so a default run is not
+                     read-only in that sense. The worktrees themselves are never written.
+  --recent-days <n>  a chat that touched the worktree within the last n days puts it in
+                     verify-recent-chat (default 4).
+
+Columns: SIZE, AGE, MERGED, DIRTY, REMOTE, PR, LAST_CHAT, BUCKET, WORKTREE.
+REMOTE: pushed, ahead<n> (local commits not on origin), behind<n> (origin commits not
+local), ahead<n>-behind<m> (diverged), no-remote, or detached.
+Buckets: hold-wip (tracked uncommitted edits), hold-open-pr (PR open or draft),
+verify-recent-chat (a chat touched it within --recent-days), safe (its commit is in the
+base, or its PR is merged), review (everything else, including a PR closed without
+merge and a branch with no PR).
+Needs git, jq, du, and rg. Uses gh for PR state when it is available.
+LAST_CHAT is the newest chat that names the worktree's path, found in the Claude Code
+transcript folders of the main worktree and of the worktree (~/.claude/projects/<slug>/)
+and in every Codex session on this machine (~/.codex/sessions/, all workspaces, because
+Codex files sessions by date, not by folder). From a match it keeps only the file's date.
+It reads "-" when no chat names it.
+Timestamps use BSD stat -f and date -r (macOS); GNU stat -c and date -d are the fallback.
+Exit 0 after printing the table; 1 when not in a git repo, the repo path is missing or
+not a git repository, or no base ref is found; 2 on a usage error.
+Every error prints three lines on stderr: "ctlhq-worktree-audit: <what>", "why: <why>", and
+"fix: <command>". A failed fetch of the base prints a "warn:" line and a "fix:" line, and
+the table still follows.
+
+Runs: bash skills/ctlhq-mode/scripts/worktree-audit.sh
+EOF
+}
+for arg in "$@"; do
+	case "$arg" in
+	-h|--help) usage; exit 0 ;;
+	esac
+done
+
+exec bash "$scripts/worktree-audit.sh" "$@"

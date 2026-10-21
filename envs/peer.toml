@@ -1,0 +1,27 @@
+# Recipe for bin/ctlhq-env. Keys: see `bin/ctlhq-env --help`, section "Recipes".
+name = "peer"
+summary = "Second Linux machine on the network, with a request log the agent reads"
+provider = "tart"
+guest = "linux"
+image = "ghcr.io/cirruslabs/ubuntu:latest"
+cpu = 2
+memory_mb = 2048
+disk_gb = 30
+network = "shared"
+user = "admin"
+root = true
+snapshot_before_risky = false
+services = ["http:8080"]
+log = "/var/log/ctlhq-peer.log"
+provision = [
+  "sudo -n true",
+  "sudo -n touch /var/log/ctlhq-peer.log && sudo -n chmod 0644 /var/log/ctlhq-peer.log",
+  "sudo -n mkdir -p /srv/peer",
+  "printf '[Unit]\\nDescription=ctlhq peer listener\\n[Service]\\nExecStart=/usr/bin/python3 -m http.server 8080 --directory /srv/peer\\nStandardOutput=append:/var/log/ctlhq-peer.log\\nStandardError=append:/var/log/ctlhq-peer.log\\n[Install]\\nWantedBy=multi-user.target\\n' | sudo -n tee /etc/systemd/system/ctlhq-peer.service >/dev/null && sudo -n systemctl enable --now ctlhq-peer.service",
+]
+not_covered = [
+  "networks other than the host's shared virtual network: no routers, VLANs, or firewalls between machines",
+  "services other than the HTTP listener on port 8080",
+  "a second host: both machines run on the same Mac",
+]
+notes = "Read the log with: ctlhq-env exec peer -- cat /var/log/ctlhq-peer.log"

@@ -1,0 +1,429 @@
+#!/usr/bin/env node
+'use strict';
+const HELP = `ctlhq-browser: drive Chrome through the DevTools protocol for a screenshot, performance trace, heap snapshot, console errors, or network log.
+
+Usage:
+  ctlhq-browser [options] screenshot URL --out FILE [--size WxH]
+  ctlhq-browser [options] trace URL --seconds N --out FILE
+  ctlhq-browser [options] heap URL --out FILE
+  ctlhq-browser [options] console URL
+  ctlhq-browser [options] network URL --out FILE
+
+Every subcommand opens URL in a new tab, waits for the page's load event, waits --wait
+seconds more, then acts:
+  screenshot  writes a PNG of the window at --size.
+  trace       records a performance trace (the JSON the DevTools Performance panel reads)
+              from before the navigation until N seconds have passed, then writes it.
+  heap        writes a heap snapshot (.heapsnapshot JSON, for the DevTools Memory panel).
+  console     prints one JSON line per console error or warning, uncaught exception, and
+              browser log error or warning: {"level","source","text","url","line"}.
+  network     writes a JSON file with every request: url, method, type, status, mime,
+              start_ms (from navigation start), duration_ms, bytes, failed, error.
+Each prints one summary line on stderr.
+
+Options:
+  --size WxH     window size in CSS pixels (default 1280x800)
+  --wait S       seconds to wait after the load event (default 0.5)
+  --timeout S    seconds allowed for the page to load (default 30)
+  --attach PORT  use the Chrome already listening on 127.0.0.1:PORT; the tool opens one
+                 tab and closes only that tab, and never stops that Chrome
+  --chrome PATH  the Chrome binary (default: $CTLHQ_CHROME, else
+                 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome)
+  --headed       show a window (default: headless)
+
+Chrome lifetime. Without --attach, the tool starts Chrome with a new temporary profile
+under $TMPDIR (ctlhq-browser-*) and a free remote debugging port, in its own process
+group. On exit, also after an error or Ctrl-C, it closes that Chrome, kills only that
+process group, and deletes the profile.
+
+Requires Node 22 or later (built-in WebSocket); no packages.
+
+Exit codes: 0 done, and for console no error-level entry; 1 the page did not load,
+Chrome failed, the run timed out, or console found an error-level entry; 2 usage error.
+`;
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const DEFAULT_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const SUBCOMMANDS = new Set(['screenshot', 'trace', 'heap', 'console', 'network']);
+const TRACE_CATEGORIES = [
+  'devtools.timeline', 'v8.execute', 'disabled-by-default-devtools.timeline',
+  'disabled-by-default-devtools.timeline.frame', 'toplevel', 'blink.console', 'blink.user_timing',
+  'latencyInfo', 'disabled-by-default-devtools.timeline.stack', 'disabled-by-default-v8.cpu_profiler',
+  'loading',
+];
+
+class Usage extends Error {}
+class Failure extends Error {}
+
+function log(msg) { process.stderr.write(`ctlhq-browser: ${msg}\n`); }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function parseArgs(argv) {
+  const o = { size: [1280, 800], wait: 0.5, timeout: 30, attach: null, headed: false,
+    chrome: process.env.CTLHQ_CHROME || DEFAULT_CHROME, out: null, seconds: null, cmd: null, url: null };
+  const num = (flag, v) => {
+    const n = Number(v);
+    if (v === undefined || !Number.isFinite(n) || n < 0) throw new Usage(`${flag} needs a number of seconds, got ${JSON.stringify(v)}`);
+    return n;
+  };
+  const rest = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const val = () => { if (i + 1 >= argv.length) throw new Usage(`${a} needs a value`); return argv[++i]; };
+    switch (a) {
+      case '-h': case '--help': o.help = true; break;
+      case '--size': {
+        const m = /^(\d+)x(\d+)$/.exec(val());
+        if (!m || +m[1] < 1 || +m[2] < 1) throw new Usage('--size needs WxH, for example 1280x800');
+        o.size = [+m[1], +m[2]]; break;
+      }
+      case '--wait': o.wait = num(a, val()); break;
+      case '--timeout': o.timeout = num(a, val()); if (o.timeout === 0) throw new Usage('--timeout needs a number above 0'); break;
+      case '--seconds': o.seconds = num(a, val()); break;
+      case '--out': o.out = val(); break;
+      case '--chrome': o.chrome = val(); break;
+      case '--headed': o.headed = true; break;
+      case '--attach': {
+        const p = val();
+        if (!/^\d+$/.test(p) || +p < 1 || +p > 65535) throw new Usage(`--attach needs a port number, got ${JSON.stringify(p)}`);
+        o.attach = +p; break;
+      }
+      default:
+        if (a.startsWith('-')) throw new Usage(`unknown option ${JSON.stringify(a)}`);
+        rest.push(a);
+    }
+  }
+  if (o.help) return o;
+  if (rest.length === 0) throw new Usage('no subcommand');
+  if (!SUBCOMMANDS.has(rest[0])) throw new Usage(`unknown subcommand ${JSON.stringify(rest[0])}`);
+  if (rest.length !== 2) throw new Usage(`${rest[0]} needs exactly one URL`);
+  [o.cmd, o.url] = rest;
+  try { new URL(o.url); } catch { throw new Usage(`not a URL: ${JSON.stringify(o.url)}`); }
+  if (o.cmd !== 'console' && !o.out) throw new Usage(`${o.cmd} needs --out FILE`);
+  if (o.cmd === 'console' && o.out) throw new Usage('console prints to stdout and takes no --out');
+  if (o.cmd === 'trace' && o.seconds === null) throw new Usage('trace needs --seconds N');
+  if (o.cmd !== 'trace' && o.seconds !== null) throw new Usage('--seconds belongs to trace');
+  return o;
+}
+
+class CDP {
+  constructor(ws) {
+    this.ws = ws; this.nextId = 1; this.pending = new Map(); this.listeners = new Set(); this.closed = false;
+    ws.addEventListener('message', (ev) => this.onMessage(ev.data));
+    ws.addEventListener('close', () => {
+      this.closed = true;
+      for (const { reject } of this.pending.values()) reject(new Failure('DevTools connection closed'));
+      this.pending.clear();
+    });
+  }
+  static connect(url, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      const t = setTimeout(() => { try { ws.close(); } catch {} reject(new Failure(`no DevTools connection to ${url}`)); }, timeoutMs);
+      ws.addEventListener('open', () => { clearTimeout(t); resolve(new CDP(ws)); });
+      ws.addEventListener('error', () => { clearTimeout(t); reject(new Failure(`cannot connect to ${url}`)); });
+    });
+  }
+  onMessage(data) {
+    const msg = JSON.parse(typeof data === 'string' ? data : Buffer.from(data).toString('utf8'));
+    if (msg.id !== undefined) {
+      const p = this.pending.get(msg.id);
+      if (!p) return;
+      this.pending.delete(msg.id);
+      if (msg.error) p.reject(new Failure(`${p.method}: ${msg.error.message}`)); else p.resolve(msg.result || {});
+      return;
+    }
+    for (const fn of this.listeners) fn(msg);
+  }
+  send(method, params = {}, sessionId) {
+    if (this.closed) return Promise.reject(new Failure('DevTools connection closed'));
+    const id = this.nextId++;
+    const msg = { id, method, params };
+    if (sessionId) msg.sessionId = sessionId;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject, method });
+      this.ws.send(JSON.stringify(msg));
+    });
+  }
+  on(method, sessionId, fn) {
+    const l = (msg) => { if (msg.method === method && msg.sessionId === sessionId) fn(msg.params || {}); };
+    this.listeners.add(l);
+    return () => this.listeners.delete(l);
+  }
+  waitFor(method, sessionId, timeoutMs, what) {
+    let off;
+    let timer;
+    const p = new Promise((resolve, reject) => {
+      off = this.on(method, sessionId, (params) => { clearTimeout(timer); off(); resolve(params); });
+      timer = setTimeout(() => { off(); reject(new Failure(`${what || method} did not arrive within ${timeoutMs / 1000} s`)); }, timeoutMs);
+    });
+    p.cancel = () => { clearTimeout(timer); off(); };
+    return p;
+  }
+  close() { try { this.ws.close(); } catch {} }
+}
+
+class OwnedChrome {
+  constructor() { this.child = null; this.profile = null; this.exited = false; this.stderrTail = ''; }
+  async start(chromePath, headed, timeoutMs) {
+    if (!fs.existsSync(chromePath)) throw new Failure(`Chrome not found at ${chromePath}; pass --chrome PATH or set CTLHQ_CHROME`);
+    this.profile = fs.mkdtempSync(path.join(os.tmpdir(), 'ctlhq-browser-'));
+    const args = [
+      '--remote-debugging-port=0', `--user-data-dir=${this.profile}`, '--no-first-run',
+      '--no-default-browser-check', '--disable-extensions', '--disable-background-networking',
+      '--disable-component-update', '--disable-sync', '--use-mock-keychain', '--password-store=basic',
+      '--mute-audio', '--hide-scrollbars', 'about:blank',
+    ];
+    if (!headed) args.unshift('--headless');
+    this.child = spawn(chromePath, args, { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    this.child.stderr.on('data', (d) => { this.stderrTail = (this.stderrTail + d.toString()).slice(-2000); });
+    this.exitPromise = new Promise((r) => this.child.on('exit', () => { this.exited = true; r(); }));
+    this.child.on('error', () => { this.exited = true; });
+    const portFile = path.join(this.profile, 'DevToolsActivePort');
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.exited) throw new Failure(`Chrome exited during start: ${this.stderrTail.trim().split('\n').slice(-3).join(' | ')}`);
+      try {
+        const [port, wsPath] = fs.readFileSync(portFile, 'utf8').split('\n');
+        if (port && wsPath) return `ws://127.0.0.1:${port.trim()}${wsPath.trim()}`;
+      } catch {}
+      await sleep(100);
+    }
+    throw new Failure(`Chrome did not open its debugging port within ${timeoutMs / 1000} s`);
+  }
+  groupAlive() {
+    if (!this.child || !this.child.pid) return false;
+    try { process.kill(-this.child.pid, 0); return true; } catch { return false; }
+  }
+  async stop(cdp) {
+    if (this.child && this.child.pid) {
+      if (cdp && !cdp.closed && !this.exited) {
+        await Promise.race([cdp.send('Browser.close').catch(() => {}), sleep(2000)]);
+      }
+      if (!this.exited) await Promise.race([this.exitPromise, sleep(3000)]);
+      for (const sig of ['SIGTERM', 'SIGKILL']) {
+        if (!this.groupAlive()) break;
+        try { process.kill(-this.child.pid, sig); } catch {}
+        const until = Date.now() + 3000;
+        while (this.groupAlive() && Date.now() < until) await sleep(100);
+      }
+    }
+    if (this.profile) {
+      for (let i = 0; i < 5; i++) {
+        try { fs.rmSync(this.profile, { recursive: true, force: true }); break; } catch { await sleep(200); }
+      }
+    }
+  }
+}
+
+async function attachUrl(port) {
+  let r;
+  try { r = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(5000) }); } catch (e) {
+    throw new Failure(`no Chrome answers on 127.0.0.1:${port} (${e.cause ? e.cause.code || e.cause.message : e.message})`);
+  }
+  const v = await r.json();
+  if (!v.webSocketDebuggerUrl) throw new Failure(`127.0.0.1:${port} gave no webSocketDebuggerUrl`);
+  return v.webSocketDebuggerUrl;
+}
+
+function writeOut(file, data) {
+  fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+  fs.writeFileSync(file, data);
+}
+
+function remoteText(arg) {
+  if (arg.value !== undefined) return typeof arg.value === 'string' ? arg.value : JSON.stringify(arg.value);
+  if (arg.unserializableValue !== undefined) return arg.unserializableValue;
+  return arg.description || arg.type;
+}
+
+async function run(o) {
+  const timeoutMs = o.timeout * 1000;
+  const cdp = await CDP.connect(o.wsUrl, 10000);
+  o.cdp = cdp;
+  const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  o.targetId = targetId;
+  const { sessionId: s } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+  await cdp.send('Page.enable', {}, s);
+  const [w, h] = o.size;
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false }, s);
+
+  const entries = [];
+  if (o.cmd === 'console') {
+    await cdp.send('Runtime.enable', {}, s);
+    await cdp.send('Log.enable', {}, s);
+    cdp.on('Runtime.consoleAPICalled', s, (p) => {
+      const level = { error: 'error', assert: 'error', warning: 'warning' }[p.type];
+      if (!level) return;
+      const f = (p.stackTrace && p.stackTrace.callFrames[0]) || {};
+      entries.push({ level, source: 'console', text: (p.args || []).map(remoteText).join(' '), url: f.url || null, line: f.lineNumber !== undefined ? f.lineNumber + 1 : null });
+    });
+    cdp.on('Runtime.exceptionThrown', s, (p) => {
+      const d = p.exceptionDetails || {};
+      const text = (d.exception && d.exception.description) || d.text || 'exception';
+      entries.push({ level: 'error', source: 'exception', text, url: d.url || null, line: d.lineNumber !== undefined ? d.lineNumber + 1 : null });
+    });
+    cdp.on('Log.entryAdded', s, (p) => {
+      const e = p.entry || {};
+      if (e.level !== 'error' && e.level !== 'warning') return;
+      entries.push({ level: e.level, source: `log:${e.source}`, text: e.text, url: e.url || null, line: e.lineNumber !== undefined ? e.lineNumber + 1 : null });
+    });
+  }
+
+  const reqs = new Map();
+  const order = [];
+  let navStart = null;
+  if (o.cmd === 'network') {
+    await cdp.send('Network.enable', {}, s);
+    const finish = (r, ts) => { if (r && r.end === null) r.end = ts; };
+    cdp.on('Network.requestWillBeSent', s, (p) => {
+      const prev = reqs.get(p.requestId);
+      if (prev && p.redirectResponse) {
+        prev.status = p.redirectResponse.status; prev.mime = p.redirectResponse.mimeType || null; finish(prev, p.timestamp);
+      }
+      if (navStart === null) navStart = p.timestamp;
+      const r = { url: p.request.url, method: p.request.method, type: p.type || null, status: null, mime: null, start: p.timestamp, end: null, bytes: null, failed: false, error: null };
+      reqs.set(p.requestId, r); order.push(r);
+    });
+    cdp.on('Network.responseReceived', s, (p) => {
+      const r = reqs.get(p.requestId); if (!r) return;
+      r.status = p.response.status; r.mime = p.response.mimeType || null;
+    });
+    cdp.on('Network.loadingFinished', s, (p) => {
+      const r = reqs.get(p.requestId); if (!r) return;
+      r.bytes = p.encodedDataLength; finish(r, p.timestamp);
+    });
+    cdp.on('Network.loadingFailed', s, (p) => {
+      const r = reqs.get(p.requestId); if (!r) return;
+      r.failed = true; r.error = p.errorText || 'failed'; finish(r, p.timestamp);
+    });
+  }
+
+  const traceStart = Date.now();
+  if (o.cmd === 'trace') {
+    await cdp.send('Tracing.start', { transferMode: 'ReturnAsStream', traceConfig: { recordMode: 'recordAsMuchAsPossible', includedCategories: TRACE_CATEGORIES, excludedCategories: ['*'] } }, s);
+  }
+
+  const loaded = cdp.waitFor('Page.loadEventFired', s, timeoutMs, `the load event of ${o.url}`);
+  const nav = await cdp.send('Page.navigate', { url: o.url }, s);
+  if (nav.errorText) { loaded.cancel(); throw new Failure(`${o.url} did not load: ${nav.errorText}`); }
+  await loaded;
+  await sleep(o.wait * 1000);
+
+  if (o.cmd === 'screenshot') {
+    const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, s);
+    const buf = Buffer.from(data, 'base64');
+    writeOut(o.out, buf);
+    log(`wrote ${o.out}: PNG ${w}x${h}, ${buf.length} bytes`);
+  } else if (o.cmd === 'trace') {
+    const left = o.seconds * 1000 - (Date.now() - traceStart);
+    if (left > 0) await sleep(left);
+    const done = cdp.waitFor('Tracing.tracingComplete', s, 60000, 'the end of the trace');
+    await cdp.send('Tracing.end', {}, s);
+    const { stream } = await done;
+    if (!stream) throw new Failure('the trace came back without a stream');
+    const parts = [];
+    for (;;) {
+      const r = await cdp.send('IO.read', { handle: stream, size: 1 << 20 }, s);
+      if (r.data) parts.push(r.base64Encoded ? Buffer.from(r.data, 'base64') : Buffer.from(r.data, 'utf8'));
+      if (r.eof) break;
+    }
+    await cdp.send('IO.close', { handle: stream }, s).catch(() => {});
+    const buf = Buffer.concat(parts);
+    let events = '?';
+    try { const j = JSON.parse(buf.toString('utf8')); events = (Array.isArray(j) ? j : j.traceEvents || []).length; } catch {}
+    writeOut(o.out, buf);
+    log(`wrote ${o.out}: ${events} trace events over ${o.seconds} s, ${buf.length} bytes`);
+  } else if (o.cmd === 'heap') {
+    const chunks = [];
+    const off = cdp.on('HeapProfiler.addHeapSnapshotChunk', s, (p) => chunks.push(p.chunk));
+    await cdp.send('HeapProfiler.enable', {}, s);
+    await cdp.send('HeapProfiler.collectGarbage', {}, s);
+    await cdp.send('HeapProfiler.takeHeapSnapshot', { reportProgress: false }, s);
+    off();
+    const text = chunks.join('');
+    let nodes = '?';
+    try { nodes = JSON.parse(text).snapshot.node_count; } catch {}
+    writeOut(o.out, text);
+    log(`wrote ${o.out}: heap snapshot, ${nodes} nodes, ${Buffer.byteLength(text)} bytes`);
+  } else if (o.cmd === 'console') {
+    for (const e of entries) process.stdout.write(JSON.stringify(e) + '\n');
+    const errors = entries.filter((e) => e.level === 'error').length;
+    log(`console: ${errors} errors, ${entries.length - errors} warnings`);
+    o.exitCode = errors > 0 ? 1 : 0;
+  } else if (o.cmd === 'network') {
+    const base = navStart === null ? 0 : navStart;
+    const rows = order.map((r) => ({
+      url: r.url, method: r.method, type: r.type, status: r.status, mime: r.mime,
+      start_ms: Math.round((r.start - base) * 10000) / 10,
+      duration_ms: r.end === null ? null : Math.round((r.end - r.start) * 10000) / 10,
+      bytes: r.bytes, failed: r.failed, error: r.error, pending: r.end === null,
+    }));
+    writeOut(o.out, JSON.stringify({ page: o.url, size: `${w}x${h}`, requests: rows }, null, 2) + '\n');
+    const slow = rows.filter((r) => r.duration_ms !== null).sort((a, b) => b.duration_ms - a.duration_ms)[0];
+    log(`wrote ${o.out}: ${rows.length} requests, ${rows.filter((r) => r.failed).length} failed` + (slow ? `, slowest ${slow.duration_ms} ms ${slow.url}` : ''));
+  }
+}
+
+async function main() {
+  let o;
+  try { o = parseArgs(process.argv.slice(2)); } catch (e) {
+    if (!(e instanceof Usage)) throw e;
+    log(e.message);
+    process.stderr.write('usage: ctlhq-browser [options] {screenshot|trace|heap|console|network} URL [--out FILE] [--seconds N]\n');
+    return 2;
+  }
+  if (o.help) { process.stdout.write(HELP); return 0; }
+
+  const chrome = o.attach ? null : new OwnedChrome();
+  let finished = false;
+  const cleanup = async () => {
+    if (o.cdp && o.targetId && !o.cdp.closed) {
+      await Promise.race([o.cdp.send('Target.closeTarget', { targetId: o.targetId }).catch(() => {}), sleep(2000)]);
+    }
+    if (chrome) await chrome.stop(o.cdp);
+    if (o.cdp) o.cdp.close();
+  };
+  const onSignal = (sig, code) => process.on(sig, async () => {
+    if (finished) return;
+    finished = true;
+    log(`stopped by ${sig}`);
+    await cleanup();
+    process.exit(code);
+  });
+  onSignal('SIGINT', 130);
+  onSignal('SIGTERM', 143);
+  const budget = (o.timeout + (o.seconds || 0) + o.wait + 90) * 1000;
+  const watchdog = setTimeout(async () => {
+    if (finished) return;
+    finished = true;
+    log(`run took longer than ${budget / 1000} s`);
+    await cleanup();
+    process.exit(1);
+  }, budget);
+
+  let code = 0;
+  try {
+    o.wsUrl = o.attach ? await attachUrl(o.attach) : await chrome.start(o.chrome, o.headed, 20000);
+    await run(o);
+    code = o.exitCode || 0;
+  } catch (e) {
+    if (!(e instanceof Failure)) log(`error: ${e.stack || e}`); else log(e.message);
+    code = 1;
+  }
+  if (finished) return null;
+  finished = true;
+  clearTimeout(watchdog);
+  await cleanup();
+  return code;
+}
+
+if (require.main === module) {
+  main().then((code) => { if (code !== null) process.exit(code); }, (e) => { log(`error: ${e.stack || e}`); process.exit(1); });
+} else {
+  module.exports = { CDP, OwnedChrome, Failure, DEFAULT_CHROME };  // ctlhq-icon-sheet (skills/design-options) drives Chrome through these
+}

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>A rounded block with a corner dot</title>
+  <rect x="6" y="6" width="52" height="52" rx="12" fill="currentColor"/>
+  <circle cx="44" cy="20" r="6" fill="var(--paper)"/>
+</svg>

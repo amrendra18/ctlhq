@@ -1,0 +1,1 @@
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"PRRT_1","isResolved":true,"comments":{"nodes":[{"body":"Rename this.","createdAt":"2026-10-16T10:00:00Z","path":"src/a.ts","line":3,"author":{"login":"reviewer"}}]}}]}}}}}

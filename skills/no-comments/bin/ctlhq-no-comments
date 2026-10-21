@@ -1,0 +1,543 @@
+#!/usr/bin/env python3
+"""ctlhq-no-comments: list the comments in a diff or a set of files so the reviewer can judge them.
+
+Usage:
+  ctlhq-no-comments [flags] FILE ...                   scan whole files (a directory is walked)
+  ctlhq-no-comments [flags] --diff BASE [-- FILE ...]  run `git diff BASE` and inspect added lines only
+  git diff main | ctlhq-no-comments [flags]            a unified diff on stdin, added lines only
+
+Flags:
+  --all             also report a comment marker inside a string literal
+  --removed         inspect the removed lines of a diff instead of the added ones, so the
+                    summary line is the deletion count (needs --diff or a diff on stdin)
+  --strict          exit 1 on any comment, tagged or not
+  --require-expiry  check every [suppression] for expires:YYYY-MM-DD, approved-by:<name>,
+                    and a reason. One that lacks a part is tagged
+                    [suppression; missing <parts>], gets a "  fix:" line right under it
+                    that names the missing parts and the file:line, and counts toward
+                    exit 1. A reason is at least one plain word of three or more letters
+                    once the directive, its rule list, and the two markers are removed
+                    (no-console, E501, and attr-defined are rule ids, not reasons).
+
+One line per comment: path:line: <comment text>, with a tag in square brackets at
+the end when the comment is a keep-list candidate:
+  [license]          a license or copyright header
+  [prettier-ignore]  a prettier-ignore directive
+  [suppression]      eslint-disable, ts-ignore, ts-expect-error, noqa, nolint, and kin
+  [doc-comment]      /** ... */, /// ..., or a docstring at the start of a def or class
+  [issue-link]       a GitHub issues or pull URL, linear.app, jira, or an RFC reference
+A tag marks a candidate, not a verdict. The reviewer decides.
+
+Languages by extension:
+  // and /* */   ts tsx js jsx mjs go rs java c h cpp swift kt scala scss
+  /* */ only     css
+  #              py sh bash zsh rb yaml yml toml pl
+  --             sql lua hs   (plus the block forms: --[[ ]] in lua, {- -} in hs, /* */ in sql)
+  <!-- -->       html xml md vue svelte
+Other extensions are skipped. Shebang lines are skipped. A comment marker inside
+a string literal is skipped unless --all is given. A block comment is one
+finding, reported at its first line.
+
+Last line: N comments in M files, K keep-list candidates. With --removed it reads
+N comments removed in M files; with --require-expiry it adds J incomplete suppressions.
+Exit 1 when any untagged comment is found (with --strict, any comment at all; with
+--require-expiry, also any incomplete suppression), 0 when none, 2 on a usage error or
+when the input cannot be read (--diff outside a git repository, an unknown --diff base,
+a missing file, stdin that is not a diff). Every exit-2 message is three lines on stderr:
+"ctlhq-no-comments: <what is wrong>", "why: <why it stops>", "fix: <the command to run>".
+"""
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+class Spec:
+    def __init__(self, line=(), block=(), strings=(), multi=(), docstrings=False, hash_rule=False, rust=False):
+        self.line = tuple(line)
+        self.block = tuple(block)
+        self.strings = tuple(strings)
+        self.multi = tuple(multi)
+        self.docstrings = docstrings
+        self.hash_rule = hash_rule
+        self.rust = rust
+
+
+C_STRINGS = ('"', "'")
+C_BLOCK = (("/*", "*/"),)
+SPECS: dict = {}
+for _ext in ("ts", "tsx", "js", "jsx", "mjs", "go"):
+    SPECS[_ext] = Spec(line=("//",), block=C_BLOCK, strings=C_STRINGS, multi=("`",))
+for _ext in ("java", "c", "h", "cpp", "swift", "kt", "scala", "scss"):
+    SPECS[_ext] = Spec(line=("//",), block=C_BLOCK, strings=C_STRINGS)
+SPECS["css"] = Spec(block=C_BLOCK, strings=C_STRINGS)
+SPECS["rs"] = Spec(line=("//",), block=C_BLOCK, strings=C_STRINGS, rust=True)
+SPECS["py"] = Spec(line=("#",), strings=C_STRINGS, multi=('"""', "'''"), docstrings=True, hash_rule=True)
+for _ext in ("sh", "bash", "zsh", "rb", "yaml", "yml", "toml", "pl"):
+    SPECS[_ext] = Spec(line=("#",), strings=C_STRINGS, hash_rule=True)
+SPECS["sql"] = Spec(line=("--",), block=C_BLOCK, strings=("'",))
+SPECS["lua"] = Spec(line=("--",), block=(("--[[", "]]"),), strings=C_STRINGS)
+SPECS["hs"] = Spec(line=("--",), block=(("{-", "-}"),), strings=('"',))
+for _ext in ("html", "xml", "md", "vue", "svelte"):
+    SPECS[_ext] = Spec(block=(("<!--", "-->"),))
+
+SKIP_DIRS = {".git", "node_modules"}
+DEF_RE = re.compile(r"^\s*(?:async\s+def|def|class)\b")
+RUST_CHAR = re.compile(r"'(?:\\.|[^'\\])'")
+SUPPRESSION = (
+    r"eslint-disable|ts-ignore|ts-expect-error|\bnoqa\b|\bnolint\b|type:\s*ignore"
+    r"|pylint:\s*disable|biome-ignore|rubocop:\s*disable|\bnosec\b"
+)
+TAG_RES = [
+    ("prettier-ignore", re.compile(r"prettier-ignore", re.IGNORECASE)),
+    ("suppression", re.compile(SUPPRESSION, re.IGNORECASE)),
+    (
+        "license",
+        re.compile(
+            r"\blicen[cs]e\b|\bcopyright\b|SPDX-License-Identifier|all rights reserved|\(c\)\s*\d{4}",
+            re.IGNORECASE,
+        ),
+    ),
+]
+ISSUE_RE = re.compile(
+    r"github\.com/[^\s/]+/[^\s/]+/(?:issues|pull)/\d+|linear\.app/|\b[Jj]ira\b|atlassian\.net/browse/|\bRFC\b"
+)
+MAX_TEXT = 300
+EXPIRES_RE = re.compile(r"expires:\s*\d{4}-\d{2}-\d{2}", re.IGNORECASE)
+APPROVED_RE = re.compile(r"approved-by:\s*\S+", re.IGNORECASE)
+DIRECTIVE_RE = re.compile(r"(?:" + SUPPRESSION + r")\S*", re.IGNORECASE)
+REASON_WORD = re.compile(r"^[A-Za-z]{3,}$")
+STRIP_PUNCT = ".,;:()[]{}<>'\"`"
+HEADER_RE = re.compile(r"^\+\+\+ ", re.MULTILINE)
+
+
+def fail(what: str, why: str, fix: str) -> int:
+    """Print an exit-2 error as what, why, and fix lines on stderr."""
+    print(f"ctlhq-no-comments: {what}\nwhy: {why}\nfix: {fix}", file=sys.stderr)
+    return 2
+
+
+def expiry_fix(path: str, line: int, missing: list) -> str:
+    parts = {"expires": "expires:<YYYY-MM-DD>", "approved-by": "approved-by:<name>", "reason": "<reason>"}
+    add = " ".join(parts[m] for m in missing)
+    return (f"  fix: add \"{add}\" to the comment at {path}:{line}, because a kept suppression "
+            "needs an expiry date, a human's approval, and a reason")
+
+
+class Options:
+    def __init__(self) -> None:
+        self.track_strings = True
+        self.removed = False
+        self.strict = False
+        self.require_expiry = False
+
+
+class Finding:
+    def __init__(self, line: int, text: str, doc: bool, span: set) -> None:
+        self.line = line
+        self.text = text
+        self.doc = doc
+        self.span = span
+
+
+def clean(s: str) -> str:
+    s = " ".join(s.split())
+    return s if len(s) <= MAX_TEXT else s[: MAX_TEXT - 3] + "..."
+
+
+def close_block(block: dict) -> Finding:
+    parts = []
+    for part in "\n".join(block["parts"]).split("\n"):
+        part = re.sub(r"^\s*\*+\s?", "", part)
+        if part.strip():
+            parts.append(part)
+    return Finding(block["start"], clean(" ".join(parts)), block["doc"], block["span"])
+
+
+def is_docstring_position(rows: list, idx: int) -> bool:
+    """True when rows[idx] is the first statement after a def or class line."""
+    j = idx - 1
+    while j >= 0 and rows[j][1].strip() == "":
+        j -= 1
+    if j < 0 or not rows[j][1].rstrip().endswith(":"):
+        return False
+    k = j
+    while k >= 0 and k > j - 20 and rows[k][1].strip() != "":
+        if DEF_RE.match(rows[k][1]):
+            return True
+        k -= 1
+    return False
+
+
+def line_marker_ok(spec: Spec, marker: str, text: str, i: int) -> bool:
+    if marker == "//":
+        return i == 0 or text[i - 1] != ":"
+    if spec.hash_rule:
+        return i == 0 or text[i - 1].isspace()
+    return True
+
+
+def string_start_ok(spec: Spec, text: str, i: int) -> bool:
+    if spec.rust and text[i] == "'":
+        return RUST_CHAR.match(text, i) is not None
+    return True
+
+
+def scan(spec: Spec, rows: list, track_strings: bool) -> list:
+    """rows: list of (lineno, text). Returns the findings in order."""
+    findings: list = []
+    block = None
+    mstring = None
+    for idx, (lineno, text) in enumerate(rows):
+        if lineno == 1 and text.startswith("#!"):
+            continue
+        i = 0
+        n = len(text)
+        sstring = None
+        while i < n:
+            if block is not None:
+                end = block["end"]
+                j = text.find(end, i)
+                block["span"].add(lineno)
+                if j < 0:
+                    block["parts"].append(text[i:])
+                    break
+                block["parts"].append(text[i:j])
+                findings.append(close_block(block))
+                block = None
+                i = j + len(end)
+                continue
+            if mstring is not None:
+                j = text.find(mstring, i)
+                if j < 0:
+                    break
+                i = j + len(mstring)
+                mstring = None
+                continue
+            if sstring is not None:
+                c = text[i]
+                if c == "\\":
+                    i += 2
+                    continue
+                if c == sstring:
+                    sstring = None
+                i += 1
+                continue
+            matched = False
+            for bs, be in spec.block:
+                if text.startswith(bs, i):
+                    doc = bs == "/*" and (
+                        (text.startswith("/**", i) and not text.startswith("/**/", i)) or text.startswith("/*!", i)
+                    )
+                    block = {"end": be, "doc": doc, "start": lineno, "parts": [], "span": {lineno}}
+                    i += len(bs)
+                    matched = True
+                    break
+            if matched:
+                continue
+            for lm in spec.line:
+                if text.startswith(lm, i) and line_marker_ok(spec, lm, text, i):
+                    body = text[i + len(lm):]
+                    doc = lm == "//" and body[:1] in ("/", "!") and not body.startswith("//")
+                    if doc:
+                        body = body[1:]
+                    findings.append(Finding(lineno, clean(body), doc, {lineno}))
+                    matched = True
+                    break
+            if matched:
+                break
+            for d in spec.multi:
+                if text.startswith(d, i):
+                    if spec.docstrings and text[:i].strip() == "" and is_docstring_position(rows, idx):
+                        block = {"end": d, "doc": True, "start": lineno, "parts": [], "span": {lineno}}
+                        i += len(d)
+                        matched = True
+                        break
+                    if track_strings:
+                        mstring = d
+                        i += len(d)
+                        matched = True
+                        break
+            if matched:
+                continue
+            if track_strings:
+                for d in spec.strings:
+                    if text[i] == d and string_start_ok(spec, text, i):
+                        sstring = d
+                        i += 1
+                        matched = True
+                        break
+                if matched:
+                    continue
+            i += 1
+    if block is not None:
+        findings.append(close_block(block))
+    return findings
+
+
+def tag(f: Finding) -> str:
+    for name, rx in TAG_RES:
+        if rx.search(f.text):
+            return name
+    if f.doc:
+        return "doc-comment"
+    if ISSUE_RE.search(f.text):
+        return "issue-link"
+    return ""
+
+
+def missing_parts(text: str) -> list:
+    """The parts a suppression comment lacks, in the order expires, approved-by, reason."""
+    missing = []
+    rest = text
+    if EXPIRES_RE.search(rest):
+        rest = EXPIRES_RE.sub(" ", rest)
+    else:
+        missing.append("expires")
+    if APPROVED_RE.search(rest):
+        rest = APPROVED_RE.sub(" ", rest)
+    else:
+        missing.append("approved-by")
+    rest = DIRECTIVE_RE.sub(" ", rest)
+    words = (w.strip(STRIP_PUNCT) for w in re.split(r"[\s,]+", rest))
+    if not any(REASON_WORD.match(w) for w in words):
+        missing.append("reason")
+    return missing
+
+
+def parse_diff(text: str, removed: bool = False) -> list:
+    """Return [(path, hunks)]; a hunk is a list of (lineno, text, marked).
+
+    By default the rows are the new side of each hunk (context and added lines
+    with new line numbers) and marked means added. With removed=True the rows
+    are the old side (context and removed lines with old line numbers) and
+    marked means removed.
+    """
+    files: list = []
+    hunks = None
+    hunk = None
+    lineno = 0
+    old_left = new_left = 0
+    old_path = None
+    for line in text.split("\n"):
+        if hunk is not None and (old_left > 0 or new_left > 0):
+            if line.startswith("\\"):
+                continue
+            if line.startswith("+"):
+                if not removed:
+                    hunk.append((lineno, line[1:], True))
+                    lineno += 1
+                new_left -= 1
+            elif line.startswith("-"):
+                if removed:
+                    hunk.append((lineno, line[1:], True))
+                    lineno += 1
+                old_left -= 1
+            else:
+                hunk.append((lineno, line[1:], False))
+                lineno += 1
+                old_left -= 1
+                new_left -= 1
+            continue
+        if line.startswith("--- "):
+            p = line[4:].split("\t")[0].strip()
+            old_path = None if p == "/dev/null" else (p[2:] if p.startswith("a/") else p)
+            continue
+        if line.startswith("+++ "):
+            p = line[4:].split("\t")[0].strip()
+            hunk = None
+            new_path = None if p == "/dev/null" else (p[2:] if p.startswith("b/") else p)
+            path = old_path if removed else new_path
+            old_path = None
+            if path is None:
+                hunks = None
+                continue
+            hunks = []
+            files.append((path, hunks))
+            continue
+        m = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+        if m and hunks is not None:
+            old_left = int(m.group(2)) if m.group(2) is not None else 1
+            new_left = int(m.group(4)) if m.group(4) is not None else 1
+            lineno = int(m.group(1)) if removed else int(m.group(3))
+            hunk = []
+            hunks.append(hunk)
+            continue
+        hunk = None
+    return files
+
+
+def report(path: str, findings: list, out: list, opts: Options) -> tuple:
+    """Append output lines; return (keep-list candidates, incomplete suppressions)."""
+    tagged = incomplete = 0
+    for f in findings:
+        t = tag(f)
+        if t == "suppression" and opts.require_expiry:
+            missing = missing_parts(f.text)
+            if missing:
+                incomplete += 1
+                t = "suppression; missing " + ", ".join(missing)
+        text = f.text or "(empty comment)"
+        out.append(f"{path}:{f.line}: {text}" + (f" [{t}]" if t else ""))
+        if t.startswith("suppression; missing"):
+            out.append(expiry_fix(path, f.line, missing))
+        if t:
+            tagged += 1
+    return tagged, incomplete
+
+
+def scan_diff(text: str, opts: Options, out: list):
+    """Return (comments, files scanned, candidates, incomplete), or None when text is not a diff."""
+    if not HEADER_RE.search(text):
+        return None
+    total = tagged = scanned = incomplete = 0
+    for path, hunks in parse_diff(text, opts.removed):
+        spec = SPECS.get(Path(path).suffix.lower().lstrip("."))
+        if spec is None:
+            continue
+        scanned += 1
+        kept = []
+        for hunk in hunks:
+            rows = [(ln, t) for ln, t, _ in hunk]
+            marked = {ln for ln, _, m in hunk if m}
+            for f in scan(spec, rows, opts.track_strings):
+                hit = f.span & marked
+                if hit:
+                    f.line = min(hit)
+                    kept.append(f)
+        total += len(kept)
+        t, inc = report(path, kept, out, opts)
+        tagged += t
+        incomplete += inc
+    return total, scanned, tagged, incomplete
+
+
+def iter_files(args: list):
+    for a in args:
+        p = Path(a)
+        if p.is_dir():
+            for q in sorted(p.rglob("*")):
+                if q.is_file() and not (SKIP_DIRS & set(q.parts)) and q.suffix.lower().lstrip(".") in SPECS:
+                    yield q, False
+        else:
+            yield p, True
+
+
+def main(argv: list) -> int:
+    opts = Options()
+    base = None
+    files: list = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--all":
+            opts.track_strings = False
+        elif a == "--removed":
+            opts.removed = True
+        elif a == "--strict":
+            opts.strict = True
+        elif a == "--require-expiry":
+            opts.require_expiry = True
+        elif a == "--diff":
+            i += 1
+            if i >= len(argv):
+                return fail("--diff needs a base (a branch, tag, or commit)",
+                            "the diff is taken against that base, and there is no default",
+                            "ctlhq-no-comments --diff main")
+            base = argv[i]
+        elif a.startswith("--diff="):
+            base = a.split("=", 1)[1]
+        elif a == "--":
+            files.extend(argv[i + 1:])
+            break
+        elif a.startswith("-") and a != "-":
+            return fail(f"unknown option {a}", "ctlhq-no-comments stops rather than guess what you meant",
+                        "use one of --all, --removed, --strict, --require-expiry, --diff BASE; "
+                        "ctlhq-no-comments --help explains each")
+        else:
+            files.append(a)
+        i += 1
+
+    out: list = []
+    if base is not None:
+        scan_files = "ctlhq-no-comments " + (" ".join(files) if files else ".")
+        try:
+            inside = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True)
+        except OSError as e:
+            return fail(f"--diff {base} needs git, and git cannot run ({e.strerror or e})",
+                        "--diff reads the change from `git diff`",
+                        f"install git (on macOS: xcode-select --install), or scan files instead: {scan_files}")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return fail(f"--diff {base} needs a git repository, and {Path.cwd()} is not inside one",
+                        f"--diff runs `git diff {base}`, which reads the repository's history",
+                        f"cd to the repository root and rerun, or scan files instead: {scan_files}")
+        cmd = ["git", "diff", "--no-color", "--no-ext-diff", base]
+        if files:
+            cmd += ["--"] + files
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            err = r.stderr.strip().split("\n")[0] or f"exit {r.returncode}"
+            if re.search(r"unknown revision|bad revision|ambiguous argument|not a valid", err):
+                return fail(f"--diff {base}: no branch, tag, or commit in this repository has that name",
+                            f"git said: {err}",
+                            "list the names with `git branch -a`, then rerun with one, for example: "
+                            "ctlhq-no-comments --diff origin/main")
+            return fail(f"git diff {base} failed", f"git said: {err}",
+                        f"run `git diff {base}` yourself to see the full error, fix it, then rerun")
+        result = scan_diff(r.stdout, opts, out)
+        if result is None:
+            result = (0, 0, 0, 0)
+    elif not files or files == ["-"]:
+        if sys.stdin.isatty():
+            return fail("nothing to scan", "no FILE arguments, no --diff BASE, and no diff on stdin",
+                        "ctlhq-no-comments --diff main, or ctlhq-no-comments src/, or git diff main | ctlhq-no-comments")
+        result = scan_diff(sys.stdin.read(), opts, out)
+        if result is None:
+            return fail("stdin is not a unified diff (no +++ header found)",
+                        "with no FILE arguments, ctlhq-no-comments reads stdin as the output of `git diff`",
+                        "pipe a diff (git diff main | ctlhq-no-comments), or pass files: ctlhq-no-comments src/")
+    else:
+        if opts.removed:
+            return fail("--removed needs --diff BASE or a unified diff on stdin",
+                        "whole files have no removed lines",
+                        f"ctlhq-no-comments --removed --diff main{' -- ' + ' '.join(files) if files else ''}")
+        total = tagged = scanned = incomplete = 0
+        for p, explicit in iter_files(files):
+            spec = SPECS.get(p.suffix.lower().lstrip("."))
+            if spec is None:
+                if explicit:
+                    print(f"skipped (unknown language): {p}; ctlhq-no-comments --help lists the extensions it reads",
+                          file=sys.stderr)
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                return fail(f"cannot read {p} ({e.strerror or e})",
+                            "a file that cannot be read must not pass as a clean scan",
+                            f"check the path with `ls {p.parent}`, then rerun with the right one")
+            scanned += 1
+            findings = scan(spec, list(enumerate(text.split("\n"), 1)), opts.track_strings)
+            total += len(findings)
+            t, inc = report(str(p), findings, out, opts)
+            tagged += t
+            incomplete += inc
+        result = (total, scanned, tagged, incomplete)
+
+    total, scanned, tagged, incomplete = result
+    for line in out:
+        print(line)
+    summary = f"{total} comments{' removed' if opts.removed else ''} in {scanned} files, {tagged} keep-list candidates"
+    if opts.require_expiry:
+        summary += f", {incomplete} incomplete suppressions"
+    print(summary)
+    problems = total if opts.strict else (total - tagged) + incomplete
+    return 1 if problems > 0 else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

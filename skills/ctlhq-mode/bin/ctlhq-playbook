@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""ctlhq-playbook: list the ctlhq-mode playbooks, resolve one to its file, print its steps.
+
+Usage:
+  ctlhq-playbook [--json] list                        title and file for every playbook, in SKILL.md order
+  ctlhq-playbook path <title>                         the playbook's absolute file path
+  ctlhq-playbook steps <title> [--json] [--checkpoint] the numbered steps verbatim, then the **Reply:** line
+
+list   reads the Playbooks section of skills/ctlhq-mode/SKILL.md. The title is the bold
+       entry name. The file is the entry's `File:` when it gives one, else the title in
+       kebab case: lowercase, spaces to hyphens, hyphens kept, other punctuation dropped.
+path   matches the title case-insensitively, by the title, its kebab form, the file
+       stem, or a unique prefix of any of them. An unknown or ambiguous title exits 2
+       and lists the candidates.
+steps  prints the playbook's top-level numbered steps exactly as the file has them,
+       with their indented continuation lines, then a blank line and the **Reply:**
+       paragraph. A playbook with no numbered list falls back to its bold-labelled
+       paragraphs (**Label.** ...), then to its top-level bullets, and says so on
+       stderr. --json prints an array of {n, text, kind} objects for a todo tool,
+       kind one of step, checkpoint, reply; n runs 1, 2, 3 across all items.
+       --checkpoint appends the throughput checkpoint: the one-line n/a form when
+       the playbook itself carries one (`throughput checkpoint: n/a, ...`), else the
+       Feature playbook's four checkpoint items, read from playbooks/feature.md.
+
+Fenced code blocks are skipped. Paths are resolved from this tool's own real path,
+so the bin/ symlink works from any directory.
+
+Exit 0 on success, 1 when the playbook file is missing or has no steps of any kind,
+2 on a usage error or an unknown or ambiguous title.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+import textwrap
+from pathlib import Path
+
+SKILL_DIR = Path(__file__).resolve().parent.parent
+SKILL_MD = SKILL_DIR / "SKILL.md"
+PLAYBOOKS = SKILL_DIR / "playbooks"
+
+ENTRY = re.compile(r"^- \*\*(.+?)\*\*")
+FILE_OVERRIDE = re.compile(r"File: `([^`]+)`")
+FENCE = re.compile(r"^(`{3,}|~{3,})")
+NUMBERED = re.compile(r"^(\d+)\.\s+(.*)$")
+BULLET = re.compile(r"^[-*+]\s+(.*)$")
+LABELLED = re.compile(r"^\*\*(?!Reply)[^*]+\*\*")
+REPLY = re.compile(r"^\*\*Reply:?\*\*:?")
+NA_CHECKPOINT = re.compile(r"`(throughput checkpoint: n/a, [^`]+)`")
+
+
+def kebab(title: str) -> str:
+    t = title.strip().lower().rstrip(".")
+    t = re.sub(r"[^a-z0-9\s-]", "", t)
+    t = re.sub(r"\s+", "-", t.strip())
+    return re.sub(r"-{2,}", "-", t)
+
+
+def load_index() -> list:
+    try:
+        text = SKILL_MD.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"cannot read {SKILL_MD}: {e}", file=sys.stderr)
+        return []
+    lines = text.split("\n")
+    rows = []
+    in_section = False
+    for raw in lines:
+        if raw.startswith("## "):
+            in_section = raw.strip() == "## Playbooks"
+            continue
+        if not in_section:
+            continue
+        m = ENTRY.match(raw)
+        if not m:
+            continue
+        title = m.group(1).strip().rstrip(".")
+        fo = FILE_OVERRIDE.search(raw)
+        rel = fo.group(1) if fo else f"playbooks/{kebab(title)}.md"
+        rows.append({"title": title, "kebab": kebab(title), "file": rel, "path": SKILL_DIR / rel})
+    return rows
+
+
+def resolve(rows: list, query: str):
+    """Return (row, None) on a unique match, else (None, candidates)."""
+    q = kebab(query)
+    if not q:
+        return None, []
+    exact = [r for r in rows if q in (r["kebab"], r["path"].stem)]
+    if len(exact) == 1:
+        return exact[0], None
+    prefix = [r for r in rows if r["kebab"].startswith(q) or r["path"].stem.startswith(q)]
+    if len(prefix) == 1:
+        return prefix[0], None
+    return None, prefix
+
+
+def strip_fences(lines: list) -> list:
+    """Blank out lines inside column-0 fenced blocks, keeping line count."""
+    out = []
+    fence = None
+    for raw in lines:
+        m = FENCE.match(raw)
+        if fence:
+            out.append(None)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+                fence = None
+            continue
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            out.append(None)
+            continue
+        out.append(raw)
+    return out
+
+
+def collect_items(lines: list, starter: re.Pattern) -> list:
+    """Top-level items matching starter, each with its indented continuation lines."""
+    items = []
+    cur = None
+    pending: list = []
+    for raw in lines:
+        if raw is None:
+            cur = None
+            pending = []
+            continue
+        m = starter.match(raw)
+        if m:
+            cur = {"head": raw, "lines": [raw], "match": m}
+            items.append(cur)
+            pending = []
+            continue
+        if cur is None:
+            continue
+        if raw.strip() == "":
+            pending.append(raw)
+            continue
+        if raw[0] in " \t":
+            cur["lines"] += pending + [raw]
+            pending = []
+            continue
+        cur = None
+        pending = []
+    return items
+
+
+def collect_labelled(lines: list) -> list:
+    """Paragraphs opening with **Label.** at column 0, each running to the next label."""
+    items = []
+    cur = None
+    for raw in lines:
+        if raw is None or raw.startswith("#") or REPLY.match(raw):
+            cur = None
+            continue
+        if LABELLED.match(raw):
+            cur = {"head": raw, "lines": [raw]}
+            items.append(cur)
+            continue
+        if cur is not None:
+            cur["lines"].append(raw)
+    for it in items:
+        while it["lines"] and it["lines"][-1].strip() == "":
+            it["lines"].pop()
+    return items
+
+
+def reply_lines(lines: list) -> list:
+    out: list = []
+    for raw in lines:
+        if raw is None:
+            continue
+        if not out:
+            if REPLY.match(raw):
+                out.append(raw)
+            continue
+        if raw.strip() == "":
+            break
+        out.append(raw)
+    return out
+
+
+def item_text(it: dict) -> str:
+    """The item's text without its list marker; continuation lines dedented."""
+    m = it.get("match")
+    head = m.group(m.lastindex) if m else it["lines"][0]
+    rest = textwrap.dedent("\n".join(it["lines"][1:])) if len(it["lines"]) > 1 else ""
+    return (head + ("\n" + rest if rest else "")).rstrip()
+
+
+def read_steps(path: Path):
+    """Return (kind, items) where kind is numbered, labelled, bullets, or none."""
+    lines = strip_fences(path.read_text(encoding="utf-8").split("\n"))
+    items = collect_items(lines, NUMBERED)
+    if items:
+        return "numbered", items, lines
+    items = collect_labelled(lines)
+    if items:
+        return "labelled", items, lines
+    items = collect_items(lines, BULLET)
+    if items:
+        return "bullets", items, lines
+    return "none", [], lines
+
+
+def feature_checkpoint(rows: list) -> list:
+    """The four checkpoint bullet lines from the Feature playbook, dedented."""
+    row, _ = resolve(rows, "feature")
+    if row is None or not row["path"].is_file():
+        return []
+    lines = strip_fences(row["path"].read_text(encoding="utf-8").split("\n"))
+    for it in collect_items(lines, NUMBERED):
+        if "throughput checkpoint" in it["head"].lower():
+            return [ln.strip() for ln in it["lines"][1:] if ln.strip().startswith("- ")]
+    return []
+
+
+def cmd_list(rows: list, as_json: bool) -> int:
+    missing = [r for r in rows if not r["path"].is_file()]
+    if as_json:
+        print(json.dumps([{"title": r["title"], "kebab": r["kebab"], "file": r["file"],
+                           "path": str(r["path"]), "exists": r["path"].is_file()} for r in rows], indent=2))
+    else:
+        width = max((len(r["title"]) for r in rows), default=0)
+        for r in rows:
+            flag = "" if r["path"].is_file() else "  (missing)"
+            print(f"{r['title'].ljust(width)}  {r['file']}{flag}")
+    for r in missing:
+        print(f"missing file: {r['path']}", file=sys.stderr)
+    return 1 if missing or not rows else 0
+
+
+def pick(rows: list, query: str):
+    row, cands = resolve(rows, query)
+    if row is not None:
+        return row
+    if cands:
+        print(f"ambiguous title {query!r}, {len(cands)} candidates:", file=sys.stderr)
+        for r in cands:
+            print(f"  {r['title']}  ({r['kebab']})", file=sys.stderr)
+    else:
+        print(f"unknown playbook {query!r}: no title, kebab name, or file stem in the Playbooks section of SKILL.md matches it. Run `ctlhq-playbook list`.", file=sys.stderr)
+    return None
+
+
+def cmd_path(rows: list, query: str) -> int:
+    row = pick(rows, query)
+    if row is None:
+        return 2
+    print(row["path"])
+    if not row["path"].is_file():
+        print(f"file missing: {row['path']}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_steps(rows: list, query: str, as_json: bool, checkpoint: bool) -> int:
+    row = pick(rows, query)
+    if row is None:
+        return 2
+    if not row["path"].is_file():
+        print(f"file missing: {row['path']}", file=sys.stderr)
+        return 1
+    kind, items, lines = read_steps(row["path"])
+    if kind == "none":
+        print(f"no numbered steps, labelled paragraphs, or bullets in {row['path']}", file=sys.stderr)
+        return 1
+    if kind != "numbered":
+        what = "bold-labelled paragraphs" if kind == "labelled" else "top-level bullets"
+        print(f"note: {row['file']} has no numbered list; using its {len(items)} {what} as steps",
+              file=sys.stderr)
+    reply = reply_lines(lines)
+    if not reply:
+        print(f"note: {row['file']} has no **Reply:** line", file=sys.stderr)
+
+    extra: list = []
+    if checkpoint and row.get("kebab") == "feature":
+        print("note: the Feature playbook already carries the four checkpoint items; nothing appended", file=sys.stderr)
+    elif checkpoint:
+        na = None
+        for raw in lines:
+            m = NA_CHECKPOINT.search(raw) if raw else None
+            if m:
+                na = m.group(1)
+                break
+        if na:
+            extra = [na]
+        else:
+            extra = feature_checkpoint(rows)
+            if not extra:
+                print("cannot read the four checkpoint items from playbooks/feature.md", file=sys.stderr)
+                return 1
+
+    if as_json:
+        out = []
+        n = 0
+        for it in items:
+            n = int(it["match"].group(1)) if kind == "numbered" else n + 1
+            out.append({"n": n, "text": item_text(it), "kind": "step"})
+        for e in extra:
+            n += 1
+            out.append({"n": n, "text": BULLET.sub(r"\1", e, count=1), "kind": "checkpoint"})
+        if reply:
+            n += 1
+            out.append({"n": n, "text": "\n".join(reply).rstrip(), "kind": "reply"})
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0
+
+    for i, it in enumerate(items):
+        if kind == "labelled" and i > 0:
+            print()
+        for ln in it["lines"]:
+            print(ln)
+    if extra:
+        print()
+        for e in extra:
+            print(e)
+    if reply:
+        print()
+        for ln in reply:
+            print(ln)
+    return 0
+
+
+def main(argv: list) -> int:
+    as_json = False
+    checkpoint = False
+    rest: list = []
+    for a in argv:
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a == "--json":
+            as_json = True
+        elif a == "--checkpoint":
+            checkpoint = True
+        elif a.startswith("-"):
+            print(f"unknown option {a}", file=sys.stderr)
+            return 2
+        else:
+            rest.append(a)
+    if not rest:
+        print("missing command: list, path <title>, or steps <title>. Run --help.", file=sys.stderr)
+        return 2
+    cmd, args = rest[0], rest[1:]
+    if not SKILL_MD.is_file():
+        print(f"SKILL.md not found at {SKILL_MD}", file=sys.stderr)
+        return 1
+    rows = load_index()
+    if not rows:
+        print(f"no entries in the Playbooks section of {SKILL_MD}", file=sys.stderr)
+        return 1
+    if cmd == "list":
+        if args or checkpoint:
+            print("list takes no title and no --checkpoint", file=sys.stderr)
+            return 2
+        return cmd_list(rows, as_json)
+    if cmd == "path":
+        if len(args) != 1 or as_json or checkpoint:
+            print("path needs exactly one title and takes no flags", file=sys.stderr)
+            return 2
+        return cmd_path(rows, args[0])
+    if cmd == "steps":
+        if len(args) != 1:
+            print("steps needs exactly one title", file=sys.stderr)
+            return 2
+        return cmd_steps(rows, args[0], as_json, checkpoint)
+    print(f"unknown command {cmd!r}. Run --help.", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

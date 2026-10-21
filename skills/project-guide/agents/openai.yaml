@@ -1,0 +1,5 @@
+interface:
+  display_name: "Project Guide"
+  short_description: "Keep a clear HTML project guide current"
+  default_prompt: "Use $project-guide to explain this repository and create or refresh its living HTML guide."
+

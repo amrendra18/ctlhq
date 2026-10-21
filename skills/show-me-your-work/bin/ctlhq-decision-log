@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# ctlhq-decision-log: append one row to a show-me-your-work decision log (TSV).
+# Thin wrapper around scripts/log.sh. Same six arguments, same exit code.
+set -euo pipefail
+
+usage() {
+	printf 'ctlhq-decision-log: append one row to a show-me-your-work decision log (TSV).\n'
+	printf '\n'
+	printf 'usage: ctlhq-decision-log <logfile> <phase> <decision> <why> <evidence> <result>\n'
+	printf 'Appends one row to a show-me-your-work decision log (TSV). It calls scripts/log.sh\n'
+	printf 'with the same six arguments: that stamps ts (UTC, ISO 8601), writes the header row\n'
+	printf '(ts, phase, decision, why, evidence, result) when the file is missing or empty,\n'
+	printf 'creates missing parent folders, turns tabs, newlines, and carriage returns into\n'
+	printf 'spaces, and puts a single quote before a cell that starts with =, +, -, or @ so a\n'
+	printf 'spreadsheet does not run it as a formula. A written row prints nothing.\n'
+	printf '\n'
+	printf 'Example: ctlhq-decision-log decisions.tsv build "chose X" "because Y" "commit abc123" "tests green"\n'
+	printf '\n'
+	printf 'Exit 0 when the row was written. Exit 1, with what is wrong, why, and a fix line on\n'
+	printf 'stderr, when the argument count is not six, when <logfile> is a folder, or when\n'
+	printf '<logfile> cannot be written. Nothing is written on exit 1.\n'
+}
+
+case "${1:-}" in
+	-h|--help) usage; exit 0 ;;
+esac
+
+# what why fix: print the three lines on stderr and exit 1.
+fail() {
+	printf 'ctlhq-decision-log: %s\nwhy: %s\nfix: %s\n' "$1" "$2" "$3" >&2
+	exit 1
+}
+
+names=(logfile phase decision why evidence result)
+log="${1:-<logfile>}"
+example="ctlhq-decision-log $log build \"chose X\" \"because Y\" \"commit abc123\" \"tests green\""
+if [ "$#" -lt 6 ]; then
+	missing="${names[*]:$#}"
+	fail "got $# of 6 arguments; missing ${missing// /, }" \
+		"every row needs all six cells, so the log stays a table a reviewer can read" \
+		"quote each cell that holds spaces, for example: $example"
+fi
+if [ "$#" -gt 6 ]; then
+	fail "got $# arguments, $(($# - 6)) more than the 6 it takes" \
+		"an unquoted cell with spaces splits into several arguments, and the row would land in the wrong columns" \
+		"quote each cell that holds spaces, for example: $example"
+fi
+if [ -d "$1" ]; then
+	fail "$1 is a folder, and the log must be a file" \
+		"rows are appended to one TSV file" \
+		"pass a file path, for example: ctlhq-decision-log ${1%/}/decisions.tsv <phase> <decision> <why> <evidence> <result>"
+fi
+parent="$(dirname "$1")"
+while [ ! -e "$parent" ]; do parent="$(dirname "$parent")"; done
+if { [ -e "$1" ] && [ ! -w "$1" ]; } || { [ ! -e "$1" ] && [ ! -w "$parent" ]; }; then
+	fail "cannot write $1" \
+		"$([ -e "$1" ] && printf 'the file is read-only for you' || printf 'the folder %s is read-only for you' "$parent")" \
+		"pass a log path you can write, such as decisions.tsv in the work folder, or fix the permission (see it with ls -ld $([ -e "$1" ] && printf '%s' "$1" || printf '%s' "$parent"))"
+fi
+
+# Resolve symlinks (bin/ctlhq-decision-log at the repo root points here) so the
+# sibling scripts/ folder is found from the real location of this file.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+	dir="$(cd -P "$(dirname "$src")" && pwd)"
+	src="$(readlink "$src")"
+	case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+here="$(cd -P "$(dirname "$src")" && pwd)"
+
+exec "$here/../scripts/log.sh" "$@"

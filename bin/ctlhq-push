@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""ctlhq-push: push to a named remote only when every push address is under your GitHub account.
+
+Usage:
+  ctlhq-push [-C DIR] [-u] <remote> <refspec> [refspec...]
+
+Agents push only through this tool; raw `git push` stays denied.
+
+Setting: the allowed GitHub account (OWNER below) is the line
+  github_owner = "<your GitHub account>"
+in ~/.ctlhq/first-push.toml, and only there (HOME is honoured).
+FIRST_PUSH_CONFIG is ignored. HOME still chooses which home folder is read, so the
+push line prints the full path of the file it used. A "#" comment may
+follow the value. ctlhq-first-push and ctlhq-preflight read the same line. The account name
+matches remote addresses in any letter case, as GitHub does. Without the line every push
+is refused (exit 3).
+
+Steps, in order:
+  1. Needs a remote name and at least one refspec, and -C needs a folder (exit 2).
+     Options other than -C and -u are refused (exit 2): no force, delete, mirror, all,
+     tags, repo, exec, receive-pack, push options, or no-verify. A refspec that starts with "+" (force) or ":" (delete),
+     or that names no source, is refused (exit 2).
+  2. The remote must be a configured remote name, not an address (exit 2). Every push
+     address from `git remote get-url --push --all <remote>` must be a GitHub address
+     owned by OWNER in one of these forms (exit 3 otherwise, naming the address):
+       git@github.com:OWNER/<repo>[.git]
+       ssh://git@github.com[:22|:443]/OWNER/<repo>[.git]
+       ssh://git@ssh.github.com:443/OWNER/<repo>[.git]
+       https://github.com/OWNER/<repo>[.git]
+  3. Runs `git push [-u] <remote> <refspec...>` in DIR, with stdin closed. The environment
+     passes through, so GIT_SSH_COMMAND works, and the repository's pre-push hooks run.
+     Prints "pushing: <remote> <refspecs> -> <address> (owner OWNER from <settings file>)"
+     first and "pushed" or "push failed (exit N)" last.
+
+Exit codes: 0 pushed; 1 git push failed; 2 usage or refused option; 3 address not allowed,
+or github_owner unset or unreadable; 4 not a Git work tree, or the remote is unknown.
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = r"[A-Za-z0-9._-]+?(?:\.git)?"
+OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+REMOTE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def shown(path: Path) -> str:
+    text, home = str(path), str(Path.home())
+    if home not in ("", "/") and (text == home or text.startswith(home + os.sep)):
+        return "~" + text[len(home):]
+    return text
+
+
+def settings_file() -> Path:
+    return Path.home() / ".ctlhq" / "first-push.toml"
+
+
+def owner_fix(path: Path) -> str:
+    return f'Add the line github_owner = "<your GitHub account>" to {shown(path)}, then run this command again.'
+
+
+def read_github_owner(path: Path) -> str | None:
+    """The github_owner value, or None when the file or the line is missing.
+
+    Raises ValueError when the file is unreadable or the value is not a GitHub account name in double quotes.
+    """
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ValueError(f"{shown(path)} is unreadable or not UTF-8 text") from error
+    line = re.search(r"(?m)^github_owner\s*=(.*)$", text)
+    if not line:
+        return None
+    value = re.fullmatch(r'\s*"([^"]*)"\s*(?:#.*)?', line.group(1))
+    if not value or not OWNER_NAME.fullmatch(value.group(1)):
+        raise ValueError(f"github_owner in {shown(path)} is not a GitHub account name in double quotes")
+    return value.group(1)
+
+
+def allowed_patterns(owner: str) -> tuple:
+    owner = f"(?ai:{re.escape(owner)})"  # ASCII case folding only: no Kelvin sign or long s
+    return (
+        re.compile(rf"git@github\.com:{owner}/{REPO}"),
+        re.compile(rf"ssh://git@github\.com(?::22|:443)?/{owner}/{REPO}"),
+        re.compile(rf"ssh://git@ssh\.github\.com:443/{owner}/{REPO}"),
+        re.compile(rf"https://github\.com/{owner}/{REPO}"),
+    )
+
+
+def fail(code: int, what: str, fix: str) -> int:
+    print(f"ctlhq-push: {what}\nfix: {fix}", file=sys.stderr)
+    return code
+
+
+def git(folder: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ("git", "-C", str(folder), *arguments),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def main(arguments: list[str]) -> int:
+    if arguments[:1] in (["-h"], ["--help"]):
+        print(__doc__)
+        return 0
+    if arguments[-1:] == ["-C"]:
+        return fail(2, "-C needs a folder.", "run ctlhq-push -C DIR [-u] <remote> <refspec>.")
+    folder = Path.cwd()
+    upstream = False
+    rest = list(arguments)
+    while rest and rest[0].startswith("-"):
+        option = rest.pop(0)
+        if option == "-C" and rest:
+            folder = Path(rest.pop(0))
+        elif option == "-u":
+            upstream = True
+        else:
+            return fail(2, f"option {option!r} is not allowed.", "push without it, or ask the operator to run git push by hand.")
+    if len(rest) < 2:
+        return fail(2, "needs a remote name and at least one refspec.", "run ctlhq-push [-C DIR] [-u] <remote> <refspec>.")
+    remote, refspecs = rest[0], rest[1:]
+    for refspec in refspecs:
+        if refspec.startswith(("-", "+", ":")) or not refspec.split(":", 1)[0]:
+            return fail(2, f"refspec {refspec!r} forces, deletes, or names no source.", "push a plain branch or tag name; force and delete stay with the operator.")
+    if not REMOTE_NAME.fullmatch(remote):
+        return fail(2, f"{remote!r} is not a remote name.", "add the address as a named remote first, then push to that name.")
+    if git(folder, "rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+        return fail(4, f"{folder} is not a Git work tree.", "pass -C with the checkout to push from.")
+    found = git(folder, "remote", "get-url", "--push", "--all", remote)
+    addresses = found.stdout.split()
+    if found.returncode != 0 or not addresses:
+        return fail(4, f"remote {remote!r} is unknown here.", "check the name with git remote -v.")
+    settings = settings_file()
+    try:
+        owner = read_github_owner(settings)
+    except ValueError as error:
+        return fail(3, f"{error}, so no push address can be checked.", owner_fix(settings))
+    if owner is None:
+        return fail(3, f"no github_owner is set in {shown(settings)}, so no push address can be checked.", owner_fix(settings))
+    patterns = allowed_patterns(owner)
+    refused = [address for address in addresses if not any(p.fullmatch(address) for p in patterns)]
+    if refused:
+        return fail(3, f"push address {refused[0]} is not a github.com/{owner} repository.", f"push only to a remote whose address is github.com/{owner}/<repo>; other pushes stay with the operator.")
+    command = ["git", "-C", str(folder), "push", *(["-u"] if upstream else []), remote, *refspecs]
+    print(f"pushing: {remote} {' '.join(refspecs)} -> {', '.join(addresses)} (owner {owner} from {settings})", flush=True)
+    result = subprocess.run(command, stdin=subprocess.DEVNULL, check=False)
+    if result.returncode != 0:
+        print(f"push failed (exit {result.returncode})")
+        return 1
+    print("pushed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

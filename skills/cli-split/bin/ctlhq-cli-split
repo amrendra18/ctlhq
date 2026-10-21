@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""ctlhq-cli-split: list a skill's steps with the commands each names, and the skills changed since a date.
+
+Usage:
+  ctlhq-cli-split steps <skill-name|SKILL.md|file.md|folder> [--json] [--no-command]
+  ctlhq-cli-split changed --since <YYYY-MM-DD|FILE> [--json]
+
+steps    one row per step in the file: numbered items (N), bullets (B), and prose
+         paragraphs (P), with continuation lines joined. Front matter, fenced code
+         blocks, headings, and table rows are skipped. Columns: #, line, kind,
+         section (the nearest heading), commands (backticked spans that start with
+         a ctlhq bin/ tool, a bin/ or scripts/ path, or a common CLI such as git or
+         gh), and the step text cut to 90 characters. A folder means its SKILL.md;
+         a bare name means skills/<name>/SKILL.md. --no-command keeps only the rows
+         that name no command: the candidates to classify first.
+         The last line counts steps and the ones that name a command.
+changed  the skills whose folder holds a file modified after the date (local
+         midnight) or after the given FILE's modification time, for example the
+         last ctlhq-cli-split proposal file. One row per skill: #, skill, newest file,
+         its date.
+
+Classifying a step as deterministic, mixed, or judgment stays with the reader;
+this tool only lists. Rule it serves (the cli-split skill): "A skill
+names a command for every step a script can do the same way every run."
+
+Paths are resolved from this tool's own real path, so the bin/ symlink works from
+any directory.
+
+Exit 0 when rows are printed, 1 when the file has no steps or no skill changed
+(or --no-command leaves no row), 2 on a usage error, an unknown skill, or a bad date.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent.parent.parent
+EXTERNAL = {
+    "git", "gh", "rg", "grep", "find", "ls", "wc", "sed", "awk", "python3", "bun",
+    "npm", "npx", "pnpm", "cargo", "go", "make", "gitleaks", "curl",
+    "jq", "rm", "mv", "cp", "ln", "chmod", "mkdir", "uv", "pytest",
+}
+NUM_RE = re.compile(r"^(\s*)(\d+)[.)]\s+(.*)$")
+BUL_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+TICK_RE = re.compile(r"`([^`]+)`")
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-cli-split: {msg}", file=sys.stderr)
+    print("run `ctlhq-cli-split --help` for usage", file=sys.stderr)
+    return 2
+
+
+def tools() -> set:
+    names = set()
+    b = ROOT / "bin"
+    if b.is_dir():
+        for p in b.iterdir():
+            if not p.name.startswith((".", "_")):
+                names.add(p.name)
+    for p in (ROOT / "skills").glob("*/bin/*"):
+        names.add(p.name)
+    return names
+
+
+def resolve(arg: str) -> Path | None:
+    p = Path(arg)
+    if p.is_dir():
+        p = p / "SKILL.md"
+    if p.is_file():
+        return p
+    if "/" not in arg and not arg.endswith(".md"):
+        cand = ROOT / "skills" / arg / "SKILL.md"
+        if cand.is_file():
+            return cand
+    return None
+
+
+def commands_in(text: str, known: set) -> list:
+    found = []
+    for span in TICK_RE.findall(text):
+        span = span.strip()
+        if not span:
+            continue
+        first = span.split()[0]
+        base = first.rsplit("/", 1)[-1]
+        if (
+            first in known
+            or first in EXTERNAL
+            or ("/" in first and ("bin/" in first or "scripts/" in first) and base)
+        ):
+            if span not in found:
+                found.append(span)
+    return found
+
+
+def parse_steps(text: str, known: set) -> list:
+    lines = text.split("\n")
+    i = 0
+    if lines and lines[0].strip() == "---":
+        for j in range(1, len(lines)):
+            if lines[j].strip() == "---":
+                i = j + 1
+                break
+    rows = []
+    section = ""
+    fence = False
+    cur = None
+
+    def close():
+        nonlocal cur
+        if cur is not None:
+            cur["text"] = " ".join(cur["parts"]).strip()
+            del cur["parts"]
+            rows.append(cur)
+            cur = None
+
+    for n in range(i, len(lines)):
+        line = lines[n]
+        s = line.strip()
+        if s.startswith("```") or s.startswith("~~~"):
+            close()
+            fence = not fence
+            continue
+        if fence:
+            continue
+        if not s:
+            close()
+            continue
+        if s.startswith("#"):
+            close()
+            section = s.lstrip("#").strip()
+            continue
+        if s.startswith("|"):
+            close()
+            continue
+        m = NUM_RE.match(line)
+        b = BUL_RE.match(line) if not m else None
+        if m or b:
+            close()
+            kind = "N" if m else "B"
+            body = m.group(3) if m else b.group(2)
+            cur = {"line": n + 1, "kind": kind, "section": section, "parts": [body]}
+            continue
+        if cur is None:
+            cur = {"line": n + 1, "kind": "P", "section": section, "parts": [s]}
+        else:
+            cur["parts"].append(s)
+    close()
+    for r in rows:
+        r["commands"] = commands_in(r["text"], known)
+    return rows
+
+
+def cut(s: str, n: int) -> str:
+    return s if len(s) <= n else s[: n - 3] + "..."
+
+
+def cmd_steps(args: list) -> int:
+    as_json = "--json" in args
+    only_bare = "--no-command" in args
+    rest = [a for a in args if a not in ("--json", "--no-command")]
+    bad = [a for a in rest if a.startswith("-")]
+    if bad:
+        return usage(f"unknown option {bad[0]}")
+    if len(rest) != 1:
+        return usage("steps takes one skill name, file, or folder")
+    path = resolve(rest[0])
+    if path is None:
+        return usage(f"no skill or file '{rest[0]}'")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return usage(f"cannot read {path}: {e}")
+    rows = parse_steps(text, tools())
+    total = len(rows)
+    named = sum(1 for r in rows if r["commands"])
+    if only_bare:
+        rows = [r for r in rows if not r["commands"]]
+    for k, r in enumerate(rows, 1):
+        r["n"] = k
+    if as_json:
+        print(json.dumps([{k: r[k] for k in ("n", "line", "kind", "section", "commands", "text")} for r in rows], indent=2))
+    else:
+        print(f"file: {path}")
+        print("#\tline\tkind\tsection\tcommands\tstep")
+        for r in rows:
+            cmds = "; ".join(r["commands"]) or "-"
+            print(f"{r['n']}\t{r['line']}\t{r['kind']}\t{cut(r['section'], 30) or '-'}\t{cmds}\t{cut(r['text'], 90)}")
+        print(f"{total} steps, {named} name a command, {total - named} name none")
+    return 0 if rows else 1
+
+
+def cmd_changed(args: list) -> int:
+    as_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if len(rest) != 2 or rest[0] != "--since":
+        return usage("changed takes --since <YYYY-MM-DD|FILE>")
+    since = rest[1]
+    if Path(since).is_file():
+        cutoff = Path(since).stat().st_mtime
+    else:
+        try:
+            cutoff = datetime.strptime(since, "%Y-%m-%d").timestamp()
+        except ValueError:
+            return usage(f"'{since}' is neither a file nor a YYYY-MM-DD date")
+    rows = []
+    for d in sorted((ROOT / "skills").iterdir()):
+        if not (d / "SKILL.md").is_file():
+            continue
+        newest, newest_t = None, 0.0
+        for dirpath, dirnames, filenames in os.walk(d):
+            dirnames[:] = [x for x in dirnames if x != "__pycache__"]
+            for f in filenames:
+                p = Path(dirpath) / f
+                try:
+                    t = p.lstat().st_mtime
+                except OSError:
+                    continue
+                if t > newest_t:
+                    newest, newest_t = p, t
+        if newest is not None and newest_t > cutoff:
+            rows.append({"skill": d.name, "file": str(newest.relative_to(ROOT)),
+                         "modified": datetime.fromtimestamp(newest_t).strftime("%Y-%m-%d %H:%M")})
+    for k, r in enumerate(rows, 1):
+        r["n"] = k
+    if as_json:
+        print(json.dumps(rows, indent=2))
+    else:
+        print("#\tskill\tnewest file\tmodified")
+        for r in rows:
+            print(f"{r['n']}\t{r['skill']}\t{r['file']}\t{r['modified']}")
+        print(f"{len(rows)} skills changed since {since}")
+    return 0 if rows else 1
+
+
+def main(argv: list) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0 if argv else 2
+    if argv[0] == "steps":
+        return cmd_steps(argv[1:])
+    if argv[0] == "changed":
+        return cmd_changed(argv[1:])
+    return usage(f"unknown subcommand '{argv[0]}'")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

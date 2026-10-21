@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""ctlhq-preflight: report each permission, tool, and service a run needs as ready or missing, with the exact fix line.
+
+Usage:
+  ctlhq-preflight [--repo DIR] [--min-disk GIB] [--need TOOL,TOOL] [--service URL ...] [--push-guard] [--json]
+
+Checks, in order:
+  1. git work tree   DIR (default: the current folder) is inside a git work tree.
+  2. .git writable   a temporary file can be created and removed in the git folder and in
+                     its objects/ folder (what `git add` and `git commit` write). This is a
+                     real write, so a sandbox that blocks it shows here.
+  3. signing key     `ssh-add -l` reaches the ssh-agent and it holds at least one key. Only
+                     the number of keys is read; key names and comments are never printed.
+  4. free disk       free space on the volume holding DIR is at least --min-disk GiB
+                     (default 2).
+  5. tool NAME       one check per tool from --need (default git,python3,node,ssh-add),
+                     found on PATH. --need is repeatable and takes commas.
+  6. loopback        a socket binds on 127.0.0.1, accepts a connection, and passes a byte.
+  7. service URL     one check per --service URL (repeatable): the URL answers with an HTTP
+                     status below 500 within 3 s.
+  8. push guard      only with --push-guard: the system git settings (read only, with
+                     `git config --system --get-regexp pushinsteadof`) hold the 5 push guard
+                     rules for OWNER: https://github.com/OWNER/ and git@github.com:OWNER/
+                     push to themselves, and https://github.com/, git@github.com:, and
+                     ssh://git@github.com/ push to push-blocked://not-your-repo/. Missing
+                     when a rule is absent, when GIT_CONFIG_NOSYSTEM makes git ignore the
+                     system settings, or when OWNER is not configured. Rules count in
+                     any letter case of OWNER, but git applies them with exact case, so
+                     write remote addresses in the case the rules use.
+
+Setting: OWNER is the line
+  github_owner = "<your GitHub account>"
+in ~/.ctlhq/first-push.toml (HOME is honoured), the same line ctlhq-first-push and ctlhq-push
+read. A "#" comment may follow the value. FIRST_PUSH_CONFIG is ignored here, as in
+ctlhq-push; ctlhq-first-push uses it only for public_terms. Without the line, check 8 says
+"not configured".
+
+Output: one numbered line per check, "ready" or "missing", the check, and what was found.
+Under each missing line, "fix:" and the exact command or setting change that fixes it.
+Then "ready N | missing M". --json prints {"ready", "missing", "checks": [{"n", "check",
+"state", "detail", "fix"}]} instead.
+
+Operator rule (home/AGENTS.md, Before work): "Run the permission preflight before the first milestone: `.git` write, `git add`, `git commit`, the signing key, sockets, network."
+
+Exit codes: 0 every check ready; 1 at least one check missing; 2 usage error.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+DEFAULT_TOOLS = ["git", "python3", "node", "ssh-add"]
+USAGE = "usage: ctlhq-preflight [--repo DIR] [--min-disk GIB] [--need TOOL,TOOL] [--service URL ...] [--push-guard] [--json]"
+BLOCKED = "push-blocked://not-your-repo/"
+OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+
+
+def guard_rules(owner: str) -> list:
+    own = (f"https://github.com/{owner}/", f"git@github.com:{owner}/")
+    return [(o, o) for o in own] + [(BLOCKED, p) for p in ("https://github.com/", "git@github.com:", "ssh://git@github.com/")]
+
+
+def shown(path: Path) -> str:
+    text, home = str(path), str(Path.home())
+    if home not in ("", "/") and (text == home or text.startswith(home + os.sep)):
+        return "~" + text[len(home):]
+    return text
+
+
+def settings_file() -> Path:
+    return Path.home() / ".ctlhq" / "first-push.toml"
+
+
+def owner_fix(path: Path) -> str:
+    return f'Add the line github_owner = "<your GitHub account>" to {shown(path)}, then run this command again.'
+
+
+def read_github_owner(path: Path) -> str | None:
+    """The github_owner value, or None when the file or the line is missing.
+
+    Raises ValueError when the file is unreadable or the value is not a GitHub account name in double quotes.
+    """
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ValueError(f"{shown(path)} is unreadable or not UTF-8 text") from error
+    line = re.search(r"(?m)^github_owner\s*=(.*)$", text)
+    if not line:
+        return None
+    value = re.fullmatch(r'\s*"([^"]*)"\s*(?:#.*)?', line.group(1))
+    if not value or not OWNER_NAME.fullmatch(value.group(1)):
+        raise ValueError(f"github_owner in {shown(path)} is not a GitHub account name in double quotes")
+    return value.group(1)
+
+
+class UsageError(Exception):
+    pass
+
+
+def git(repo: Path, *args: str) -> tuple[int, str]:
+    try:
+        r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=15)
+    except FileNotFoundError:
+        return 127, "git not found"
+    except subprocess.TimeoutExpired:
+        return 124, "git timed out"
+    return r.returncode, (r.stdout if r.returncode == 0 else r.stderr).strip()
+
+
+def check_git(repo: Path) -> list:
+    rows = []
+    rc, top = git(repo, "rev-parse", "--show-toplevel")
+    if rc != 0:
+        rows.append(("git work tree", False, f"{repo} is not inside a git work tree",
+                     f"cd into the project's repository, or run: git -C {sh(repo)} init"))
+        rows.append((".git writable", False, "skipped: no git work tree", "fix the git work tree check first"))
+        return rows
+    rows.append(("git work tree", True, top, ""))
+    _, gitdir = git(repo, "rev-parse", "--absolute-git-dir")
+    _, objects = git(repo, "rev-parse", "--git-path", "objects")
+    objdir = Path(objects) if os.path.isabs(objects) else (repo / objects)
+    for d in (Path(gitdir), objdir.resolve()):
+        try:
+            fd, name = tempfile.mkstemp(prefix=".ctlhq-preflight-", dir=str(d))
+            os.close(fd)
+            os.unlink(name)
+        except OSError as e:
+            rows.append((".git writable", False, f"cannot write in {d}: {e.strerror or e}",
+                         f"add {d} to the sandbox writable roots (or run outside the sandbox), then rerun"))
+            return rows
+    rows.append((".git writable", True, f"{gitdir} and its objects/ accept writes", ""))
+    return rows
+
+
+def sh(p) -> str:
+    s = str(p)
+    return s if all(c.isalnum() or c in "/._-~" for c in s) else "'" + s.replace("'", "'\\''") + "'"
+
+
+def signing_key_path(repo: Path) -> str:
+    rc, key = git(repo, "config", "--get", "user.signingkey")
+    if rc == 0 and key and not key.startswith(("ssh-", "key::")):
+        key = key[:-4] if key.endswith(".pub") else key
+        return sh(key)
+    return "~/.ssh/id_ed25519"
+
+
+def check_signing(repo: Path) -> tuple:
+    key = signing_key_path(repo)
+    sock = os.environ.get("SSH_AUTH_SOCK", "")
+    start_agent = f'eval "$(ssh-agent -s)" && ssh-add {key}'
+    if not sock:
+        return ("signing key", False, "SSH_AUTH_SOCK is not set, so no ssh-agent is reachable", start_agent)
+    try:
+        r = subprocess.run(["ssh-add", "-l"], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return ("signing key", False, "ssh-add not found", "install OpenSSH (ssh-add), or add its folder to PATH")
+    except subprocess.TimeoutExpired:
+        return ("signing key", False, "ssh-add -l did not answer within 10 s", start_agent)
+    if r.returncode == 0:
+        n = sum(1 for line in r.stdout.splitlines() if line.strip())
+        return ("signing key", True, f"ssh-agent holds {n} key{'s' if n != 1 else ''}", "")
+    if r.returncode == 1:
+        return ("signing key", False, "ssh-agent holds 0 keys", f"ssh-add {key}")
+    err = r.stderr.lower()
+    if "not permitted" in err or "permission denied" in err:
+        return ("signing key", False, f"the ssh-agent socket is blocked: {sock}",
+                f"allow the socket {sock} in the sandbox (or run outside the sandbox), then rerun")
+    return ("signing key", False, f"no ssh-agent answers at {sock}", start_agent)
+
+
+def mount_of(p: Path) -> Path:
+    p = p.resolve()
+    while not os.path.ismount(p) and p != p.parent:
+        p = p.parent
+    return p
+
+
+def check_disk(repo: Path, min_gib: float) -> tuple:
+    u = shutil.disk_usage(str(repo))
+    free = u.free / 2 ** 30
+    m = mount_of(repo)
+    detail = f"{free:.1f} GiB free on {m}, need {min_gib:g} GiB"
+    if free >= min_gib:
+        return ("free disk", True, detail, "")
+    return ("free disk", False, detail,
+            f"free {min_gib - free:.1f} GiB more on {m} (for example delete old build output), or pass a lower --min-disk")
+
+
+def check_tool(name: str) -> tuple:
+    where = shutil.which(name)
+    if where:
+        return (f"tool {name}", True, where, "")
+    return (f"tool {name}", False, f"{name} is not on PATH", f"install {name}, or add the folder that holds it to PATH")
+
+
+def check_loopback() -> tuple:
+    srv = cli = conn = None
+    try:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.settimeout(3)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        cli = socket.create_connection(("127.0.0.1", port), timeout=3)
+        conn, _ = srv.accept()
+        cli.sendall(b"x")
+        if conn.recv(1) != b"x":
+            raise OSError("the byte did not arrive")
+        return ("loopback", True, f"bind, connect, and send on 127.0.0.1:{port}", "")
+    except OSError as e:
+        return ("loopback", False, f"127.0.0.1 failed: {e.strerror or e}",
+                "allow binding and connecting on 127.0.0.1 in the sandbox (local network), then rerun")
+    finally:
+        for s in (conn, cli, srv):
+            if s is not None:
+                s.close()
+
+
+def check_service(url: str) -> tuple:
+    fix = f"start the service at {url}, for example: bin/ctlhq-serve start --name NAME --cwd DIR --ready-url {url} -- CMD"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return (f"service {url}", False, f"no answer: {getattr(e, 'reason', e)}", fix)
+    if code < 500:
+        return (f"service {url}", True, f"answered {code}", "")
+    return (f"service {url}", False, f"answered {code}", fix)
+
+
+def check_push_guard() -> tuple:
+    """The push guard row: are the 5 url.<base>.pushInsteadOf rules in the system git settings?"""
+    where = os.environ.get("GIT_CONFIG_SYSTEM") or "the system git settings"
+    doc = "see ctlhq-preflight --help, check 8"
+    settings = settings_file()
+    try:
+        owner = read_github_owner(settings)
+    except ValueError as error:
+        return ("push guard", False, f"not configured: {error}", owner_fix(settings))
+    if owner is None:
+        return ("push guard", False, f"not configured: no github_owner in {shown(settings)}", owner_fix(settings))
+    rules = guard_rules(owner)
+    if os.environ.get("GIT_CONFIG_NOSYSTEM", "").strip().lower() not in ("", "0", "false", "no", "off"):
+        return ("push guard", False, "GIT_CONFIG_NOSYSTEM is set, so git ignores the system settings and the push guard",
+                f"unset GIT_CONFIG_NOSYSTEM, then rerun ({doc})")
+    try:
+        r = subprocess.run(["git", "config", "--system", "--get-regexp", "pushinsteadof"],
+                           capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return ("push guard", False, "git not found", "install git, or add its folder to PATH")
+    except subprocess.TimeoutExpired:
+        return ("push guard", False, "git config did not answer within 15 s", f"rerun; {doc}")
+    if r.returncode not in (0, 1):
+        err = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[0]
+        return ("push guard", False, f"cannot read {where}: {err}", f"fix {where} as root, then rerun ({doc})")
+    found = set()
+    for line in r.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key.startswith("url.") and key.endswith(".pushinsteadof"):
+            found.add((key[4:-len(".pushinsteadof")], value.strip()))
+    exact = set(found)
+    found = {(base.casefold(), value.casefold()) for base, value in found}
+    absent = [rule for rule in rules if (rule[0].casefold(), rule[1].casefold()) not in found]
+    n = len(rules)
+    if not absent:
+        note = "" if all(rule in exact for rule in rules) else "; letter case differs from github_owner, and git matches addresses exactly"
+        return ("push guard", True, f"{n} of {n} rules in {where}{note}", "")
+    adds = "; ".join(f"sudo git config --system --add url.{b}.pushInsteadOf {p}" for b, p in absent)
+    return ("push guard", False, f"{n - len(absent)} of {n} rules in {where}",
+            f"as root, add the missing rules: {adds} ({doc})")
+
+
+def parse(argv: list) -> dict:
+    o = {"repo": Path.cwd(), "min_disk": 2.0, "need": [], "service": [], "json": False, "push_guard": False}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            return {"help": True}
+        if a == "--json":
+            o["json"] = True
+            i += 1
+            continue
+        if a == "--push-guard":
+            o["push_guard"] = True
+            i += 1
+            continue
+        if a not in ("--repo", "--min-disk", "--need", "--service"):
+            raise UsageError(f"unknown argument {a!r}")
+        if i + 1 >= len(argv):
+            raise UsageError(f"{a} needs a value")
+        v = argv[i + 1]
+        if a == "--repo":
+            o["repo"] = Path(v).expanduser()
+            if not o["repo"].is_dir():
+                raise UsageError(f"--repo is not a folder: {v}")
+        elif a == "--min-disk":
+            try:
+                o["min_disk"] = float(v)
+            except ValueError:
+                raise UsageError(f"--min-disk needs a number of GiB, got {v!r}")
+            if o["min_disk"] < 0:
+                raise UsageError("--min-disk needs 0 or more")
+        elif a == "--need":
+            names = [t.strip() for t in v.split(",") if t.strip()]
+            if not names:
+                raise UsageError("--need needs at least one tool name")
+            o["need"] += names
+        else:
+            if not v.startswith(("http://", "https://")):
+                raise UsageError(f"--service needs an http or https URL, got {v!r}")
+            o["service"].append(v)
+        i += 2
+    return o
+
+
+def main(argv: list) -> int:
+    try:
+        o = parse(argv)
+    except UsageError as e:
+        print(f"ctlhq-preflight: {e}", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
+    if o.get("help"):
+        print(__doc__.strip())
+        return 0
+    repo = o["repo"].resolve()
+    rows = check_git(repo)
+    rows.append(check_signing(repo))
+    rows.append(check_disk(repo, o["min_disk"]))
+    for t in dict.fromkeys(o["need"] or DEFAULT_TOOLS):
+        rows.append(check_tool(t))
+    rows.append(check_loopback())
+    for u in dict.fromkeys(o["service"]):
+        rows.append(check_service(u))
+    if o["push_guard"]:
+        rows.append(check_push_guard())
+    checks = [{"n": n, "check": c, "state": "ready" if ok else "missing", "detail": d, "fix": f}
+              for n, (c, ok, d, f) in enumerate(rows, 1)]
+    ready = sum(1 for c in checks if c["state"] == "ready")
+    missing = len(checks) - ready
+    if o["json"]:
+        print(json.dumps({"ready": ready, "missing": missing, "checks": checks}, indent=2))
+    else:
+        w = max(len(c["check"]) for c in checks)
+        pad = " " * (len(str(len(checks))) + 2 + 7 + 2)
+        for c in checks:
+            print(f"{c['n']}. {c['state']:<7}  {c['check']:<{w}}  {c['detail']}")
+            if c["fix"]:
+                print(f"{pad}fix: {c['fix']}")
+        print(f"ready {ready} | missing {missing}")
+    return 1 if missing else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,23 @@
+# Recipe for bin/ctlhq-env. Keys: see `bin/ctlhq-env --help`, section "Recipes".
+name = "ubuntu"
+summary = "Ubuntu Linux machine where the agent has root, for tests that change the system"
+provider = "tart"
+guest = "linux"
+image = "ghcr.io/cirruslabs/ubuntu:latest"
+cpu = 4
+memory_mb = 4096
+disk_gb = 40
+network = "shared"
+user = "admin"
+root = true
+snapshot_before_risky = true
+provision = [
+  "sudo -n true",
+]
+not_covered = [
+  "a desktop session: the image has no display, so screenshot is not available",
+  "x86-64 programs: the guest is arm64 Linux",
+  "Linux distributions other than Ubuntu",
+  "GPU, USB devices, and real hardware drivers",
+]
+notes = "Take a snapshot before a risky test: ctlhq-env snapshot ubuntu <tag>. Root comes from passwordless sudo in the image; the first `up` checks it with `sudo -n true`."

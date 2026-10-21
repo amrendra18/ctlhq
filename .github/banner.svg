@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="t">
+  <title id="t">ctlhq: Control HQ for your agents.</title>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .name { font-size: 104px; font-weight: 700; fill: #1c1917; letter-spacing: -2px; }
+    .tag { font-size: 30px; fill: #57534e; }
+    .item { font-size: 26px; fill: #292524; }
+    .wait { fill: #8a5a00; font-weight: 600; }
+  </style>
+  <rect width="1280" height="320" fill="#faf7f0"/>
+  <path d="M868 40 V280" stroke="#e7e0d0" stroke-width="3"/>
+  <rect x="900" y="61" width="28" height="28" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="3"/>
+  <path transform="translate(906 74)" d="M0 0 L6 7 L17 -6" fill="none" stroke="#1a7f37" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="item" x="944" y="83">plan agreed</text>
+  <rect x="900" y="107" width="28" height="28" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="3"/>
+  <path transform="translate(906 120)" d="M0 0 L6 7 L17 -6" fill="none" stroke="#1a7f37" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="item" x="944" y="129">built and tested</text>
+  <rect x="900" y="153" width="28" height="28" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="3"/>
+  <path transform="translate(906 166)" d="M0 0 L6 7 L17 -6" fill="none" stroke="#1a7f37" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="item" x="944" y="175">reviewed by fresh eyes</text>
+  <rect x="900" y="199" width="28" height="28" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="3"/>
+  <path transform="translate(906 212)" d="M0 0 L6 7 L17 -6" fill="none" stroke="#1a7f37" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="item" x="944" y="221">gate exit 0</text>
+  <text class="name" x="64" y="168">ctl<tspan fill="#c2410c">hq</tspan></text>
+  <text class="tag" x="68" y="226">Control HQ for your agents.</text>
+</svg>

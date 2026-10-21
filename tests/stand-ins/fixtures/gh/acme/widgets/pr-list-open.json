@@ -1,0 +1,4 @@
+[{"number":5,"headRefName":"feature-a","baseRefName":"main","title":"Add widgets"},
+ {"number":6,"headRefName":"feature-b","baseRefName":"feature-a","title":"Widget colors"},
+ {"number":7,"headRefName":"feature-c","baseRefName":"feature-b","title":"Widget sizes"},
+ {"number":9,"headRefName":"docs-fix","baseRefName":"main","title":"Fix a typo"}]

@@ -1,0 +1,4 @@
+[
+  {"id": "red", "name": "Test Red", "accent": "#d01010", "ink": "#101010", "paper": "#fff5f5"},
+  {"id": "night", "name": "Test Night", "accent": "#30c0f0", "ink": "#f0f0f0", "paper": "#111418"}
+]

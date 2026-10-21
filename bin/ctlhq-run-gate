@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""ctlhq-run-gate: run one gate command with stdout and stderr kept apart, print "exit N" first, and exit with that code.
+
+Usage:
+  ctlhq-run-gate [--name NAME] [--max-load N] [--force] [--tail N] -- <command> [args...]
+  ctlhq-run-gate --tree
+
+Steps, in order:
+  1. Refuses to start (exit 125, one line on stderr, nothing written) when the 1-minute
+     load average is above the core count. --max-load N uses N as the limit instead;
+     --force skips the check.
+  2. Runs the command with stdin from /dev/null, stdout to .local/gate/NAME.out and stderr
+     to .local/gate/NAME.err (never merged). Writes the exit code to .local/gate/NAME.exit
+     and one TSV line to .local/gate/NAME.meta: start, end, exit, command (UTC, ISO 8601).
+     NAME defaults to "gate" and may hold letters, digits, ".", "-", "_". The .local/
+     folder is at the top of the git work tree that holds the current directory, or in
+     the current directory when there is no work tree.
+     In a work tree it also writes .local/gate/NAME.tree, two lines:
+       exit <the same exit code as NAME.exit>
+       tree <Git's tree ID of the work tree's files>
+     The tree ID is what `git write-tree` gives after `git add -A` of every file into a
+     copy of the index, so the real index is never touched. In that copy, the
+     skip-worktree mark is first cleared on each file that is on disk or whose staged
+     copy differs from HEAD, and `git update-index --really-refresh` runs, so such a file
+     and a file marked assume-unchanged count as they are on disk. Two exceptions: a file
+     missing from disk whose staged copy matches HEAD keeps the mark and counts as staged
+     (in a sparse checkout, that is every file outside the cone); and in a sparse
+     checkout, `git add` leaves paths outside the cone as they are staged, and an
+     untracked file there makes the tree ID fail. It covers file contents, modes,
+     deletions, and untracked files that git does not ignore. A submodule or a
+     nested repository counts as the commit it has checked out. The HEAD commit is not
+     part of it, so a commit of some of the files leaves it unchanged. The .local/ folder
+     is always left out, so the gate's own files never change it. A file the command
+     itself creates and git does not ignore does change it; add it to .gitignore. Like
+     any `git add`, it stores changed file contents in .git/objects; `git gc` removes
+     unused ones later.
+     The tree ID is taken before the command starts, so a change made during the run
+     shows as a different tree. ctlhq-commit --gate NAME refuses a tree that does not
+     match it. The file is written whole and renamed into place before NAME.exit, so its
+     exit line and tree line always come from the same run. When git cannot give a tree
+     ID, stderr says why and the file holds "error <reason>" in place of the tree line;
+     ctlhq-commit then refuses and prints the reason.
+  3. Prints, in this order: "exit N" on its own line, then "--- stdout (last 20) ---" and
+     the last 20 lines of stdout, then "--- stderr (last 20) ---" and the last 20 lines of
+     stderr. --tail N changes 20.
+  4. Exits with the command's own exit code, so `ctlhq-run-gate -- make test && ...` works. A
+     command that cannot start exits 127; one killed by a signal exits 128 plus the signal
+     number.
+
+--tree prints the current work tree's tree ID on one line and exits 0, or 1 outside a work
+tree or when git fails. ctlhq-commit runs it to compare.
+
+Exit codes: the command's own; 1 --tree failed; 2 usage error; 125 refused for load.
+
+Operator rule (home/AGENTS.md, Working method): "gate exit line read directly (never through tail or grep)". The exit line is printed first and is also this tool's exit code, so the rule holds by construction.
+"""
+from __future__ import annotations
+
+import datetime
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+USAGE = "usage: ctlhq-run-gate [--name NAME] [--max-load N] [--force] [--tail N] -- <command> [args...]"
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-run-gate: {msg}", file=sys.stderr)
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+def work_tree() -> Path | None:
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            return Path(os.fsdecode(r.stdout.strip()))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+class TreeError(Exception):
+    pass
+
+
+def tree_id(root: Path) -> str:
+    """Git's tree ID of the work tree on disk, as --help describes. ctlhq-commit gets it through --tree."""
+    def git(*args: str, env: dict[str, str] | None = None, stdin: bytes | None = None) -> str:
+        r = subprocess.run(["git", "-C", str(root), *args], input=stdin, capture_output=True, env=env)
+        r.stdout, r.stderr = (os.fsdecode(b) for b in (r.stdout, r.stderr))
+        if r.returncode != 0:
+            detail = "; ".join(l.strip() for l in r.stderr.splitlines() if l.strip() and not l.startswith("hint:"))
+            raise TreeError(f"git {' '.join(args)} failed: {detail}")
+        return r.stdout.strip()
+
+    index = Path(git("rev-parse", "--path-format=absolute", "--git-path", "index"))
+    # An exclude pathspec that names an ignored folder makes `git add` fail, and an ignored .local/ is skipped anyway.
+    local_ignored = subprocess.run(["git", "-C", str(root), "check-ignore", "-q", "--", ".local"], capture_output=True).returncode == 0
+    with tempfile.TemporaryDirectory(prefix="ctlhq-tree-") as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        if index.is_file():
+            shutil.copy2(index, env["GIT_INDEX_FILE"])
+
+        def in_copy(*args: str, stdin: bytes | None = None) -> str:
+            # core.splitIndex=false writes the copy whole, so no shared index file lands in .git.
+            return git("-c", "core.splitIndex=false", *args, env=env, stdin=stdin)
+
+        # `git add -A` skips files marked skip-worktree. A sparse checkout's missing files keep the mark, so a
+        # .gitignore among them still applies. --really-refresh re-reads files marked assume-unchanged.
+        marked = [e[2:] for e in os.fsencode(in_copy("ls-files", "-v", "-z")).split(b"\0") if e[:2] in (b"S ", b"s ")]
+        if marked:
+            staged = set(os.fsencode(in_copy("diff", "--cached", "--name-only", "-z", "--no-renames", "--ignore-submodules=none")).split(b"\0"))
+            top = os.fsencode(root)
+            clear = [m for m in marked if m in staged or os.path.lexists(os.path.join(top, m))]
+            if clear:
+                in_copy("update-index", "-z", "--no-skip-worktree", "--stdin", stdin=b"\0".join(clear) + b"\0")
+        in_copy("update-index", "-q", "--really-refresh")
+        in_copy("-c", "advice.addEmbeddedRepo=false", "add", "-A", "--", ".", *([] if local_ignored else [":(exclude).local"]))
+        in_copy("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".local")
+        return in_copy("write-tree")
+
+
+def write_whole(path: Path, text: str) -> None:
+    """Write to a temporary file, then rename it into place, so a reader never sees half of it."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def tail_lines(path: Path, n: int) -> list[str]:
+    if n <= 0:
+        return []
+    text = path.read_bytes().decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines[-n:]
+
+
+def main(argv: list[str]) -> int:
+    name = "gate"
+    max_load: float | None = None
+    force = False
+    tail = 20
+    i = 0
+    cmd: list[str] | None = None
+    if argv[:1] == ["--tree"]:
+        if len(argv) > 1:
+            return usage("--tree takes no other arguments")
+        root = work_tree()
+        if root is None:
+            print(f"ctlhq-run-gate: --tree: not inside a git work tree: {Path.cwd()}", file=sys.stderr)
+            return 1
+        try:
+            print(tree_id(root))
+        except TreeError as e:
+            print(f"ctlhq-run-gate: --tree: {e}", file=sys.stderr)
+            return 1
+        return 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            cmd = argv[i + 1:]
+            break
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a in ("--name", "--max-load", "--tail"):
+            if i + 1 >= len(argv):
+                return usage(f"{a} needs a value")
+            val = argv[i + 1]
+            if a == "--name":
+                if not NAME_RE.match(val):
+                    return usage(f"--name {val!r}: use letters, digits, '.', '-', '_' only")
+                name = val
+            elif a == "--max-load":
+                try:
+                    max_load = float(val)
+                except ValueError:
+                    return usage(f"--max-load {val!r} is not a number")
+                if max_load < 0:
+                    return usage("--max-load must be 0 or more")
+            else:
+                if not val.isdigit():
+                    return usage(f"--tail {val!r} is not a whole number")
+                tail = int(val)
+            i += 2
+            continue
+        if a == "--force":
+            force = True
+            i += 1
+            continue
+        return usage(f"unknown option {a!r} (the command goes after --)")
+    if cmd is None:
+        return usage("missing -- before the command")
+    if not cmd:
+        return usage("no command after --")
+
+    if not force:
+        limit = max_load if max_load is not None else float(os.cpu_count() or 1)
+        source = "--max-load" if max_load is not None else "core count"
+        try:
+            load1 = os.getloadavg()[0]
+        except OSError:
+            load1 = None
+        if load1 is not None and load1 > limit:
+            print(
+                f"ctlhq-run-gate: refused, 1-minute load {load1:.2f} is above the limit {limit:g} ({source}); "
+                "wait, or pass --force or --max-load N",
+                file=sys.stderr,
+            )
+            return 125
+
+    root = work_tree()
+    gate_dir = (root or Path.cwd()) / ".local" / "gate"
+    gate_dir.mkdir(parents=True, exist_ok=True)
+    out_path = gate_dir / f"{name}.out"
+    err_path = gate_dir / f"{name}.err"
+    exit_path = gate_dir / f"{name}.exit"
+    meta_path = gate_dir / f"{name}.meta"
+    tree_path = gate_dir / f"{name}.tree"
+
+    try:
+        tree_line = f"tree {tree_id(root)}" if root is not None else None
+    except TreeError as e:
+        tree_line = "error " + str(e).replace("\n", " ")
+        print(f"ctlhq-run-gate: no tree ID, so ctlhq-commit --gate {name} will refuse this run: {e}", file=sys.stderr)
+    start = now_iso()
+    with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
+        try:
+            r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe)
+            code = r.returncode
+            if code < 0:
+                code = 128 + (-code)
+        except OSError as e:
+            fe.write(f"ctlhq-run-gate: cannot start {cmd[0]}: {e.strerror or e}\n".encode("utf-8"))
+            code = 127
+        except KeyboardInterrupt:
+            fe.write(b"ctlhq-run-gate: interrupted\n")
+            code = 130
+    end = now_iso()
+    if tree_line is not None:
+        write_whole(tree_path, f"exit {code}\n{tree_line}\n")
+    write_whole(exit_path, f"{code}\n")
+    command_text = " ".join(shlex.quote(c) for c in cmd).replace("\t", " ").replace("\n", " ")
+    meta_path.write_text("\t".join([start, end, str(code), command_text]) + "\n", encoding="utf-8")
+
+    print(f"exit {code}")
+    print(f"--- stdout (last {tail}) ---")
+    for line in tail_lines(out_path, tail):
+        print(line)
+    print(f"--- stderr (last {tail}) ---")
+    for line in tail_lines(err_path, tail):
+        print(line)
+    sys.stdout.flush()
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

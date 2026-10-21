@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# ctlhq-watch-pr: watch one GitHub pull request, a connected stack, or a queued stack until a verdict. Needs bun and gh.
+set -u
+# Resolve this file through symlinks (macOS bash 3 has no readlink -f).
+src="$0"
+while [ -L "$src" ]; do
+	dir="$(cd "$(dirname "$src")" && pwd)"
+	src="$(readlink "$src")"
+	case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+here="$(cd "$(dirname "$src")" && pwd)"
+scripts="$(cd "$here/../scripts" && pwd)"
+
+usage() {
+	cat <<'EOF'
+ctlhq-watch-pr: watch one GitHub pull request, a connected stack, or a queued stack until a verdict. Needs bun and gh.
+
+Usage: ctlhq-watch-pr [options]
+
+Watch one pull request, a connected stack, or an immutable queued stack.
+JSON (NDJSON while polling) is the default; --pretty renders human text.
+
+Options:
+  --owner <owner>               GitHub repository owner
+  --repo <repo>                 GitHub repository name
+  --pr <number>                 pull request number
+  --stack                       watch the connected open stack (default: false)
+  --queued-stack                watch the captured stack until all PRs merge (default: false)
+  --stack-prs <n,...>           frozen bottom-to-top queue (queued mode only)
+  --interval <seconds>          poll interval (default: 60)
+  --sweep-interval <seconds>    whole-stack sweep interval (default: 300)
+  --timeout <seconds>           deadline; 0 disables it (default: 0)
+  --max-query-errors <count>    consecutive query-error budget (default: 5)
+  --status-only                 print one status table and exit 0 (default: false)
+  --allow-draft                 do not treat a draft as a merge gate (default: false)
+  --pretty                      render human text instead of JSON (default: false)
+  -h, --help                    display help for command
+
+--stack and --queued-stack conflict. --stack-prs requires --queued-stack.
+Verdicts: READY, WAITING, ADVANCE, COMPLETE (see playbooks/babysit.md).
+Each review thread carries botReviewPasses, the review passes of that thread's own bot.
+Known limit. A review bot that posts from an ordinary user account (a login without the
+[bot] suffix) counts as a person, so its threads show isBot=false and botReviewPasses=0.
+
+Exit codes (a /loop caller branches on these; from scripts/watch-pr/cli.ts and policy.ts):
+  0    READY, STATUS (--status-only), or COMPLETE
+  2    blocked by merge conflicts
+  3    blocked by unresolved review threads
+  4    blocked by failing checks
+  5    timeout: --timeout passed, or the status query stayed unavailable until it passed
+  6    blocked by a merge gate: a draft without --allow-draft, changes requested, or a
+       PR closed without merge
+  7    the status query failed: a non-retryable error, or --max-query-errors failures in a row
+  64   usage error (bad option or value)
+  127  bun is not installed (this wrapper exits before the script runs)
+
+First run: the script runs `bun install --frozen-lockfile` in skills/ctlhq-mode/scripts
+(it installs commander into scripts/node_modules), then restarts itself with the same
+arguments and exits with the restarted run's code. Later runs skip the install until
+package.json or bun.lock changes.
+
+Needs bun and gh. Runs: bun skills/ctlhq-mode/scripts/watch-pr/watch-pr
+Install bun with: curl -fsSL https://bun.sh/install | bash
+EOF
+}
+for arg in "$@"; do
+	case "$arg" in
+	-h|--help) usage; exit 0 ;;
+	esac
+done
+
+if ! command -v bun >/dev/null 2>&1; then
+	echo "ctlhq-watch-pr needs bun. Install it with: curl -fsSL https://bun.sh/install | bash" >&2
+	exit 127
+fi
+exec bun "$scripts/watch-pr/watch-pr" "$@"

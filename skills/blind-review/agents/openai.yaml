@@ -1,0 +1,4 @@
+interface:
+  display_name: "Blind Review"
+  short_description: "Independent review by a fresh agent before commit"
+  default_prompt: "Use $blind-review to have a fresh agent that did not write this change review it before commit."

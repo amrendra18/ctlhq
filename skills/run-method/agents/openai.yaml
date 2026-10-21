@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Method"
+  short_description: "Confirm, plan, build, review and hand off a project"
+  default_prompt: "Use $run-method to confirm the ask, write the goal state, run the milestone loop, and hand off."

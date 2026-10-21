@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# stop: kill the private ssh-agent that new-key started and delete its folder.
+#
+# Usage: stop <folder printed by new-key>
+#
+# 1. Refuses a folder without the .fake-signing-key marker that new-key writes.
+# 2. Reads SSH_AGENT_PID from the folder's env file (never from your environment).
+# 3. Kills that process only when it is an ssh-agent started with "-a <folder>/agent.sock".
+#    It never runs ssh-agent -k, so it cannot stop the agent your SSH_AUTH_SOCK names.
+# 4. Deletes the folder. An agent that has already exited is fine.
+#
+# Exit 0 stopped and deleted; 1 refused (no marker, or the pid is another process; nothing
+# is killed or deleted); 2 usage error.
+set -u
+case "${1:-}" in -h|--help) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;; esac
+[ $# -eq 1 ] || { echo "stop: usage: stop <folder printed by new-key>" >&2; exit 2; }
+[ -d "$1" ] || { echo "stop: no such folder: $1" >&2; exit 2; }
+dir="$(cd "$1" && pwd -P)"
+[ -f "$dir/.fake-signing-key" ] || { echo "stop: $dir has no .fake-signing-key marker; refusing" >&2; exit 1; }
+pid="$(sed -n "s/^export SSH_AGENT_PID='\([0-9][0-9]*\)'$/\1/p" "$dir/env" 2>/dev/null)"
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+	cmd="$(ps -p "$pid" -o command= 2>/dev/null)"
+	case "$cmd" in
+	*ssh-agent*" -a $dir/agent.sock"*) kill "$pid" || { echo "stop: kill $pid failed" >&2; exit 1; } ;;
+	*) echo "stop: pid $pid is not this folder's ssh-agent ($cmd); refusing" >&2; exit 1 ;;
+	esac
+	for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+fi
+rm -rf "$dir"
+echo "stopped ssh-agent ${pid:-(none running)} and deleted $dir"

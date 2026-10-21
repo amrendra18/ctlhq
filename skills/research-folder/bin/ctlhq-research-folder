@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""ctlhq-research-folder: create and check a research folder (numbered files, an index, reference copies with attribution, confidence labels).
+
+Usage:
+  ctlhq-research-folder init <dir> <topic...>
+  ctlhq-research-folder check [--json] <dir>
+
+init   creates <dir> with the skeleton and prints each path it wrote:
+         README.md                 the index: one numbered row per file
+         01-question.md            the question, scope, and what is out of scope
+         02-findings.md            the findings, one claim per numbered line
+         03-prior-art.md           the comparison: better, worse, missing
+         04-sources-and-gaps.md    every source with its date, every gap
+         reference/                copies of outside documents, each with a Source: line
+       <dir> must not exist or must be empty; anything else exits 2 and writes nothing.
+
+check  reads <dir> and lists every problem as a numbered row, tab separated:
+       #, file, line, problem, why, fix. The fix cell is the action with the real file,
+       line, and next free number filled in. --json prints {"files", "problems"} with the
+       same six fields per problem. The rules:
+         1. README.md exists and names every other file by its path relative to <dir>.
+         2. Every top-level file except README.md starts with two digits and a dash.
+         3. One numbered file has "sources" in its name (the sources-and-gaps file).
+         4. In every numbered .md file except the sources file, every list item and
+            every table data row carries a confidence label: [high], [medium], or [low].
+            Lines inside code fences and table header rows are skipped. Prose
+            paragraphs are not checked; write claims as list items or table rows.
+         5. Every text file under reference/ has a line starting "Source:" in its
+            first 10 lines, written as "Source: <url> (retrieved <YYYY-MM-DD>)" plus
+            the license (copy only what the license allows). A Source: line with no URL (scheme://...) or no
+            "retrieved YYYY-MM-DD" is a problem. A non-text file (PDF, image) needs a
+            sidecar text file <name>.source holding that line.
+       The last line counts the files and problems.
+
+Labels: [high] seen in a primary source, or tested; [medium] one secondary source, or
+inferred from several; [low] a guess or a single unconfirmed report. init writes this
+legend and the file table into README.md.
+
+Exit codes: 0 init done, or check found no problem; 1 check found problems; 2 usage error,
+a missing folder, a file that is not UTF-8 text, or init on a folder that is not empty.
+Exit 2 prints three lines on stderr: "ctlhq-research-folder: <what is wrong>", "why: <why it
+stops>", "fix: <the command to run>".
+
+Encodes home/AGENTS.md: "Label illustrative examples so they cannot be mistaken for evidence."
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import re
+import sys
+from pathlib import Path
+
+LABEL = re.compile(r"\[(high|medium|low)\]", re.I)
+ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
+NUMBERED = re.compile(r"^\d\d-")
+SOURCE_LINE = re.compile(r"^\s*(?:[-*>]\s*)?(?:\*\*)?source(?::\*\*|\*\*:|:)\s*\S", re.I)
+SOURCE_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.I)
+SOURCE_DATE = re.compile(r"\bretrieved\s+\d{4}-\d{2}-\d{2}\b", re.I)
+TEXT_EXT = {".md", ".txt", ".html", ".htm", ".rst", ".json", ".yaml", ".yml", ".toml", ".csv",
+            ".tsv", ".py", ".js", ".ts", ".go", ".rs", ".sh", ".source", ""}
+
+SKELETON = {
+    "README.md": """# {topic}: research
+
+Started {today}. Status: in progress.
+
+Confidence labels on every claim: [high] (seen in a primary source, or tested),
+[medium] (one secondary source, or inferred from several), [low] (a guess or a single
+unconfirmed report).
+
+| # | file | holds |
+|---|---|---|
+| 1 | 01-question.md | the question, scope, and what is out of scope |
+| 2 | 02-findings.md | the findings, one claim per numbered line |
+| 3 | 03-prior-art.md | where our project is better, worse, or missing something |
+| 4 | 04-sources-and-gaps.md | every source with its date, and every gap |
+
+Reference copies live in `reference/`; add a row here for each one.
+""",
+    "01-question.md": """# Question
+
+Write the question in one sentence. Then the scope, and what this research leaves out.
+""",
+    "02-findings.md": """# Findings
+
+1. Replace this line with one claim and its source file in reference/. [low]
+""",
+    "03-prior-art.md": """# Prior art
+
+| # | area | ours | theirs | verdict (better, worse, missing) | confidence |
+|---|---|---|---|---|---|
+| 1 | replace with an area | what we do | what they do | worse | [low] |
+""",
+    "04-sources-and-gaps.md": """# Sources and gaps
+
+## Sources
+
+| # | source | date read | kind (primary, secondary, public page fallback) | copy |
+|---|---|---|---|---|
+
+## Gaps
+
+| # | gap | why it is open | what would close it |
+|---|---|---|---|
+""",
+}
+
+
+class UsageError(Exception):
+    def __init__(self, what, why, fix):
+        super().__init__(what)
+        self.what, self.why, self.fix = what, why, fix
+
+
+def fail(what, why, fix):
+    print("ctlhq-research-folder: %s\nwhy: %s\nfix: %s" % (what, why, fix), file=sys.stderr)
+    return 2
+
+
+def read(p):
+    try:
+        return p.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise UsageError("%s is not UTF-8 text" % p, "check reads every Markdown file as UTF-8 text",
+                         "save %s as UTF-8, or move a binary copy under reference/ with a .source sidecar" % p)
+
+
+def init(args):
+    if len(args) < 2:
+        return fail("init wants <dir> <topic>, got %d argument%s" % (len(args), "" if len(args) == 1 else "s"),
+                    "the topic becomes the README.md title",
+                    "ctlhq-research-folder init %s <topic>" % (args[0] if args else "docs/research/<topic>"))
+    root, topic = Path(args[0]), " ".join(args[1:])
+    if root.exists() and (not root.is_dir() or any(root.iterdir())):
+        return fail("%s exists and is not an empty folder; nothing written" % root,
+                    "init never overwrites files",
+                    "pick a new folder, or check the one there: ctlhq-research-folder check %s" % root)
+    (root / "reference").mkdir(parents=True, exist_ok=True)
+    for name, text in SKELETON.items():
+        (root / name).write_text(text.format(topic=topic, today=dt.date.today().isoformat()), encoding="utf-8")
+        print(root / name)
+    print(root / "reference")
+    return 0
+
+
+def is_text(p):
+    if p.suffix.lower() not in TEXT_EXT:
+        return False
+    try:
+        p.read_text(encoding="utf-8")
+        return True
+    except (UnicodeDecodeError, OSError):
+        return False
+
+
+def table_rows(lines):
+    """Line numbers (1-based) of table data rows: pipe rows that are not header or separator."""
+    rows, n = set(), len(lines)
+    for i, line in enumerate(lines):
+        if not line.lstrip().startswith("|"):
+            continue
+        if re.match(r"^\s*\|[\s:|-]+\|\s*$", line):
+            continue
+        nxt = lines[i + 1] if i + 1 < n else ""
+        if re.match(r"^\s*\|[\s:|-]+\|\s*$", nxt):
+            continue  # header row
+        rows.add(i + 1)
+    return rows
+
+
+def check(root):
+    problems = []
+    if not root.is_dir():
+        raise UsageError("no such folder: %s" % root, "check reads an existing research folder",
+                         "create it with: ctlhq-research-folder init %s <topic>, or pass the folder's path" % root)
+    files = sorted(p for p in root.rglob("*") if p.is_file() and not any(
+        part.startswith(".") for part in p.relative_to(root).parts))
+    rels = [p.relative_to(root).as_posix() for p in files]
+    index = root / "README.md"
+    index_text = read(index) if index.is_file() else None
+    if index_text is None:
+        problems.append(("README.md", "-", "no index: README.md is missing",
+                         "the index is how a reader finds each file",
+                         "write README.md with one table row per file (| # | file | holds |); "
+                         "ctlhq-research-folder init <new dir> <topic> writes one to copy"))
+    rows = [int(m.group(1)) for m in re.finditer(r"(?m)^\s*\|\s*(\d+)\s*\|", index_text or "")]
+    next_row = max(rows, default=0) + 1
+    top = [p for p in files if p.parent == root and p.name != "README.md"]
+    used = [int(p.name[:2]) for p in top if NUMBERED.match(p.name)]
+    next_num = max(used, default=0) + 1
+    renames = {}
+    for p in top:
+        if not NUMBERED.match(p.name):
+            renames[p.name] = "%02d-%s" % (next_num, p.name)
+            next_num += 1
+    for rel in rels:
+        if rel != "README.md" and index_text is not None and rel not in index_text:
+            problems.append(("README.md", "-", "index does not name %s" % rel,
+                             "a file the index does not name is easy to miss",
+                             'add "| %d | %s | <what it holds> |" to the README.md table'
+                             % (next_row, renames.get(rel, rel))))
+            next_row += 1
+    for old, new in renames.items():
+        problems.append((old, "-", "top-level file is not numbered (NN-name)",
+                         "numbered names keep the files in reading order",
+                         "rename it with: mv %s %s (the next free number), and name %s in README.md"
+                         % (root / old, root / new, new)))
+    sources = [p for p in top if NUMBERED.match(p.name) and "sources" in p.name.lower()]
+    if not sources:
+        problems.append(("-", "-", "no sources-and-gaps file (a numbered file with 'sources' in its name)",
+                         "every study lists its sources with the date read, and its open gaps",
+                         "create %02d-sources-and-gaps.md with a Sources table and a Gaps table "
+                         "(ctlhq-research-folder init writes the template), then name it in README.md" % next_num))
+    for p in top:
+        if not NUMBERED.match(p.name) or p.suffix.lower() != ".md" or p in sources:
+            continue
+        lines = read(p).splitlines()
+        table, fence = table_rows(lines), False
+        for n, line in enumerate(lines, 1):
+            if line.lstrip().startswith(("```", "~~~")):
+                fence = not fence
+                continue
+            if fence:
+                continue
+            if (ITEM.match(line) or n in table) and not LABEL.search(line):
+                problems.append((p.name, str(n), "claim has no confidence label [high], [medium], or [low]",
+                                 "a reader must see how sure each claim is",
+                                 "end %s line %d with [high], [medium], or [low] (ctlhq-research-folder --help "
+                                 "defines each)" % (p.name, n)))
+    for p in files:
+        rel = p.relative_to(root)
+        if rel.parts[0] != "reference":
+            continue
+        if is_text(p):
+            head = p.read_text(encoding="utf-8").splitlines()[:10]
+            found = [(n, h) for n, h in enumerate(head, 1) if SOURCE_LINE.match(h)]
+            if not found:
+                problems.append((rel.as_posix(), "-", "reference copy has no 'Source:' line in its first 10 lines",
+                                 "a copied document must say where it came from",
+                                 'add "Source: <url> (retrieved <YYYY-MM-DD>)" as line 1 of %s, plus the '
+                                 "license when known" % rel.as_posix()))
+            elif not any(SOURCE_URL.search(h) and SOURCE_DATE.search(h) for _, h in found):
+                n = found[0][0]
+                missing = " and ".join(part for part, rx in (("a URL", SOURCE_URL), ("a retrieved date", SOURCE_DATE))
+                                       if not rx.search(found[0][1]))
+                problems.append((rel.as_posix(), str(n), "Source: line lacks %s" % missing,
+                                 "a reader must be able to open the source and see when it was copied",
+                                 'rewrite %s line %d as "Source: <url> (retrieved <YYYY-MM-DD>)", plus the '
+                                 "license when known" % (rel.as_posix(), n)))
+        elif not p.with_name(p.name + ".source").is_file():
+            problems.append((rel.as_posix(), "-", "non-text reference copy has no %s.source sidecar" % p.name,
+                             "a copied document must say where it came from, and a PDF or image cannot hold the line",
+                             'write "Source: <url> (retrieved <YYYY-MM-DD>)" to %s.source' % rel.as_posix()))
+    return files, problems
+
+
+def main(argv):
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if not argv:
+        return fail("no subcommand", "ctlhq-research-folder has two: init and check",
+                    "ctlhq-research-folder init <dir> <topic>, or ctlhq-research-folder check <dir>; --help explains both")
+    cmd, args = argv[0], argv[1:]
+    if cmd == "init":
+        return init(args)
+    if cmd == "check":
+        as_json = "--json" in args
+        args = [a for a in args if a != "--json"]
+        if len(args) != 1:
+            return fail("check wants one <dir>, got %d" % len(args), "check reads one research folder",
+                        "ctlhq-research-folder check %s" % (args[0] if args else "docs/research/<topic>"))
+        try:
+            files, problems = check(Path(args[0]))
+        except UsageError as e:
+            return fail(e.what, e.why, e.fix)
+        if as_json:
+            print(json.dumps({"files": len(files), "problems": [
+                {"file": f, "line": l, "problem": m, "why": w, "fix": x} for f, l, m, w, x in problems]}, indent=2))
+        else:
+            if problems:
+                print("#\tfile\tline\tproblem\twhy\tfix")
+                for i, row in enumerate(problems, 1):
+                    print("%d\t%s" % (i, "\t".join(row)))
+            print("%d files, %d problems" % (len(files), len(problems)))
+        return 1 if problems else 0
+    return fail("unknown subcommand %r" % cmd, "ctlhq-research-folder has two: init and check",
+                "ctlhq-research-folder init <dir> <topic>, or ctlhq-research-folder check <dir>")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

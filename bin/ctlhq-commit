@@ -1,0 +1,668 @@
+#!/usr/bin/env python3
+"""ctlhq-commit: commit named paths with a four-section message file after a green gate, then verify hash, signature, and clean tree.
+
+Usage:
+  ctlhq-commit [--gate NAME] [--subject TEXT] [--why TEXT] [--changes TEXT]
+                [--test-plan TEXT] [--risks TEXT] [--message-file FILE]
+                [--co-author LINE] [--allow-dirty] -- <path> [path...]
+
+Agents commit only through this tool, which adds the co-author trailer.
+The trailer names the model that made the commit, and only the agent knows its model.
+
+Steps, in order:
+  1. Needs at least one path after "--" (exit 2). Every path is added by name: ".", "-A",
+     "--all", and anything that starts with "-" are refused (exit 2).
+  2. With --gate NAME, reads .local/gate/NAME.exit (written by ctlhq-run-gate). A missing file or
+     anything but 0 refuses (exit 3) and prints the exit it found and the .meta line.
+     It also reads .local/gate/NAME.tree, which holds the same run's exit and the tree ID
+     it tested. A missing file, an "error" line (its reason is printed), an exit other
+     than 0, or no tree line refuses (exit 3) with what, why:, and fix: lines; the fix is
+     to rerun the gate. Step 6 compares the tree ID with this tree. Without --gate the
+     tool prints "gate: not checked".
+  3. Builds the message: --subject on the first line, a blank line, then the four sections
+     "Why:", "Changes:", "Test Plan:", "Risks:", each heading alone on its own line with
+     the flag's text below it. All five flags are required, or --message-file FILE is
+     taken verbatim instead (it excludes the five flags). The message is written to
+     .local/commit/<UTC timestamp>.txt at the top of the work tree.
+  4. Co-author trailer. A message that already has a Co-Authored-By line keeps it, and
+     nothing is added. Otherwise one line is appended, taken from the first of:
+       a. --co-author "Co-Authored-By: Name <email>"
+       b. the environment variable CTLHQ_CO_AUTHOR
+     The line must have the shape "Co-Authored-By: Name <email>" on one line. There is
+     no default line: with no trailer in the message and no source, or a bad line, the
+     tool refuses (exit 5) with what, why:, and fix: lines. The refusal names the running
+     agent when it can tell (AI_AGENT starting with claude-code means Claude Code;
+     CODEX_THREAD_ID means Codex). The tool prints "co-author: <line> (from <source>)".
+  5. Every git call that takes the named paths reads them as plain names, never as
+     patterns (`git --literal-pathspecs`), so "src/*.py", ":/" or ":!a.txt" match only a
+     file with exactly that name. A path neither on disk nor tracked refuses (exit 1)
+     before anything is staged. Refuses (exit 3, with what, why:, and fix: lines) when the
+     index already holds a staged change (`git diff --cached --ignore-submodules=none`
+     against HEAD, so a submodule's staged commit counts whatever the ignore settings say)
+     to a path that is not named and not inside a named folder, because `git commit` takes
+     the whole index. Then it keeps a copy of the index and stages each named path by
+     name: a path on disk with `git add -A -- <path>`, so deletions inside a named folder
+     are staged too; a path gone from disk but still tracked (or already staged as deleted) with
+     `git rm -r --cached -- <path>`. Unnamed paths are never staged. Any refusal or
+     failure from here until the commit exists puts the index back byte for byte from
+     that copy (written to index.lock, then renamed, as git does), so partly staged files
+     and staged files from before the first commit stay as they were. So does an
+     interrupt (Ctrl-C or SIGTERM) or an unexpected error, as long as HEAD has not moved;
+     the run then ends as the interrupt or error would. The tool's `git add`, `git rm`,
+     `git write-tree` and `git commit` run with splitIndex.sharedIndexExpire=never, so a
+     split index never loses the shared file that copy points to. File names that are not
+     UTF-8 pass through unchanged.
+  6. With --gate NAME, just before the commit, runs `ctlhq-run-gate --tree` and compares
+     its tree ID with the one in .local/gate/NAME.tree. The tree ID covers the whole work
+     tree on disk, whatever paths are named, and leaves out the HEAD commit, so one gate
+     run covers several commits of the files it tested. A difference refuses (exit 3)
+     with what, why:, and fix: lines and commits nothing.
+     Then it takes the index tree (`git write-tree`) and lists every path whose entry
+     differs between HEAD's tree (the empty tree before the first commit) and the index
+     tree, submodules included. With or without --gate, it refuses (exit 3, naming the
+     paths) when:
+       a. a listed path is not a named path and not inside a named folder (paths are
+          compared from the top of the work tree), or
+       b. a listed path has a different entry (mode and object ID, or absence) in the
+          reference tree: the gate's tree with --gate, otherwise the tree ID of the files
+          on disk from `ctlhq-run-gate --tree`, taken just then. When that tree ID cannot
+          be taken, the run refuses too.
+     Check b catches a staged copy that differs from the file on disk, such as one marked
+     assume-unchanged or skip-worktree.
+     Then it runs `git commit -F <file>` (no -m, no --no-verify, no --amend) and verifies:
+     the commit's tree equals the index tree taken just before (a pre-commit hook that
+     changed the index breaks this; the changed paths are printed and the run exits 1),
+     every named path is committed (`git status --porcelain -- <paths>` empty; a hook
+     that changed the files can break this), and the tree is clean, or with --allow-dirty
+     the other dirty paths are printed and accepted. --allow-dirty never accepts the first
+     two. In those two cases the fix: line says the commit exists and how to undo it. When
+     HEAD's parent is not the commit HEAD named before `git commit` ran (a hook made
+     another commit), it names that earlier commit and leaves out `git reset --soft HEAD~1`.
+     Prints the hash, the subject, the signature state from `git log --show-signature -1`
+     (signed, unsigned, or unknown with git's %G? code), the tree state, and last
+     "committed <hash>".
+  7. Writes the receipt .local/commits/<full hash>.json in the main work tree (the folder
+     that holds the git common dir, so a receipt outlives a linked worktree) and prints
+     "receipt: <path>". It is written whenever the commit exists, also when step 6 then
+     exits 1. Keys: hash, subject, branch, committed_at (UTC), paths, message_file,
+     co_author, signature, tree ("clean", "dirty", "named paths not committed", or
+     "changed by a hook"), dirty_paths, hook_changed (the paths a hook changed), gate
+     (null without --gate, else name, exit, and meta: the .meta line), and exit (this
+     run's exit code). .local/ is ignored by git, so the receipt needs no
+     receipt commit: PLAN.md cites the hash in the next real commit. When the receipt
+     cannot be written, stderr says "receipt: not written (<error>)" and the run goes on;
+     the receipt never changes the exit code.
+
+Exit codes: 0 success; 1 git refused (no work tree, a named path missing, add or commit
+failed), a hook changed the commit, a named path is not committed afterwards, or the
+tree is dirty afterwards without --allow-dirty (in the last three cases the commit exists
+and its hash is printed); 2 usage; 3 gate not green, it ran on a different tree, the
+index would commit content the gate did not test or that differs from the files on
+disk, or the index holds staged changes outside the named paths; 5 no valid co-author
+line (4 is retired). An interrupt ends the run as Python does: 130 for Ctrl-C, 143 for
+SIGTERM.
+
+.local/ must be ignored by git, or the message file itself dirties the tree.
+
+Operator rule (home/AGENTS.md, Working method): "Commit only through the sequence: gate exit line read directly (never through tail or grep), git add by name, git commit -F from a message file, signature and clean tree verified, hash recorded in PLAN.md. Only then say 'committed <hash>'." This tool runs that sequence; recording the hash in PLAN.md stays with you.
+"""
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+CO_AUTHOR_RE = re.compile(r"^Co-Authored-By: [^<>\n]*[^<>\s] <[^<>\s@]+@[^<>\s@]+>$")
+HAS_CO_AUTHOR_RE = re.compile(r"(?im)^co-authored-by:")
+TRAILER_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*: \S")
+CO_AUTHOR_SHAPE = 'Co-Authored-By: Name <email>'
+# Without it, a git call that writes a split index may delete the shared index file the saved index copy points to.
+KEEP_SHARED = ["-c", "splitIndex.sharedIndexExpire=never"]
+MARKS_FIX = ("stage the files as they are on disk (a file marked assume-unchanged or skip-worktree keeps its old staged "
+             "copy; `git update-index --no-assume-unchanged --no-skip-worktree <path>` clears both marks), ")
+RUN_GATE = Path(__file__).resolve().parent / "ctlhq-run-gate"
+USAGE = (
+    "usage: ctlhq-commit [--gate NAME] [--subject TEXT] [--why TEXT] [--changes TEXT]\n"
+    "                     [--test-plan TEXT] [--risks TEXT] [--message-file FILE]\n"
+    "                     [--co-author LINE] [--allow-dirty] -- <path> [path...]"
+)
+SIG_CODES = {
+    "G": "good signature",
+    "B": "bad signature",
+    "U": "good signature, unknown validity",
+    "X": "good signature, expired",
+    "Y": "good signature, expired key",
+    "R": "good signature, revoked key",
+    "E": "signature cannot be checked (missing key or no allowed signers file)",
+    "N": "no signature",
+}
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-commit: {msg}", file=sys.stderr)
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+class CoAuthorError(Exception):
+    def __init__(self, what: str, why: str, fix: str) -> None:
+        super().__init__(what)
+        self.what, self.why, self.fix = what, why, fix
+
+
+CO_AUTHOR_WHY = "Agent commits carry a Co-Authored-By trailer, and ctlhq-commit adds it."
+
+
+def agent_name() -> str:
+    agent = os.environ.get("AI_AGENT", "")
+    if agent.startswith("claude-code"):
+        return "Claude Code"
+    if os.environ.get("CODEX_THREAD_ID"):
+        return "Codex"
+    return agent
+
+
+def co_author_line(flag: str | None) -> tuple[str, str]:
+    if flag is not None:
+        line, source = flag, "--co-author"
+    elif os.environ.get("CTLHQ_CO_AUTHOR"):
+        line, source = os.environ["CTLHQ_CO_AUTHOR"], "CTLHQ_CO_AUTHOR"
+    else:
+        agent = agent_name()
+        raise CoAuthorError(
+            f"no Co-Authored-By line: the message has none, and there is no --co-author and no CTLHQ_CO_AUTHOR"
+            + (f" (agent: {agent})" if agent else ""),
+            CO_AUTHOR_WHY + " The line names the model that made the commit, and only the agent knows its model.",
+            "add the Co-Authored-By line your agent gives for its current model to the message, or pass --co-author "
+            '"Co-Authored-By: Name <email>".')
+    if not CO_AUTHOR_RE.match(line):
+        raise CoAuthorError(f"the co-author line from {source} is {line!r}, not the shape {CO_AUTHOR_SHAPE!r}",
+                            "git and GitHub read the trailer only in that exact one-line shape.",
+                            f'fix {source} to "Co-Authored-By: Name <email>", for example "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>".')
+    return line, source
+
+
+def add_trailer(message: str, line: str) -> str:
+    body = message.rstrip("\n")
+    last = body.split("\n\n")[-1].split("\n")
+    if "\n\n" in body and all(TRAILER_LINE_RE.match(l) for l in last):
+        return f"{body}\n{line}\n"
+    return f"{body}\n\n{line}\n"
+
+
+def git(args: list[str]) -> subprocess.CompletedProcess:
+    # surrogateescape keeps file names that are not UTF-8 intact on the way back to git.
+    return subprocess.run(["git"] + args, capture_output=True, encoding="utf-8", errors="surrogateescape")
+
+
+def lit(args: list[str]) -> subprocess.CompletedProcess:
+    """git with every pathspec read as a plain path, so a named 'src/*.py' or ':/' matches only that name."""
+    return git(["--literal-pathspecs"] + args)
+
+
+def gate_tree(gate: str, root: Path) -> tuple[str | None, str | None]:
+    """The tree ID the gate's green run tested, or None and the reason there is none."""
+    path = root / ".local" / "gate" / f"{gate}.tree"
+    if not path.is_file():
+        return None, f"no file .local/gate/{gate}.tree, so nothing shows which tree the gate tested"
+    record = dict(l.split(" ", 1) for l in path.read_text(encoding="utf-8", errors="replace").splitlines() if " " in l)
+    if "error" in record:
+        return None, f"the gate could not record its tree: {record['error']}"
+    if "tree" not in record:
+        return None, f".local/gate/{gate}.tree has no tree line, so it was written by an older ctlhq-run-gate"
+    if record.get("exit") != "0":
+        return None, f".local/gate/{gate}.tree says exit {record.get('exit', '(none)')}, so .local/gate/{gate}.exit comes from another run"
+    return record["tree"], None
+
+
+def tree_now() -> tuple[str | None, str | None]:
+    r = subprocess.run([sys.executable, str(RUN_GATE), "--tree"], capture_output=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        return None, f"`ctlhq-run-gate --tree` failed (exit {r.returncode}): {r.stderr.strip()}"
+    return r.stdout.strip(), None
+
+
+def refuse_gate(gate: str, reason: str, meta_line: str, listed: list[str] | None = None,
+                why: str = "a change after the gate started was never checked.", fix: str = "") -> int:
+    print(f"ctlhq-commit: gate {gate}: exit 0, but {reason}; refusing to commit", file=sys.stderr)
+    for n in listed or []:
+        print(f"  {n}", file=sys.stderr)
+    print(f"why: a gate result proves only the tree it tested, and {why}", file=sys.stderr)
+    print(f"fix: {fix}rerun `{rerun_line(gate, meta_line)}`, then run ctlhq-commit again.", file=sys.stderr)
+    print(f"gate {gate} meta: {meta_line}", file=sys.stderr)
+    return 3
+
+
+def base_tree() -> str:
+    """HEAD's tree, or the empty tree before the first commit."""
+    head = git(["rev-parse", "--verify", "-q", "HEAD^{tree}"])
+    return head.stdout.strip() if head.returncode == 0 else git(["hash-object", "-t", "tree", "/dev/null"]).stdout.strip()
+
+
+def top_relative(p: str, root: Path, prefix: str) -> str:
+    if os.path.isabs(p):
+        parent, name = os.path.split(os.path.normpath(p))
+        return os.path.normpath(os.path.join(os.path.relpath(os.path.realpath(parent), root.resolve()), name))
+    return os.path.normpath(os.path.join(prefix, p))
+
+
+def covered(path: str, named: list[str]) -> bool:
+    """Whether a top-relative path is a named path or inside a named folder."""
+    return any(n == "." or path == n or path.startswith(n + "/") for n in named)
+
+
+def unnamed_staged(named: list[str]) -> list[str]:
+    """Paths staged against HEAD (or the empty tree before the first commit) that no named path covers."""
+    r = git(["diff", "--cached", "--name-only", "-z", "--no-renames", "--no-relative", "--ignore-submodules=none", base_tree()])
+    if r.returncode != 0:
+        raise OSError(f"git diff --cached failed (exit {r.returncode}): {r.stderr.strip()}")
+    return [s for s in r.stdout.split("\0") if s and not covered(s, named)]
+
+
+def refuse_unnamed(what: str, listed: list[str]) -> int:
+    print(f"ctlhq-commit: {what}; refusing to commit:", file=sys.stderr)
+    for n in listed:
+        print(f"  {n}", file=sys.stderr)
+    print("why: git commit takes the whole index, so these changes would go in unnamed, and no gate checked the staged copy.", file=sys.stderr)
+    print("fix: name them after --, or unstage them with `git reset -q -- <path>`, then run ctlhq-commit again.", file=sys.stderr)
+    return 3
+
+
+def tree_diff(a: str, b: str, status: bool = False) -> list[str]:
+    """Paths whose entry (mode and object ID, or presence) differs between trees a and b."""
+    r = git(["diff-tree", "-r", "-z", "--no-renames", "--ignore-submodules=none",
+             "--name-status" if status else "--name-only", a, b])
+    if r.returncode != 0:
+        raise OSError(f"git diff-tree {a[:12]} {b[:12]} failed (exit {r.returncode}): {r.stderr.strip()}")
+    fields = [f for f in r.stdout.split("\0") if f]
+    return [f"{fields[i]} {fields[i + 1]}" for i in range(0, len(fields), 2)] if status else fields
+
+
+class Index:
+    """The user's index as it was before staging, to put back byte for byte when the run refuses."""
+
+    def __init__(self) -> None:
+        self.path = Path(git(["rev-parse", "--path-format=absolute", "--git-path", "index"]).stdout.strip())
+        self.saved = self.path.read_bytes() if self.path.is_file() else None
+
+    def restore(self) -> None:
+        if (self.path.read_bytes() if self.path.is_file() else None) == self.saved:
+            return
+        lock = self.path.with_name(self.path.name + ".lock")
+        try:
+            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except OSError as e:
+            print(f"ctlhq-commit: the index still holds the named paths staged; restoring it failed: {e}", file=sys.stderr)
+            return
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(self.saved or b"")
+            if self.saved is None:
+                self.path.unlink(missing_ok=True)
+                lock.unlink()
+            else:
+                os.replace(lock, self.path)
+        except OSError as e:
+            lock.unlink(missing_ok=True)
+            print(f"ctlhq-commit: the index still holds the named paths staged; restoring it failed: {e}", file=sys.stderr)
+
+
+def rerun_line(gate: str, meta_line: str) -> str:
+    fields = meta_line.split("\t")
+    command = fields[3] if len(fields) >= 4 else "<check command>"
+    name = "" if gate == "gate" else f"--name {shlex.quote(gate)} "
+    return f"ctlhq-run-gate {name}-- {command}"
+
+
+def signature_state() -> str:
+    cat = git(["cat-file", "commit", "HEAD"]).stdout
+    headers = cat.split("\n\n", 1)[0]
+    has_sig = any(line.startswith("gpgsig") for line in headers.split("\n"))
+    r = git(["log", "--show-signature", "-1", "--format=%G?"])
+    lines = [l.strip() for l in (r.stdout or "").split("\n") if l.strip()]
+    code = lines[-1] if lines and lines[-1] in SIG_CODES else ""
+    if code in ("G", "U"):
+        return "signed"
+    if not has_sig and code in ("N", ""):
+        return "unsigned"
+    if has_sig:
+        return f"unknown (signature present, git %G? = {code or '?'}: {SIG_CODES.get(code, 'no verdict')})"
+    return f"unknown (no gpgsig header, git %G? = {code})"
+
+
+def committed_at() -> str | None:
+    ct = git(["log", "-1", "--format=%ct"]).stdout.strip()
+    if not ct.isdigit():
+        return None
+    return datetime.datetime.fromtimestamp(int(ct), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def write_receipt(root: Path, receipt: dict) -> str:
+    r = git(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    common = Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+    base = common.parent if common is not None and common.name == ".git" else root
+    folder = base / ".local" / "commits"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{receipt['hash']}.json"
+    path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def main(argv: list[str]) -> int:
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+    sys.stdout.reconfigure(errors="backslashreplace")
+    gate: str | None = None
+    subject = why = changes = test_plan = risks = None
+    message_file: str | None = None
+    co_author: str | None = None
+    allow_dirty = False
+    paths: list[str] | None = None
+    valued = {"--gate", "--subject", "--why", "--changes", "--test-plan", "--risks", "--message-file", "--co-author"}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            paths = argv[i + 1:]
+            break
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a in valued:
+            if i + 1 >= len(argv):
+                return usage(f"{a} needs a value")
+            val = argv[i + 1]
+            if a == "--gate":
+                if not NAME_RE.match(val):
+                    return usage(f"--gate {val!r}: use letters, digits, '.', '-', '_' only")
+                gate = val
+            elif a == "--subject":
+                subject = val
+            elif a == "--why":
+                why = val
+            elif a == "--changes":
+                changes = val
+            elif a == "--test-plan":
+                test_plan = val
+            elif a == "--risks":
+                risks = val
+            elif a == "--co-author":
+                co_author = val
+            else:
+                message_file = val
+            i += 2
+            continue
+        if a == "--allow-dirty":
+            allow_dirty = True
+            i += 1
+            continue
+        return usage(f"unknown option {a!r} (paths go after --)")
+
+    # 1. paths by name
+    if paths is None:
+        return usage("missing -- before the paths")
+    if not paths:
+        return usage("no paths after --; git add is by name, never -A or .")
+    for p in paths:
+        if p in (".", "..", "-A", "--all", "*") or p.startswith("-"):
+            return usage(f"refusing path {p!r}; git add is by name, never -A or .")
+
+    # message inputs
+    flags = [("--subject", subject), ("--why", why), ("--changes", changes), ("--test-plan", test_plan), ("--risks", risks)]
+    if message_file is not None:
+        given = [f for f, v in flags if v is not None]
+        if given:
+            return usage(f"--message-file excludes {', '.join(given)}")
+        try:
+            message = Path(message_file).read_text(encoding="utf-8")
+        except OSError as e:
+            return usage(f"cannot read --message-file {message_file}: {e.strerror or e}")
+        if not message.strip():
+            return usage(f"--message-file {message_file} is empty")
+    else:
+        missing = [f for f, v in flags if v is None]
+        if missing:
+            return usage(f"missing {', '.join(missing)}; or pass --message-file FILE")
+        empty = [f for f, v in flags if not (v or "").strip()]
+        if empty:
+            return usage(f"empty text for {', '.join(empty)}")
+        assert subject is not None and why is not None and changes is not None and test_plan is not None and risks is not None
+        if "\n" in subject.strip():
+            return usage("--subject must be one line")
+        sections = [("Why:", why), ("Changes:", changes), ("Test Plan:", test_plan), ("Risks:", risks)]
+        message = subject.strip() + "\n\n" + "\n\n".join(f"{h}\n{t.strip()}" for h, t in sections) + "\n"
+
+    # co-author trailer
+    if HAS_CO_AUTHOR_RE.search(message):
+        co_author_note = "co-author: kept the message's own Co-Authored-By line"
+    else:
+        try:
+            line, source = co_author_line(co_author)
+        except CoAuthorError as e:
+            print(f"ctlhq-commit: {e.what}\nwhy: {e.why}\nfix: {e.fix}", file=sys.stderr)
+            return 5
+        message = add_trailer(message, line)
+        co_author_note = f"co-author: {line} (from {source})"
+
+    # repository
+    r = git(["rev-parse", "--show-toplevel"])
+    if r.returncode != 0 or not r.stdout.strip():
+        print(f"ctlhq-commit: not inside a git work tree: {Path.cwd()}", file=sys.stderr)
+        return 1
+    root = Path(r.stdout.strip())
+
+    # 2. gate
+    gate_record = None
+    if gate is None:
+        print("gate: not checked (no --gate)")
+    else:
+        exit_path = root / ".local" / "gate" / f"{gate}.exit"
+        meta_path = root / ".local" / "gate" / f"{gate}.meta"
+        meta_line = meta_path.read_text(encoding="utf-8", errors="replace").strip() if meta_path.is_file() else "(no .meta line)"
+        if not exit_path.is_file():
+            print(f"ctlhq-commit: gate {gate}: no file .local/gate/{gate}.exit; run `ctlhq-run-gate --name {gate} -- <command>` first", file=sys.stderr)
+            return 3
+        found = exit_path.read_text(encoding="utf-8", errors="replace").strip()
+        if found != "0":
+            print(f"ctlhq-commit: gate {gate}: exit {found or '(empty)'}, not 0; refusing to commit", file=sys.stderr)
+            print(f"gate {gate} meta: {meta_line}", file=sys.stderr)
+            return 3
+        tested, why_none = gate_tree(gate, root)
+        if tested is None:
+            return refuse_gate(gate, why_none, meta_line)
+        gate_record = {"name": gate, "exit": 0, "meta": meta_line}
+
+    # 3. message file
+    commit_dir = root / ".local" / "commit"
+    commit_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    msg_path = commit_dir / f"{stamp}.txt"
+    n = 1
+    while msg_path.exists():
+        n += 1
+        msg_path = commit_dir / f"{stamp}-{n}.txt"
+    msg_path.write_text(message if message.endswith("\n") else message + "\n", encoding="utf-8")
+    try:
+        rel_msg = msg_path.relative_to(root).as_posix()
+    except ValueError:
+        rel_msg = str(msg_path)
+    print(f"message file: {rel_msg}")
+    print(co_author_note)
+
+    # 5. stage each named path, deletions included
+    on_disk = [p for p in paths if os.path.lexists(p)]
+    gone = [p for p in paths if p not in on_disk]
+    missing = [p for p in gone if lit(["ls-files", "--error-unmatch", "--", p]).returncode != 0
+               and not lit(["ls-tree", "-r", "--name-only", "HEAD", "--", p]).stdout.strip()]
+    if missing:
+        print(f"ctlhq-commit: {', '.join(missing)}: not on disk and not tracked by git, so there is nothing to stage", file=sys.stderr)
+        print("fix: check the spelling, or drop the path from the list after --. Paths are names, never patterns.", file=sys.stderr)
+        return 1
+    prefix = git(["rev-parse", "--show-prefix"]).stdout.strip()
+    named = [top_relative(p, root, prefix) for p in paths]
+    try:
+        stray = unnamed_staged(named)
+    except OSError as e:
+        print(f"ctlhq-commit: {e}", file=sys.stderr)
+        return 1
+    if stray:
+        return refuse_unnamed("the index holds staged changes outside the named paths", stray)
+    index = Index()
+    head_before = git(["rev-parse", "-q", "--verify", "HEAD"]).stdout.strip() or None
+
+    def undo(code: int) -> int:
+        index.restore()
+        return code
+
+    try:
+        if on_disk:
+            r = lit(KEEP_SHARED + ["add", "-A", "--"] + on_disk)
+            if r.returncode != 0:
+                sys.stderr.write(r.stderr)
+                print(f"ctlhq-commit: git add failed (exit {r.returncode})", file=sys.stderr)
+                return undo(1)
+        if gone:
+            r = lit(KEEP_SHARED + ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"] + gone)
+            if r.returncode != 0:
+                sys.stderr.write(r.stderr)
+                print(f"ctlhq-commit: git rm --cached failed (exit {r.returncode})", file=sys.stderr)
+                return undo(1)
+        if gate is not None:
+            now, why_none = tree_now()
+            if now is None or now != tested:
+                return undo(refuse_gate(gate, why_none or f"the files on disk differ from the ones it tested (tree {tested[:12]} then, {now[:12]} now)", meta_line))
+        r = git(KEEP_SHARED + ["write-tree"])
+        if r.returncode != 0:
+            sys.stderr.write(r.stderr)
+            print(f"ctlhq-commit: git write-tree failed (exit {r.returncode}), so the index cannot be committed", file=sys.stderr)
+            return undo(1)
+        staged_tree = r.stdout.strip()
+        try:
+            changed = tree_diff(base_tree(), staged_tree)
+        except OSError as e:
+            print(f"ctlhq-commit: {e}", file=sys.stderr)
+            return undo(1)
+        outside = [p for p in changed if not covered(p, named)]
+        if outside:
+            return undo(refuse_unnamed("the commit would change paths outside the named paths", outside))
+        if gate is not None:
+            reference = tested
+        else:
+            reference, why_none = tree_now()
+            if reference is None:
+                print(f"ctlhq-commit: cannot compare the commit with the files on disk: {why_none}; refusing to commit", file=sys.stderr)
+                print("why: without that comparison, a staged copy that differs from the file on disk would go in unseen.", file=sys.stderr)
+                print("fix: clear the cause above, then run ctlhq-commit again.", file=sys.stderr)
+                return undo(3)
+        try:
+            unseen = set(tree_diff(staged_tree, reference))
+        except OSError as e:
+            print(f"ctlhq-commit: {e}", file=sys.stderr)
+            return undo(1)
+        differ = [p for p in changed if p in unseen]
+        if differ and gate is not None:
+            return undo(refuse_gate(
+                gate, "the commit would hold content for these paths that differs from the tree it tested", meta_line, differ,
+                why="git commit takes each path's staged copy, which differs here from the file the gate tested.",
+                fix=MARKS_FIX + "or ",
+            ))
+        if differ:
+            print("ctlhq-commit: the commit would hold content for these paths that differs from the files on disk; refusing to commit:", file=sys.stderr)
+            for n in differ:
+                print(f"  {n}", file=sys.stderr)
+            print("why: git commit takes each path's staged copy, which differs here from the file on disk, so nobody has seen what would be committed.", file=sys.stderr)
+            print(f"fix: {MARKS_FIX}then run ctlhq-commit again.", file=sys.stderr)
+            return undo(3)
+        if gate is not None:
+            print(f"gate {gate}: exit 0 on this tree ({meta_line})")
+        r = git(KEEP_SHARED + ["commit", "-F", str(msg_path)])
+        if r.returncode != 0:
+            sys.stderr.write(r.stdout)
+            sys.stderr.write(r.stderr)
+            print(f"ctlhq-commit: git commit failed (exit {r.returncode})", file=sys.stderr)
+            return undo(1)
+    except BaseException:
+        # Once HEAD has moved, the index belongs to the new commit and must stay.
+        if (git(["rev-parse", "-q", "--verify", "HEAD"]).stdout.strip() or None) == head_before:
+            index.restore()
+        raise
+
+    full = git(["rev-parse", "HEAD"]).stdout.strip()
+    subj = git(["log", "-1", "--format=%s"]).stdout.strip()
+    dirty = [l for l in git(["status", "--porcelain"]).stdout.split("\n") if l.strip()]
+    named_dirty = [l for l in lit(["status", "--porcelain", "--"] + paths).stdout.split("\n") if l.strip()]
+    try:
+        hooked = tree_diff(staged_tree, git(["rev-parse", "HEAD^{tree}"]).stdout.strip(), status=True)
+    except OSError as e:
+        hooked = [f"? (cannot compare: {e})"]
+    signature = signature_state()
+    print(f"hash: {full}")
+    print(f"subject: {subj}")
+    print(f"signature: {signature}")
+    receipt = {
+        "hash": full,
+        "subject": subj,
+        "branch": git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip() or None,
+        "committed_at": committed_at(),
+        "paths": paths,
+        "message_file": rel_msg,
+        "co_author": co_author_note,
+        "signature": signature,
+        "tree": "changed by a hook" if hooked else "named paths not committed" if named_dirty else ("dirty" if dirty else "clean"),
+        "dirty_paths": named_dirty or dirty,
+        "hook_changed": hooked,
+        "gate": gate_record,
+        "exit": 1 if hooked or named_dirty or (dirty and not allow_dirty) else 0,
+    }
+    try:
+        print(f"receipt: {write_receipt(root, receipt)}")
+    except OSError as e:
+        print(f"receipt: not written ({e}); the commit {full[:12]} exists, its receipt is missing", file=sys.stderr)
+    if hooked or named_dirty:
+        if hooked:
+            print(f"ctlhq-commit: the commit {full[:12]} exists, but it differs from the index ctlhq-commit checked just before git commit:", file=sys.stderr)
+            for l in hooked:
+                print(f"  {l}", file=sys.stderr)
+        if named_dirty:
+            print(f"ctlhq-commit: the commit {full[:12]} exists, but {len(named_dirty)} named path{'s are' if len(named_dirty) != 1 else ' is'} not committed:", file=sys.stderr)
+            for l in named_dirty:
+                print(f"  {l}", file=sys.stderr)
+        print("why: a hook or another process changed the index or the files during git commit, so no gate checked what was committed; --allow-dirty never accepts this.", file=sys.stderr)
+        parent = git(["rev-parse", "-q", "--verify", "HEAD^"]).stdout.strip() or None
+        if parent == head_before:
+            undo_cmd = "git reset --soft HEAD~1" if head_before else "git update-ref -d HEAD"
+            undo_text = f"Check it with `git show --stat {full[:12]}` and undo it with `{undo_cmd}` if it is wrong"
+        elif head_before:
+            b = head_before[:12]
+            undo_text = (f"HEAD's parent is not {b}, the commit HEAD named before this run, so another commit was made too (a hook "
+                         f"can do this). Check `git log {b}..HEAD`, and go back with `git reset --soft {b}` only if every commit after {b} is wrong")
+        else:
+            undo_text = ("This run made the first commit, but HEAD has a parent, so another commit was made too (a hook can do this). "
+                         "Check `git log` before you undo anything")
+        print(f"fix: the commit {full[:12]} exists. {undo_text}; then check the repository's hooks and run ctlhq-commit again.", file=sys.stderr)
+        return 1
+    if dirty:
+        tail = "accepted by --allow-dirty" if allow_dirty else "not clean"
+        print(f"tree: dirty ({len(dirty)} path{'s' if len(dirty) != 1 else ''}), {tail}")
+        for l in dirty:
+            print(f"  {l}")
+        if not allow_dirty:
+            print(f"ctlhq-commit: the commit {full[:12]} exists, but the tree is dirty afterwards; commit or restore those paths, or pass --allow-dirty", file=sys.stderr)
+            return 1
+    else:
+        print("tree: clean")
+    print(f"committed {full}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,1 @@
+{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":true,"endCursor":"cm9sbHVwOjE="},"nodes":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://example.invalid/run/2"}]}}}}]}}}}}

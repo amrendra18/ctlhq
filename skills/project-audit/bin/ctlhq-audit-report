@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""ctlhq-audit-report: check an audit report against the project-audit report contract, and print the round verdict.
+
+Usage:
+  ctlhq-audit-report check REPORT.md
+
+Commands:
+  check   print the rounds table and the verdict computed from section 11, then refuse a
+          report that breaks the mechanical parts of the contract
+          (skills/project-audit/references/report-contract.md):
+            1. all 11 section headings exist with this exact text after "## <n>. ":
+               Audit frame, Executive result, Product and system map, Findings,
+               Simplification and removal plan, Test and evidence portfolio, Coverage
+               ledger, Open questions and limits, Ordered action plan, Lens scorecard,
+               Rounds and stop
+            2. section 4 opens with the findings index, columns
+               | # | ID | Title | Severity | Fix kind | Route |
+               Severity is critical, high, medium, or low. Fix kind is remove, change,
+               or add. Route is fix, milestone, decision, or record.
+            3. each index ID has a "### <ID>" block whose Severity line matches the index
+            4. only an add fix is routed to milestone, and an add fix is never routed to fix
+            5. record (kept for later) is only for a low finding
+            6. each finding routed to decision is named in section 8
+            7. section 11 holds a Grant line: "Grant: none" (a read-only request) or
+               "Grant: fixes (<PLAN.md approval row or approved GOAL.md>)"
+            8. with "Grant: fixes", section 11 holds a Bar line that names high and medium
+               only; a bar on low findings, or "0 findings", is refused
+            9. the rounds table numbers rounds 1, 2, 3 ...; each row has a commit;
+               Serious equals critical plus high plus medium; the last row equals the
+               index counts
+           10. the Verdict line equals the computed verdict:
+                 report only                 Grant: none, whatever the counts
+                 bar met                     0 critical, high and medium at or under the bar
+                 stop and go to the operator the serious count failed to fall 2 rounds in a row
+                 continue                    otherwise: fix, then run the next round
+               "Failed to fall" means the count stayed the same or rose. Example: serious
+               counts 14, 16, 9 continue (round 3 fell); 9, 9, 10 stop.
+
+Section 11 shape (illustration, not evidence):
+  Grant: fixes (PLAN.md section 10, row 12)
+  Bar: 0 high, 0 medium. Critical counts as high.
+  | # | Commit | Critical | High | Medium | Low | Serious |
+  |---|---|---|---|---|---|---|
+  | 1 | 647fa53 | 0 | 2 | 12 | 21 | 14 |
+  Verdict: continue
+
+Read-only: it reads REPORT.md and writes nothing. Why: in past audit loops a bar of "0
+findings of any severity" never ended, because fresh reviewers probe deeper each round, and
+severity grading moved between rounds.
+
+Exit 0 when the report holds the contract, 1 when it does not, 2 on a usage error or an
+unreadable file. Each problem prints three lines: "<file>:<line>: <what is wrong>",
+"why: ...", "fix: ...".
+"""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+SECTIONS = ["Audit frame", "Executive result", "Product and system map", "Findings",
+            "Simplification and removal plan", "Test and evidence portfolio", "Coverage ledger",
+            "Open questions and limits", "Ordered action plan", "Lens scorecard", "Rounds and stop"]
+INDEX_COLS = ["#", "ID", "Title", "Severity", "Fix kind", "Route"]
+ROUND_COLS = ["#", "Commit", "Critical", "High", "Medium", "Low", "Serious"]
+SEVERITIES = ("critical", "high", "medium", "low")
+FIX_KINDS = ("remove", "change", "add")
+ROUTES = ("fix", "milestone", "decision", "record")
+CONTRACT = "skills/project-audit/references/report-contract.md"
+
+
+class Problems:
+    def __init__(self, path: str):
+        self.path = path
+        self.items: list[tuple[int, str, str, str]] = []
+
+    def add(self, line: int, what: str, why: str, fix: str) -> None:
+        self.items.append((line, what, why, fix))
+
+    def print(self) -> None:
+        for line, what, why, fix in self.items:
+            print(f"{self.path}:{line}: {what}")
+            print(f"  why: {why}")
+            print(f"  fix: {fix}")
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-audit-report: {msg}", file=sys.stderr)
+    print("why: the command needs the subcommand check and one report file", file=sys.stderr)
+    print("fix: ctlhq-audit-report check REPORT.md   (--help lists every rule)", file=sys.stderr)
+    return 2
+
+
+def headings(lines: list[str]) -> dict[str, int]:
+    """Map each contract section name to the 0-based line of its "## " heading."""
+    found: dict[str, int] = {}
+    for i, raw in enumerate(lines):
+        m = re.match(r"^##\s+(?:\d+\.\s*)?(.+?)\s*$", raw)
+        if m:
+            for name in SECTIONS:
+                if m.group(1).lower() == name.lower() and name not in found:
+                    found[name] = i
+    return found
+
+
+def section_span(lines: list[str], heads: dict[str, int], name: str) -> tuple[int, int]:
+    start = heads[name]
+    for j in range(start + 1, len(lines)):
+        if re.match(r"^##\s", lines[j]):
+            return start, j
+    return start, len(lines)
+
+
+def cells(raw: str) -> list[str]:
+    s = raw.strip()
+    s = s[1:] if s.startswith("|") else s
+    s = s[:-1] if s.endswith("|") else s
+    return [c.strip() for c in s.split("|")]
+
+
+def first_table(lines: list[str], start: int, end: int):
+    """The first Markdown table between start and end: (header line, header cells, [(line, cells)])."""
+    for i in range(start, end - 1):
+        if lines[i].lstrip().startswith("|") and re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i + 1]):
+            rows = []
+            j = i + 2
+            while j < end and lines[j].lstrip().startswith("|"):
+                rows.append((j, cells(lines[j])))
+                j += 1
+            return i, cells(lines[i]), rows
+    return None
+
+
+def labelled(lines: list[str], start: int, end: int, label: str) -> tuple[int, str] | None:
+    """The first "<label>: value" line (bold or bulleted allowed) in the span: (0-based line, value)."""
+    for i in range(start, end):
+        m = re.match(rf"^\s*(?:[-*]\s*)?\*{{0,2}}{label}(?::\*{{0,2}}|\*{{0,2}}:)\s*(.*?)\s*$", lines[i], re.I)
+        if m:
+            return i, m.group(1).strip().strip("*").strip()
+    return None
+
+
+def parse_rounds(lines: list[str], heads: dict[str, int], probs: Problems) -> dict | None:
+    """Read section 11: grant, bar, rounds table, stated verdict. Adds problems; None when absent."""
+    if "Rounds and stop" not in heads:
+        return None
+    start, end = section_span(lines, heads, "Rounds and stop")
+    out: dict = {"grant": None, "bar": None, "rows": [], "verdict": None, "verdict_line": start + 1}
+    grant = labelled(lines, start, end, "Grant")
+    if grant is None:
+        probs.add(start + 1, "section 11 has no Grant line",
+                  "the grant decides whether the agent may fix anything after the report",
+                  'add "Grant: none" for a read-only request, or "Grant: fixes (<PLAN.md approval row or approved GOAL.md>)"')
+    elif re.match(r"none\b", grant[1], re.I):
+        out["grant"] = "none"
+    elif re.match(r"fixes\b", grant[1], re.I):
+        out["grant"] = "fixes"
+    else:
+        probs.add(grant[0] + 1, f"the Grant line says '{grant[1]}'",
+                  "the grant is none (read-only) or fixes, so the verdict can be computed",
+                  'write "Grant: none" or "Grant: fixes (<PLAN.md approval row or approved GOAL.md>)"')
+    bar = labelled(lines, start, end, "Bar")
+    if bar is None and out["grant"] == "fixes":
+        probs.add(start + 1, "section 11 has no Bar line",
+                  "the stop rule is written before round 1, so every round is judged against the same bar",
+                  'add the line "Bar: 0 high, 0 medium. Critical counts as high."')
+    elif bar is not None:
+        line, text = bar
+        if re.search(r"\d+\s+lows?\b|any severity|all findings|\b0 findings\b|no findings", text, re.I):
+            probs.add(line + 1, "the bar counts low findings or all findings",
+                      "fresh reviewers probe deeper each round, so low findings never reach 0 and the loop never ends "
+                      "(first-commit's audit rounds found 21, 23, 23, 23, 26, 17 low findings)",
+                      'write "Bar: 0 high, 0 medium"; low findings are recorded and fixed when cheap')
+        m = re.search(r"(\d+)\s+high\W+(\d+)\s+medium", text, re.I)
+        if m:
+            out["bar"] = (int(m.group(1)), int(m.group(2)))
+        else:
+            probs.add(line + 1, "the Bar line does not read as '<n> high, <n> medium'",
+                      "the verdict is computed from the bar, so it must name both numbers",
+                      'write "Bar: 0 high, 0 medium" (the default bar)')
+    tab = first_table(lines, start, end)
+    if tab is None:
+        probs.add(start + 1, "section 11 has no rounds table",
+                  "the verdict compares the serious count across rounds, so every round needs its row",
+                  "add | " + " | ".join(ROUND_COLS) + " | with one row per round, round 1 first")
+    else:
+        hl, head, rows = tab
+        if [h.lower() for h in head] != [c.lower() for c in ROUND_COLS]:
+            probs.add(hl + 1, "the rounds table columns are " + " | ".join(head),
+                      "the counts are read by column, so the columns are fixed",
+                      "use | " + " | ".join(ROUND_COLS) + " |")
+            rows = []
+        elif not rows:
+            probs.add(hl + 1, "the rounds table has no rows", "the current round's counts are the last row",
+                      "add a row for this round")
+        for n, (ln, row) in enumerate(rows, 1):
+            if (len(row) != len(ROUND_COLS) or not re.fullmatch(r"\S+", row[1])
+                    or not all(re.fullmatch(r"\d+", c) for c in [row[0]] + row[2:])):
+                probs.add(ln + 1, "a rounds row is not '| n | commit | 5 whole numbers |'",
+                          "every round names the commit it audited, and every count is a whole number",
+                          "fill the commit hash and write each count as a number, 0 included")
+                continue
+            num, crit, high, med, low, serious = int(row[0]), *[int(c) for c in row[2:]]
+            if num != n:
+                probs.add(ln + 1, f"round number {num}, expected {n}",
+                          "rounds are numbered 1, 2, 3 in order, so 'two rounds in a row' is well defined",
+                          f"renumber this row to {n}")
+            if serious != crit + high + med:
+                probs.add(ln + 1, f"Serious is {serious}, but critical plus high plus medium is {crit + high + med}",
+                          "the stop rule reads the Serious column, so it must be the sum",
+                          f"write {crit + high + med} in the Serious column")
+            out["rows"].append({"line": ln + 1, "round": n, "commit": row[1], "critical": crit, "high": high,
+                                "medium": med, "low": low, "serious": crit + high + med})
+    v = labelled(lines, start, end, "Verdict")
+    if v:
+        out["verdict_line"], out["verdict"] = v[0] + 1, v[1].rstrip(".").lower()
+    return out
+
+
+def verdict(rounds: dict) -> tuple[str, str] | None:
+    """(verdict, reason) from the grant, the bar, and the rounds rows; None when they are incomplete."""
+    rows = rounds["rows"]
+    if rounds["grant"] == "none":
+        return "report only", "Grant: none, so the audit ends at the report whatever the counts"
+    if rounds["grant"] != "fixes" or not rows or rounds["bar"] is None:
+        return None
+    last = rows[-1]
+    bar_high, bar_med = rounds["bar"]
+    if last["critical"] == 0 and last["high"] <= bar_high and last["medium"] <= bar_med:
+        return "bar met", (f"round {last['round']}: 0 critical, {last['high']} high (bar {bar_high}), "
+                           f"{last['medium']} medium (bar {bar_med})")
+    if len(rows) >= 3:
+        a, b, c = (r["serious"] for r in rows[-3:])
+        if b >= a and c >= b:
+            return "stop and go to the operator", (f"the serious count failed to fall 2 rounds in a row: "
+                                                   f"{a}, {b}, {c} (rounds {rows[-3]['round']} to {last['round']})")
+    return "continue", f"round {last['round']}: serious count {last['serious']}; fix, then run round {last['round'] + 1}"
+
+
+def print_rounds(rounds: dict, computed: tuple[str, str]) -> None:
+    print("| # | Commit | Critical | High | Medium | Low | Serious | Change |")
+    print("|---|---|---|---|---|---|---|---|")
+    prev = None
+    for r in rounds["rows"]:
+        change = ("first round" if prev is None else
+                  f"fell by {prev - r['serious']}" if r["serious"] < prev else "did not fall")
+        print(f"| {r['round']} | {r['commit']} | {r['critical']} | {r['high']} | {r['medium']} | {r['low']} "
+              f"| {r['serious']} | {change} |")
+        prev = r["serious"]
+    print(f"Verdict: {computed[0]}")
+    print(f"why: {computed[1]}")
+
+
+def check_index(lines: list[str], heads: dict[str, int], probs: Problems) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    start, end = section_span(lines, heads, "Findings")
+    tab = first_table(lines, start, end)
+    if tab is None:
+        probs.add(start + 1, "section 4 has no findings index table",
+                  "the index carries severity, fix kind, and route for every finding in one place",
+                  "add | " + " | ".join(INDEX_COLS) + " | before the finding blocks (a header with no rows when there are 0 findings)")
+        return index
+    hl, head, rows = tab
+    if [h.lower() for h in head] != [c.lower() for c in INDEX_COLS]:
+        missing = [c for c in INDEX_COLS if c.lower() not in [h.lower() for h in head]]
+        probs.add(hl + 1, "the findings index columns are " + " | ".join(head)
+                  + (f" (missing: {', '.join(missing)})" if missing else ""),
+                  "the fix kind decides whether a fix is an audit fix or a new milestone, "
+                  "and the route says what happens next",
+                  "use | " + " | ".join(INDEX_COLS) + " |")
+        return index
+    for ln, row in rows:
+        if len(row) != len(INDEX_COLS):
+            probs.add(ln + 1, f"the index row has {len(row)} cells, expected {len(INDEX_COLS)}",
+                      "each column is read by position", "fill every cell")
+            continue
+        fid, sev, kind, route = row[1].strip("`"), row[3].lower(), row[4].lower().strip("`"), row[5].lower().strip("`")
+        if not re.fullmatch(r"[A-Z]+-\d{3,}", fid):
+            probs.add(ln + 1, f"finding ID '{fid}' is not like PA-001",
+                      "stable IDs let later rounds and decisions cite a finding", "use IDs like PA-001")
+        if fid in index:
+            probs.add(ln + 1, f"finding ID {fid} appears twice", "an ID names one finding",
+                      "merge the rows or give one a new ID")
+        if sev not in SEVERITIES:
+            probs.add(ln + 1, f"severity '{sev}' is not one of {', '.join(SEVERITIES)}",
+                      "the fixed scale keeps grading the same between rounds", "pick one of the four levels")
+        if kind not in FIX_KINDS:
+            probs.add(ln + 1, f"fix kind '{kind}' is not one of {', '.join(FIX_KINDS)}",
+                      "the fix kind decides whether the fix is an audit fix or a new milestone",
+                      "write remove, change, or add")
+        if route not in ROUTES:
+            probs.add(ln + 1, f"route '{route}' is not one of {', '.join(ROUTES)}",
+                      "the route says what happens to the finding after the report",
+                      "write fix, milestone, decision, or record")
+        if kind == "add" and route == "fix":
+            probs.add(ln + 1, f"{fid} adds behavior but is routed to fix",
+                      "a fix that adds a check, scan, mode, or rule is a feature with its own plan "
+                      "(otherwise each new scan turns into new findings)",
+                      "route it to milestone (a PLAN.md milestone row), or to decision when it is outside the accepted scope")
+        if route == "milestone" and kind in ("remove", "change"):
+            probs.add(ln + 1, f"{fid} is a {kind} fix but is routed to milestone",
+                      "a milestone is for an add fix; a remove or change fix is an audit fix",
+                      "route it to fix, or to decision when it needs kept authority")
+        if route == "record" and sev in ("critical", "high", "medium"):
+            probs.add(ln + 1, f"{fid} is {sev} but routed to record",
+                      "a critical, high, or medium finding keeps the loop running until it is fixed or decided",
+                      "route it to fix, milestone, or decision")
+        index[fid] = {"line": ln + 1, "severity": sev, "route": route}
+    heads_at = [(i, m.group(1)) for i in range(start, end)
+                for m in [re.match(r"^###\s+`?([A-Z]+-\d{3,})\b", lines[i])] if m]
+    blocks = {fid: (i, heads_at[k + 1][0] if k + 1 < len(heads_at) else end) for k, (i, fid) in enumerate(heads_at)}
+    for fid, row in index.items():
+        if fid not in blocks:
+            probs.add(row["line"], f"{fid} has no '### {fid}' finding block",
+                      "the block holds the evidence, impact, and validation for the index row",
+                      f"add '### {fid}: <title>' with the finding fields")
+            continue
+        b0, b1 = blocks[fid]
+        m = re.search(r"\*\*Severity:\*\*\s*`?([A-Za-z]+)", "\n".join(lines[b0:b1]))
+        if not m:
+            probs.add(b0 + 1, f"{fid} has no **Severity:** line", "every finding states its severity",
+                      f"add '**Severity:** {row['severity']}'")
+        elif m.group(1).lower() != row["severity"]:
+            probs.add(b0 + 1, f"{fid} block says Severity {m.group(1).lower()}, the index says {row['severity']}",
+                      "the block and the index must say the same thing", "make them match")
+    for fid, (b0, _) in blocks.items():
+        if fid not in index:
+            probs.add(b0 + 1, f"{fid} has a block but no index row",
+                      "the index is the full list the rounds count is checked against", f"add {fid} to the index")
+    return index
+
+
+def check(path: Path, lines: list[str]) -> int:
+    probs = Problems(str(path))
+    heads = headings(lines)
+    for n, name in enumerate(SECTIONS, 1):
+        if name not in heads:
+            probs.add(1, f'no "## {n}. {name}" heading',
+                      f"the report contract ({CONTRACT}) has 11 sections, so a reader finds each part in the same place",
+                      f'add the heading "## {n}. {name}" (exact text)')
+    index = check_index(lines, heads, probs) if "Findings" in heads else {}
+    if "Open questions and limits" in heads:
+        s8, e8 = section_span(lines, heads, "Open questions and limits")
+        text8 = "\n".join(lines[s8:e8])
+        for fid, row in index.items():
+            if row["route"] == "decision" and not re.search(rf"\b{re.escape(fid)}\b", text8):
+                probs.add(row["line"], f"{fid} is routed to decision but section 8 does not name it",
+                          "a finding that needs kept authority becomes a numbered decision for the operator",
+                          f"add a numbered decision in section 8 that names {fid}, with one recommendation")
+    rounds = parse_rounds(lines, heads, probs)
+    computed = verdict(rounds) if rounds else None
+    if rounds and rounds["rows"]:
+        last = rounds["rows"][-1]
+        for s in SEVERITIES:
+            count = sum(1 for r in index.values() if r["severity"] == s)
+            if last[s] != count:
+                probs.add(last["line"], f"the last round says {last[s]} {s}, the findings index holds {count}",
+                          "the current round's counts come from this report's findings",
+                          f"write {count} in the {s.capitalize()} column")
+    if computed:
+        print_rounds(rounds, computed)
+        if rounds["verdict"] is None:
+            probs.add(rounds["verdict_line"], "section 11 has no Verdict line",
+                      "the verdict says whether the loop ends, continues, or goes to the operator",
+                      f'add "Verdict: {computed[0]}"')
+        elif rounds["verdict"] != computed[0]:
+            probs.add(rounds["verdict_line"], f"the Verdict says '{rounds['verdict']}', the counts give '{computed[0]}'",
+                      "the verdict is computed from the grant, the bar, and the counts, never chosen",
+                      f'write "Verdict: {computed[0]}"')
+    if probs.items or not computed:
+        probs.print()
+        print(f"{len(probs.items)} problems; {path} does not hold the report contract ({CONTRACT})")
+        return 1
+    print(f"report contract holds: {len(index)} findings, verdict {computed[0]}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] in (["--help"], ["-h"]):
+        print(__doc__.strip())
+        return 0
+    if len(argv) != 2 or argv[0] != "check":
+        return usage("expected 'check REPORT.md', got: " + (" ".join(argv) or "nothing"))
+    path = Path(argv[1])
+    try:
+        lines = path.read_text(encoding="utf-8").split("\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"ctlhq-audit-report: cannot read {path}: {exc.__class__.__name__}", file=sys.stderr)
+        print("why: the command checks one Markdown report file", file=sys.stderr)
+        print("fix: pass the path of an existing UTF-8 report, for example .local/audit/round-1.md", file=sys.stderr)
+        return 2
+    return check(path, lines)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

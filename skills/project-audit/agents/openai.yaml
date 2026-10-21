@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Audit"
+  short_description: "Adversarial whole-project review"
+  default_prompt: "Use $project-audit to run a standard audit of this whole repository and report findings before making changes."

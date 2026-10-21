@@ -1,0 +1,16 @@
+.local/
+node_modules/
+.DS_Store
+*.log
+__pycache__/
+*.pyc
+/PLAN.md
+/BLOCKED.md
+.env
+.env.*
+.idea/
+.vscode/
+*.swp
+*~
+.venv/
+.claude/settings.local.json

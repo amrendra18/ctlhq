@@ -1,0 +1,22 @@
+# Recipe for bin/ctlhq-env. Keys: see `bin/ctlhq-env --help`, section "Recipes".
+name = "macos-clean"
+summary = "Fresh macOS 15 user account for install and first-run tests"
+provider = "tart"
+guest = "macos"
+image = "ghcr.io/cirruslabs/macos-sequoia-base:latest"
+cpu = 4
+memory_mb = 8192
+disk_gb = 80
+network = "shared"
+user = "admin"
+root = true
+snapshot_before_risky = true
+screenshot_cmd = "screencapture -x -t png /tmp/ctlhq-env-screen.png && base64 -i /tmp/ctlhq-env-screen.png"
+not_covered = [
+  "a factory-fresh install: the base image already holds Homebrew and the Tart Guest Agent",
+  "macOS versions other than 15, and any guest newer than the host",
+  "Apple ID, iCloud, and App Store sign-in",
+  "GPU-heavy work and real Apple hardware such as Touch ID",
+  "screenshot until the guest grants Screen Recording to the guest agent",
+]
+notes = "The vanilla images have no guest agent, so `exec` would not work there; the base image is the closest clean image that does."
