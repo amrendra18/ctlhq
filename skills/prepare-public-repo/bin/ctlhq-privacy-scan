@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""ctlhq-privacy-scan: find private words in a repository's current files without printing a word.
+
+Usage:
+  ctlhq-privacy-scan [--words FILE] [--joined] [--root DIR]
+
+Files: every tracked file, and every untracked file that .gitignore does not ignore
+(`git ls-files -co --exclude-standard`), as they are on disk now. Each file's path and
+content are checked. History is not read; ctlhq-first-push checks every commit.
+
+Word list: --words FILE, by default <root>/.local/first-commit/private-values.txt, the list
+ctlhq-first-push reads. Each line that is not blank and does not start with "#" (after
+leading spaces) is one private word, with the spaces around it removed. A private word
+may hold spaces.
+
+Word number: private word N is the Nth word line, counted from 1 at the top of the word
+list. Blank lines and comment lines are not counted. So in the list "# mine", "", "alpha",
+"beta", alpha is private word 1 and beta is private word 2.
+
+Matching works the way ctlhq-first-push matches: text and private words are put in
+Unicode NFC form and then case-folded, so letter case never matters ("STRASSE" matches a
+private word "straße"). A private word is found anywhere, also inside a longer word.
+
+Not reported, as in tests/privacy/run.sh:
+  1. The owner's own GitHub address, github.com/<owner> or github.com:<owner> in any
+     letter case. <owner> is the github_owner line of ~/.ctlhq/first-push.toml (HOME is
+     honoured), read with bin/ctlhq-push's own parser.
+  2. The file LICENSE at the top of the repository. It is not read.
+  3. A private word listed in public_terms of ctlhq-first-push's settings file
+     (FIRST_PUSH_CONFIG, else ~/.ctlhq/first-push.toml). The other word numbers stay the
+     same.
+
+Output, one line per hit, sorted by path:
+  <path>: private word N in path
+  <path>:<line>: private word N
+  <path>: private word N joined in path          (only with --joined)
+  <path>:<line>: private word N joined          (only with --joined)
+Every private word inside a printed path, plain or joined, is replaced by "<private word N>".
+No output line ever holds a private word, and no error message holds a private word. Error
+messages show paths under the home folder with ~.
+Last, stderr gets "privacy-scan: F files, H hits, B binary files skipped, U unreadable
+files".
+
+--joined also finds a private word split into pieces. It removes whitespace, line breaks,
+the quotes ' " `, "_", and the joins that put string pieces together ("+", ",", ".", "&",
+"|", "~", "\\") from the text and from each private word, and reports each match that the
+plain search did not see. The line is where the match starts. Judge each joined hit by reading the
+line: pieces of one name or string joined across quotes, a join sign, or a line break are
+a real hit; separate words of ordinary text that happen to spell a private word (such as
+"an old" for a private word "anold") are a false positive.
+
+A file with a NUL byte is binary: it is skipped and counted. A symbolic link is checked by
+the path it points to. A file that cannot be read is named on stderr (path masked) with
+the reason, counted, and the scan goes on.
+
+Exit codes:
+  0  no hits
+  1  hits
+  2  usage error: an unknown option, a word list that is missing, unreadable, not UTF-8,
+     or holds no private word, or a first-push settings line that cannot be read
+  3  the root is not in a Git work tree
+  4  at least one listed file could not be read, so the scan is incomplete; any hits are
+     still printed
+"""
+from __future__ import annotations
+
+import bisect
+import os
+import re
+import subprocess
+import sys
+import unicodedata
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+
+DEFAULT_WORDS = Path(".local/first-commit/private-values.txt")
+TOOLS = Path(os.path.realpath(__file__)).parents[3] / "bin"
+SEPARATORS = re.compile(r"[\s'\"`_+,.&|~\\]")
+LINE_BREAK = re.compile(r"\r\n|\r|\n")
+USAGE = "usage: ctlhq-privacy-scan [--words FILE] [--joined] [--root DIR]"
+
+
+def fail(code: int, msg: str) -> int:
+    print(f"ctlhq-privacy-scan: {msg}", file=sys.stderr)
+    if code == 2:
+        print(USAGE, file=sys.stderr)
+    return code
+
+
+def norm(text: str) -> str:
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def folded(text: str) -> tuple[str, list[int]]:
+    """text case-folded, and for each folded character the index of the character it came from."""
+    chars, index = [], []
+    for i, c in enumerate(text):
+        for f in c.casefold():
+            chars.append(f)
+            index.append(i)
+    return "".join(chars), index
+
+
+def load_tool(name: str):
+    sys.dont_write_bytecode = True
+    loader = SourceFileLoader(name.replace("-", "_"), str(TOOLS / name))
+    module = module_from_spec(spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+def read_words(path: Path) -> list[tuple[int, str]]:
+    """(word number, normalized private word) for each word line."""
+    with open(path, encoding="utf-8") as fh:
+        lines = [line.strip() for line in fh]
+    return list(enumerate((norm(line) for line in lines if line and not line.startswith("#")), 1))
+
+
+def masker(words: list[tuple[int, str]]):
+    """A function that returns text in NFC form with every private word, plain or joined,
+    replaced by <private word N>."""
+    number: dict[str, int] = {}
+    for n, word in words:
+        number.setdefault(word, n)
+    pattern = re.compile("|".join(re.escape(t) for t in sorted(number, key=len, reverse=True)))
+
+    def mask(text: str) -> str:
+        text = unicodedata.normalize("NFC", text)
+        low, index = folded(text)
+        spans = [(index[m.start()], index[m.end() - 1] + 1, number[m.group(0)]) for m in pattern.finditer(low)]
+        spans += joined_hits(text, words)
+        out, done = [], 0
+        for start, end, n in sorted(spans, key=lambda s: (s[0], -s[1])):
+            if start >= done:
+                out += [text[done:start], f"<private word {n}>"]
+                done = end
+        return "".join(out) + text[done:]
+    return mask
+
+
+def joined_hits(text: str, words: list[tuple[int, str]]) -> list[tuple[int, int, int]]:
+    """(start, end, word number) for each match that exists only once separators are removed."""
+    low, index = folded(text)
+    kept = [(index[k], c) for k, c in enumerate(low) if not SEPARATORS.match(c)]
+    squashed = "".join(c for _, c in kept)
+    hits = []
+    for n, word in words:
+        piece = SEPARATORS.sub("", word)
+        if not piece:
+            continue
+        start = squashed.find(piece)
+        while start != -1:
+            first, last = kept[start][0], kept[start + len(piece) - 1][0]
+            if text[first:last + 1].casefold() != word:
+                hits.append((first, last + 1, n))
+            start = squashed.find(piece, start + 1)
+    return hits
+
+
+def main(argv: list[str]) -> int:
+    words_path: Path | None = None
+    joined = False
+    root = Path(".")
+    args = list(argv)
+    while args:
+        arg = args.pop(0)
+        if arg in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if arg == "--joined":
+            joined = True
+        elif arg in ("--words", "--root") and args:
+            value = Path(args.pop(0))
+            if arg == "--words":
+                words_path = value
+            else:
+                root = value
+        else:
+            return fail(2, f"unknown or incomplete option '{arg}'")
+
+    top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if top.returncode != 0:
+        return fail(3, "the root folder is not in a Git work tree")
+    root = Path(top.stdout.strip())
+    where = "the --words file" if words_path else f"the word list {DEFAULT_WORDS} in the root folder"
+    words_path = words_path or root / DEFAULT_WORDS
+    try:
+        words = read_words(words_path)
+    except FileNotFoundError:
+        return fail(2, f"{where} does not exist")
+    except UnicodeDecodeError:
+        return fail(2, f"{where} is not UTF-8 text")
+    except OSError as error:
+        return fail(2, f"{where} cannot be read ({error.strerror})")
+    if not words:
+        return fail(2, f"{where} holds no private word")
+    mask = masker(words)
+
+    push, first_push = load_tool("ctlhq-push"), load_tool("ctlhq-first-push")
+    try:
+        owner = push.read_github_owner(push.settings_file())
+        public = first_push.public_terms()
+    except (ValueError, first_push.EnvError) as error:
+        return fail(2, mask(str(error)))
+    words = [(n, w) for n, w in words if w not in public]
+    owner_re = re.compile(rf"github\.com[/:](?ai:{re.escape(owner)})(?![\w-])", re.I) if owner else None
+
+    def unowned(text: str) -> str:
+        """text in NFC form with the owner's GitHub address blanked, keeping every offset."""
+        text = unicodedata.normalize("NFC", text)
+        return owner_re.sub(lambda m: "\0" * len(m.group(0)), text) if owner_re else text
+
+    listed = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z"],
+                            capture_output=True)
+    if listed.returncode != 0:
+        return fail(3, "git ls-files failed in the root folder")
+    rels = sorted({os.fsdecode(p) for p in listed.stdout.split(b"\0") if p} - {"LICENSE"})
+    hits: list[str] = []
+    files = binary = unreadable = 0
+    for rel in rels:
+        path = root / rel
+        shown = mask(rel)
+        low_rel = norm(unowned(rel))
+        hits += [f"{shown}: private word {n} in path" for n, w in words if w in low_rel]
+        if joined:
+            hits += [f"{shown}: private word {n} joined in path"
+                     for n in sorted({n for _, _, n in joined_hits(unowned(rel), words)})]
+        try:
+            if path.is_symlink():
+                text = os.readlink(path)
+            elif path.is_file():
+                data = path.read_bytes()
+                if b"\0" in data:
+                    binary += 1
+                    continue
+                text = data.decode("utf-8", "replace")
+            else:
+                continue
+        except OSError as error:
+            unreadable += 1
+            print(f"ctlhq-privacy-scan: {shown}: cannot be read ({error.strerror})", file=sys.stderr)
+            continue
+        files += 1
+        text = unowned(text)
+        for i, line in enumerate(LINE_BREAK.split(text), 1):
+            low = line.casefold()
+            hits += [f"{shown}:{i}: private word {n}" for n, w in words if w in low]
+        if joined:
+            starts = [0] + [m.end() for m in LINE_BREAK.finditer(text)]
+            found = {(bisect.bisect_right(starts, offset), n) for offset, _, n in joined_hits(text, words)}
+            hits += [f"{shown}:{line}: private word {n} joined" for line, n in sorted(found)]
+
+    for hit in hits:
+        print(hit)
+    print(f"privacy-scan: {files} files, {len(hits)} hits, {binary} binary files skipped, {unreadable} unreadable files",
+          file=sys.stderr)
+    return 4 if unreadable else 1 if hits else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

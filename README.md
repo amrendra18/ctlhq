@@ -237,6 +237,11 @@ The skills you are most likely to type yourself:
 | 6 | `/blind-review` | you want a change, plan, or report reviewed by a fresh agent that did not write it |
 | 7 | `/project-audit` | you want a whole repository or pull request reviewed through product, security, reliability, and test lenses |
 | 8 | `/first-push` | you are about to push a repository to GitHub for the first time, or make one public |
+| 9 | `/prepare-public-repo` | you want a repository reviewed and cleaned up before it becomes public; it never rewrites history or pushes |
+| 10 | `/fresh-history-push` | you want a repository's history replaced by one signed commit, pushed to GitHub, and scanned before you make it public |
+
+To make a repository public, type `/prepare-public-repo` first and `/fresh-history-push` second.
+`/first-push` checks every push, and `/fresh-history-push` runs that check for you.
 
 Every tool in `bin/` answers `--help`.
 To change ctlhq itself, read [CONTRIBUTING.md](./CONTRIBUTING.md).

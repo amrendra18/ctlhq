@@ -89,7 +89,9 @@ The default answer is `/ctlhq-mode`, which runs most of the others when its step
 | 26 | Turn their own working habits into a personal mode skill | [`/automate-me`](../automate-me/SKILL.md) |
 | 27 | Turn what a finished task taught into skill edits | [`/reflect`](../reflect/SKILL.md) |
 | 28 | Stop agents from repeating the same mistakes in this repo | [`/mistake-proof`](../mistake-proof/SKILL.md) |
-| 29 | Find their way around ctlhq | `/ctlhq-help` |
+| 29 | Get a repository ready to be public. Review and clean up, lose nothing, and keep the history. | [`/prepare-public-repo`](../prepare-public-repo/SKILL.md) |
+| 30 | Publish a repository as one fresh signed commit, then scan what the remote holds | [`/fresh-history-push`](../fresh-history-push/SKILL.md) |
+| 31 | Find their way around ctlhq | `/ctlhq-help` |
 
 If a skill directory next to this one is missing from the table, run `ctlhq-skills show <name>` (or `ctlhq-skills find <word>` to search), which reads its frontmatter, and route by its description. The `principle-*` directories are covered under principles below.
 
