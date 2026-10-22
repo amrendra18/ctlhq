@@ -1,6 +1,6 @@
 ---
 name: design-options
-description: Show the operator design options to pick by number. Screens mode builds a clickable mock-up with one hash URL per state. Icon mode draws 4 to 6 icon concepts, then shows the picked one in about 6 palettes and typefaces with the ctlhq-icon-sheet tool, and exports the pick as PNG, favicon.ico and AppIcon.icns. Use from start-project's mock-up step, or when the operator asks for a mock-up or icon options for a product.
+description: Show the operator design options to pick by number. Screens mode maps each use case to its states, then builds a clickable mock-up in the house style with one hash URL per state. Icon mode draws 4 to 6 icon concepts, then shows the picked one in about 6 palettes and typefaces with the ctlhq-icon-sheet tool, and exports the pick as PNG, favicon.ico and AppIcon.icns. Use from start-project's mock-up step, or when the operator asks for a mock-up or icon options for a product.
 ---
 
 # Design options
@@ -17,10 +17,16 @@ Both modes use Chrome through `bin/ctlhq-browser`. When Chrome or Node 22 is mis
 
 ## 1. Screens mode
 
-1. Build a clickable mock-up of the main screens in `<project>/mock/index.html`, from the goals as the operator answered them. Make it one self-contained file with realistic data, covering every use case. Make each screen and state reachable by a hash URL (`index.html#empty`, `#loading`, `#error`).
-2. Check it yourself first. For each screen and state, run `ctlhq-browser screenshot "file://<project>/mock/index.html#<state>" --out <project>/.local/design/screens/<state>.png`, then read the screenshot.
-3. Reply as section 3 says, with the mock-up as the page and each screen and state as a numbered item.
-4. Revise until the operator accepts the mock-up in their own words. Record the acceptance in `PLAN.md` section 8, quoting the operator.
+1. Read, in this order, the operator's prompt, the project's goals and use cases, then `references/style.md`. An earlier source overrides a later one.
+2. Write `<project>/.local/design/states.md`. Its first line names the platform, desktop app or web page, and that platform's usual conventions, for example native menus and shortcuts, or one URL per view and the browser's back button. Then a numbered table with one row per use case, holding the use case, the screens and states it needs, and each state's hash URL named by screen and state (`#inbox-empty`). Number the states inside each row (1.1, 1.2). Every use case gets at least one reachable state. Add the empty, loading and error states wherever they apply.
+3. Build the mock-up in `<project>/mock/index.html`, from that table. Make it one self-contained file of plain HTML and CSS, with a small script for clicks and no libraries. It shows behaviour and look, and decides nothing about the build stack. Each state opens at its hash URL, and `?theme=dark` before the hash shows the dark theme. The mock's own controls (the state picker and the theme switch) sit outside the app's frame, labelled as part of the mock.
+4. Check it yourself, and fix what fails before replying:
+   1. For each state, run `ctlhq-browser screenshot "file://<project>/mock/index.html#<state>" --out <project>/.local/design/screens/<state>.png`. For the dark theme, run `ctlhq-browser screenshot "file://<project>/mock/index.html?theme=dark#<state>" --out <project>/.local/design/screens/<state>-dark.png`. Read every screenshot.
+   2. Walk the main flow with the keyboard only, in the host's browser tool, or with a Playwright or Chrome DevTools script. Every step works, and the focus stays visible. When none of these is available, write the needed grant to `BLOCKED.md` and say in the reply that the keyboard pass did not run.
+   3. For each state, run `ctlhq-browser console "file://<project>/mock/index.html#<state>"`, and again with `?theme=dark` before the hash. Neither prints an error.
+   4. Search the file for real names, paths and accounts, and replace each with an invented one.
+5. Reply as section 3 says. The numbered options are the table's states, numbered as in the table (1.1, 1.2), each with its hash URL, in the order that walks through each use case.
+6. Revise until the operator accepts the mock-up in their own words. Record the acceptance in `PLAN.md` section 8, with the operator's quote and the mock's version, the SHA-256 that `shasum -a 256 <project>/mock/index.html` prints. After a later change to the file, ask the operator to accept it again.
 
 ## 2. Icon mode
 
@@ -59,4 +65,4 @@ Each options reply holds these, in this order:
 2. What the screenshot showed, one line per option, read from the screenshot. For example "Concept 4 turns into a grey dot at 16 px."
 3. The numbered options, using the card numbers.
 4. One recommendation with its reason.
-5. The question. It asks which concept, which palette and typeface, or whether the operator accepts the mock-up.
+5. The question. It asks which concept, which palette and typeface, or which numbered states the operator accepts and which to change.

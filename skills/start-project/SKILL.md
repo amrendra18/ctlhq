@@ -32,7 +32,7 @@ Skip this step when the operator named the folder.
 ## 4. Mock-up and icon (when the product has a screen)
 
 1. Run the `design-options` skill in screens mode. When the operator's answer in section 8 says the product ships an app or site icon, also run its icon mode.
-2. Continue only after the operator accepts the mock-up in their own words. Record the acceptance in section 8, quoting the operator.
+2. Continue only after the operator accepts the mock-up in their own words. Record the acceptance in section 8, quoting the operator, with the mock's SHA-256 as design-options screens-mode step 6 says.
 
 ## 5. Write the plan
 
