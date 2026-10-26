@@ -43,11 +43,11 @@ Use the shared tools in this repository's `bin/` instead of writing your own. Ea
 | 1 | doctor checks: permissions, `.git` writes, signing key, disk, tools, services up | `ctlhq-preflight --repo . --need TOOL,TOOL --service URL` |
 | 2 | start a dev server, wait until it answers, stop only what it started | `ctlhq-serve start`, `health`, `stop` |
 | 3 | screenshot at a window size, console errors, network log | `ctlhq-browser screenshot`, `console`, `network` |
-| 4 | measure: performance trace, heap snapshot | `ctlhq-browser trace`, `ctlhq-browser heap` |
+| 4 | navigation performance trace, heap snapshot after page load | `ctlhq-browser trace`, `ctlhq-browser heap` |
 | 5 | `index.html` with the screenshots that changed since the last run marked | `ctlhq-gallery <evidence folder> --previous <last evidence folder>` |
 | 6 | a test machine: start, snapshot, restore, run a command, screenshot | `ctlhq-env up`, `snapshot`, `restore`, `exec`, `screenshot` |
 
-When the repo already has a driver (Playwright specs, an expect script), `scripts/verify` calls it and uses the shared tools for the parts it lacks.
+When the repo already has a driver (Playwright specs, an expect script), `scripts/verify` calls it and uses the shared tools for the parts it lacks. Every `ctlhq-browser` command opens a new tab, even with `--attach`. For interaction evidence, wait for the expected state and capture or profile through the driver controlling that session.
 
 Then write `verify-<app>/SKILL.md` in the host's skills folder with YAML frontmatter (`name: verify-<app>` and a `description` that names the app, the surface, and when to reach for it. Without frontmatter the skill never registers) and these sections, each grounded in what the interview actually found (no placeholders left). Each section names the `scripts/verify` step that does the work, so the skill explains the command instead of repeating it:
 

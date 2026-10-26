@@ -43,5 +43,9 @@ Keep implementation details out of the map. Name only user paths, stable handles
 
 ## Features
 
-- [Create a note](./create-note.md) covers browser and CLI creation, cancellation, persistence, and cleanup.
-- [Search notes](./search.md) covers toolbar, keyboard, and CLI search with matching, empty, and clear states.
+Fictional Notes example. Substitute your project's feature names and commands.
+
+| # | Feature | Command | Coverage |
+| --- | --- | --- | --- |
+| 1 | [Create a note](./create-note.md) | `scripts/verify fast --feature create-note` | Browser and CLI creation, cancellation, persistence, and cleanup |
+| 2 | [Search notes](./search.md) | `scripts/verify fast --feature search` | Toolbar, keyboard, and CLI search with matching, empty, and clear states |

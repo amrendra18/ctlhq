@@ -12,5 +12,5 @@ This file is the base layer. The operator's prompt comes first, then the project
 8. **Nothing for show.** No pop-ups, tours, gradients, emoji, or animation that does not show progress. They slow the user and soon make the product look old.
 9. **Keyboard first.** Every action works from the keyboard, and focus is always visible. Frequent users move faster, and nobody gets lost.
 10. **Light and dark.** Both themes work, and the agent checks both. Users pick their theme, and a broken one looks like a broken product.
-11. **Plain, short words.** Interface text uses short sentences, and says what happened and what is safe. The user trusts the product and acts without guessing.
+11. **Plain, short words.** Interface text uses short sentences, and says what happened and what is safe. Apply [Experience First](../../principle-experience-first/SKILL.md) to layout and copy. The user trusts the product and acts without guessing.
 12. **Fake but realistic data.** Sample data looks real, and the agent invents every name, path and value. The mock shows real use and leaks nothing private.
