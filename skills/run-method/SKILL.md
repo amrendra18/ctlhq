@@ -19,8 +19,9 @@ This skill needs first-commit, a separate tool that creates the project's Git re
 ## 2. Research and measure (when the plan needs facts)
 
 1. Every finding carries a source and a confidence label. Say which angles produced nothing and how the gap was filled.
-2. Before setting any bar, measure on real data with a throwaway prototype. Keep the measurement report.
-3. End with numbered decisions, one recommendation each.
+2. For shared tools and libraries, write a caller example with its expected result first. Use **technical-writing** for tutorials. Use that example to guide **architect** when designing interfaces.
+3. Before setting any bar, measure on real data with a throwaway prototype. Keep the measurement report.
+4. End with numbered decisions, one recommendation each.
 
 ## 3. Write done (before the first build)
 
