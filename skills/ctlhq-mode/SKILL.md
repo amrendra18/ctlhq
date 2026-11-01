@@ -120,7 +120,7 @@ Read the leaf skill in full for any principle you apply. Each entry names when i
 
 **Always pause** for irreversible writes: force-push to shared branches, deploys, data deletion, customer messages.
 
-**Commit and merge** wait for the operator's own words or a rule the operator wrote. For a commit or a merge, that rule is an approval row in the project's `PLAN.md` section 10, or a `GOAL.md` the operator approved, that names the action and its scope.
+**Commit and merge** wait for the operator's own words or a rule the operator wrote. For a commit or a merge, that rule is an approval row in the project's `PLAN.md` section 10, or a `GOAL.md` the operator approved, that names the action and its scope. A skill the operator runs approves the local commits it names, and the fast-forward of a local branch. Never a push.
 
 **Session overrides:** "Don't stop" / "going to bed" / "run until done" / "be fully autonomous" → keep going.
 

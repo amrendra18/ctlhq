@@ -2,6 +2,32 @@
 
 Read each exit code directly. Replace every `<placeholder>`.
 
+## 0. Preconditions 1 to 6
+
+Run it in `<repo>`, the main folder. Each line prints its precondition number and exit code.
+
+```bash
+cd "<repo>"
+echo "cd exit $?"
+h="$(git rev-parse HEAD)" && test "$h" = "$(git rev-parse --verify '<readiness commit>^{commit}')"
+echo "1 readiness commit exit $?"
+out="$(git status --porcelain)" && test -z "$out"
+echo "2 clean tree exit $?"
+out="$(git worktree list)" && test "$(printf '%s\n' "$out" | wc -l)" -eq 1
+echo "2 one worktree exit $?"
+out="$(git ls-files -ci --exclude-standard)" && test -z "$out"
+echo "3 no tracked ignored file exit $?"
+out="$(git submodule status)" && test -z "$out"
+echo "4 no submodule exit $?"
+ctlhq-run-gate -- <check command>
+echo "5 gate exit $?"
+p="$(git rev-parse --git-path info/exclude)" && { test ! -e "$p" || { grep -qvE '^[[:space:]]*(#|$)' "$p"; test $? -eq 1; }; }
+echo "6 no info/exclude pattern exit $?"
+```
+
+1. Every line must print exit 0. Any other code fails that precondition. A failing Git command fails its line too.
+2. Line 6 also prints exit 0 when `.git/info/exclude` is missing.
+
 ## 1. Private-remote check
 
 Run it in the preconditions, and again right before the push.

@@ -34,8 +34,9 @@
 # bytes fall) when that gives text. Other binary files are skipped, and stderr gets the line
 # "privacy: binary files skipped (not UTF-8 or UTF-16 text): N".
 #
-# Exempt: LICENSE, and in README.md the "## Credits" section, found the way bin/ctlhq-check
-# finds it: the heading line outside fenced code up to the next "## " heading.
+# Exempt: a top-level LICENSE, LICENSE.md, LICENSE.txt, or COPYING (the names bin/ctlhq-first-push
+# accepts), and in README.md the "## Credits" section, found the way bin/ctlhq-check finds it:
+# the heading line outside fenced code up to the next "## " heading.
 #
 # Before the scan, positive controls run against a scratch repository with a scratch HOME:
 # planted words and paths in content and in names must each be reported, and neither a word
@@ -52,7 +53,7 @@ usage() { echo "usage: tests/privacy/run.sh [--root DIR] [--help]" >&2; exit 2; 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--root) [ $# -ge 2 ] || usage; root="$2"; shift 2 ;;
-	-h | --help) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	-h | --help) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 	*) usage ;;
 	esac
 done
@@ -187,7 +188,7 @@ hits = []
 named = set()
 skipped = 0
 for rel in sorted(p for p in listed.decode("utf-8", "replace").split("\0") if p):
-    if rel == "LICENSE":
+    if rel in first_push.LICENSE_NAMES:
         continue
     parts = rel.split("/")
     for depth in range(1, len(parts) + 1):
@@ -289,6 +290,7 @@ $planted_word
 " utf-16-be
 printf '\211PNG\r\n\032\n\000\000\000\rIHDR %s\n' "$planted_word" >"$repo/docs/h.bin"
 printf 'a %s inside LICENSE\n' "$planted_word" >"$repo/LICENSE"
+printf 'MIT License\n\nCopyright (c) 2026 %s\n' "$planted_word" >"$repo/LICENSE.md"
 printf '# a comment line\n\n%s\n' "$planted_word" >"$user_list"
 ln -s "$tmp/no-such-list" "$tmp/bad-home/.config/first-commit/private-values.txt"
 printf 'github_owner = "%s"  # the account\n' "$owner" >"$tmp/home/.ctlhq/first-push.toml"
@@ -325,7 +327,7 @@ printf '%s\n' "$out" | grep -qi "$planted_word" && control "the planted word is 
 printf '%s\n' "$out" | grep -q "$person" && control "the planted home folder name is never printed"
 printf '%s\n' "$out" | grep -q 'docs/d.md:3' && control "a word with a letter before it does not match"
 printf '%s\n' "$out" | grep -q 'docs/c.md:6' && control "placeholder home paths and dot folders are allowed in every form"
-printf '%s\n' "$out" | grep -q 'LICENSE' && control "LICENSE is exempt"
+printf '%s\n' "$out" | grep -q 'LICENSE' && control "LICENSE and LICENSE.md are exempt"
 printf '%s\n' "$out" | grep -q 'docs/j.md:1' && control "the word inside the owner's GitHub address is not reported, in any case or the SSH form"
 printf '%s\n' "$out" | grep -q '^docs/github' && control "the word inside the owner's GitHub address in a file name is not reported"
 grep -qx 'privacy: binary files skipped (not UTF-8 or UTF-16 text): 1' "$tmp/err" || control "the binary file is counted as skipped (got: $(cat "$tmp/err"))"

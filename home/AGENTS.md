@@ -70,7 +70,11 @@ re-ask or a correction.
   publish, or delete waits for the user's own words, or for a rule the user
   wrote. For a commit or a merge, a rule the user wrote is an approval row in
   the project's PLAN.md section 10, or a GOAL.md the user approved, that
-  names the action and its scope.
+  names the action and its scope. A skill the operator runs approves the
+  local commits that skill names, and the fast-forward of a local branch. The
+  operator runs a skill when they type its slash command, or ask for it by
+  name in their own words. A skill the model picked by itself does not count.
+  Never a push.
 - At each work-block ending, state whether the user accepted the result in
   their own words. Otherwise, say they have not. Avoid stock phrases.
 - A summary that asks the user to review or accept work explains each point in
@@ -103,7 +107,9 @@ re-ask or a correction.
   where they fit. Add features, layers, services, or categories only for a
   concrete need. Keep the accepted scope visible and avoid scope creep.
 - Who commits: the main agent, after its own review, unless the project's
-  AGENTS.md says otherwise. Builders never commit.
+  AGENTS.md says otherwise. Builders never commit. The approval rule under
+  "Answer, status, and next action" says when, including the commits of a
+  skill the operator runs.
 
 ## Working method
 
