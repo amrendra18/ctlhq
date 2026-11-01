@@ -36,7 +36,7 @@ In this README, the operator is the person who directs the agents. That is you.
 
 1. You type `/ctlhq-mode` and a task, such as "fix the duplicate rows in the export; repro first".
 2. `/ctlhq-mode` matches the task to a playbook, a numbered list of steps such as "Bug fix" or "Feature".
-3. It copies the steps into the agent's todo list and runs other skills when a step needs them, such as `/architect` before code or `/blind-review` before a commit.
+3. It copies the steps into the agent's todo list and runs other skills when a step needs them, such as `/architect` before code or `/commit-review` before a commit.
 4. Steps with a mechanical part call a tool in `bin/`, such as `ctlhq-run-gate` for the project's checks or `ctlhq-commit` for the commit sequence.
 5. Coding principles (24 short skills, such as `principle-prove-it-works`) set the bar for each choice, and the reply names the ones it applied.
 
@@ -234,7 +234,7 @@ The skills you are most likely to type yourself:
 | 3 | `/ctlhq-setup` | you want to pick which model ctlhq uses for each role |
 | 4 | `/start-project` | you bring a new idea; it ends with an approved `PLAN.md` |
 | 5 | `/run-method` | you want a project built, reviewed, or finished end to end against that plan |
-| 6 | `/blind-review` | you want a change, plan, or report reviewed by a fresh agent that did not write it |
+| 6 | `/plan-review`, `/commit-review`, `/pr-review` | you want a plan, a commit, or a pull request reviewed by a fresh agent that did not write it |
 | 7 | `/project-audit` | you want a whole repository or pull request reviewed through product, security, reliability, and test lenses |
 | 8 | `/first-push` | you are about to push a repository to GitHub for the first time, or make one public |
 | 9 | `/prepare-public-repo` | you want a repository reviewed and cleaned up before it becomes public; it never rewrites history or pushes |

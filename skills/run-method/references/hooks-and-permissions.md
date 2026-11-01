@@ -52,7 +52,7 @@ Written by the bootstrap block (section 3) at repository creation. Rules match t
 
 ### 1.5 Skills to install for parity with Codex
 
-Give both harnesses the same skills, `run-method` and `blind-review` included. `bin/ctlhq-install` links every skill into `~/.claude/skills/` and `~/.codex/skills/`, except a skill that a layer's `docs/install.tsv` sends to other hosts; `bin/ctlhq-install --check` shows any skill one harness is missing.
+Give both harnesses the same skills, `run-method` and `commit-review` included. `bin/ctlhq-install` links every skill into `~/.claude/skills/` and `~/.codex/skills/`, except a skill that a layer's `docs/install.tsv` sends to other hosts; `bin/ctlhq-install --check` shows any skill one harness is missing.
 
 ## 2. Codex (`~/.codex/hooks.json`, `~/.codex/config.toml`)
 

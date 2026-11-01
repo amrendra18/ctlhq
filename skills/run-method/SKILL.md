@@ -40,7 +40,7 @@ Hand the operator one pasted block with only the one-time setup that needs the o
 2. While they work, write the review script and the next brief.
 3. The main agent merges the builders' diffs into one integration worktree, resolves conflicts, and runs the full gate on the merged tree. Nothing changes the integration worktree while its checks run. Any later change needs a new check of the updated tree.
 4. Review yourself: the script from outside the repository, the code read, one number recomputed, the five questions answered. In a project with a harness (`scripts/verify`), also run it. A milestone is done only with a harness run whose evidence folder (`.local/verify/<UTC time>/`) and exit code the reply names.
-5. Spawn a fresh reviewer (`blind-review` skill) on the merged diff. Save its report under `.local/reviews/`.
+5. Spawn a fresh reviewer (`commit-review` skill) on the merged diff. Save its report under `.local/reviews/`.
 6. Fix list and re-review. Each review pass inside a round runs the fast gate; the full gate runs once, on the final tree, before the commit sequence. Record the hash in `PLAN.md` section 7. When the milestone opens or closes an open item, update the README's "Open decisions" section in the same commit.
 7. After the round, run `ctlhq-worktree-audit --no-fetch -b <integration branch>` and remove each builder worktree in bucket `safe` with an empty DIRTY column (`git worktree remove <path>`).
 8. Continue to the next milestone without waiting. Stop only for a refusal you cannot work around; write `BLOCKED.md` and keep working on the rest.

@@ -92,6 +92,7 @@ The default answer is `/ctlhq-mode`, which runs most of the others when its step
 | 29 | Get a repository ready to be public. Review and clean up, lose nothing, and keep the history. | [`/prepare-public-repo`](../prepare-public-repo/SKILL.md) |
 | 30 | Publish a repository as one fresh signed commit, then scan what the remote holds | [`/fresh-history-push`](../fresh-history-push/SKILL.md) |
 | 31 | Find their way around ctlhq | `/ctlhq-help` |
+| 32 | Review a plan, a commit, or a pull request with a fresh agent | [`/plan-review`](../plan-review/SKILL.md), [`/commit-review`](../commit-review/SKILL.md), [`/pr-review`](../pr-review/SKILL.md) |
 
 If a skill directory next to this one is missing from the table, run `ctlhq-skills show <name>` (or `ctlhq-skills find <word>` to search), which reads its frontmatter, and route by its description. The `principle-*` directories are covered under principles below.
 
