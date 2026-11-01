@@ -16,11 +16,10 @@ The reviewer changes the file in its copy for a "change" item, and writes a prop
 
 | # | Check | How |
 | --- | --- | --- |
-| 1 | Private word list | `ctlhq-privacy-scan --root <worktree>` and then `--joined`. Read the exit code directly. Each hit gives file:line and the word number; it never prints the word. |
-| 2 | Joined hits | Read each `joined` line. Pieces of one name or string, joined across quotes, `+`, or a line break, are a real hit. Separate words of ordinary text that happen to spell a private word are a false positive; say so in the report. |
-| 3 | Secrets | Copy the listed files to a new, empty scratch folder, then run Gitleaks on that copy (commands below). Search by hand for key shapes, such as private key headers, `AKIA`, `ghp_`, `sk-`, `xox`, and passwords in URLs. A test fixture with a fake value is fine when it is clearly fake; say why. |
-| 4 | Machine details | Home-folder paths (`/Users/<name>/`, `/home/<name>/`), machine and host names, local IP addresses, user names, temp-folder paths with session IDs. |
-| 5 | Identities | Email addresses and names other than the intended public identity and credited authors. |
+| 1 | Private word list | `tests/privacy/run.sh --root <worktree>`, run from the ctlhq repository. Read the exit code directly. Each hit gives file:line; it never prints the word. |
+| 2 | Secrets | Copy the listed files to a new, empty scratch folder, then run Gitleaks on that copy (commands below). Search by hand for key shapes, such as private key headers, `AKIA`, `ghp_`, `sk-`, `xox`, and passwords in URLs. A test fixture with a fake value is fine when it is clearly fake; say why. |
+| 3 | Machine details | Home-folder paths (`/Users/<name>/`, `/home/<name>/`), machine and host names, local IP addresses, user names, temp-folder paths with session IDs. |
+| 4 | Identities | Email addresses and names other than the intended public identity and credited authors. |
 
 Accept the owner's name in the repository's own address, the copyright line, and the commit author. Report it anywhere else.
 
@@ -102,7 +101,7 @@ The operator picks the license in Confirm. The reviewer checks the files against
 | # | Check |
 | --- | --- |
 | 1 | The gate named in Confirm exits 0 in the reviewer's copy. |
-| 2 | `ctlhq-privacy-scan --root <worktree>` exits 0, or each hit is an accepted owner's-name hit. |
+| 2 | `tests/privacy/run.sh --root <worktree>` exits 0, or each hit is an accepted owner's-name hit. |
 | 3 | `gitleaks dir` on the copy of the listed files exits 0. |
 | 4 | `git diff --quiet -- <protected paths>` exits 0, so no protected file changed. |
 | 5 | `git status --short` and `git diff --stat`, including deletions and new files. |

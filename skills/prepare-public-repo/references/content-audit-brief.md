@@ -32,7 +32,7 @@ A removed test case is LOST unless the behaviour it tested was removed by decisi
 
 ## Rules
 
-1. Never copy a word from <private word list> into the report. Write "private word N" instead, where N is the word number as `ctlhq-privacy-scan --help` explains it. Before you finish, `sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <private word list> | grep -v -e '^#' -e '^$' | grep -ciFf - <report path>` must print 0. The `sed` part removes the spaces around each private word, as `ctlhq-privacy-scan` does. It prints only a count, never a word.
+1. Never copy a word from <private word list> into the report. Name its file and line instead. Before you finish, `sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <private word list> | grep -v -e '^#' -e '^$' | grep -ciFf - <report path>` must print 0. The `sed` part removes the spaces around each private word, as `ctlhq-first-push` does. It prints only a count, never a word.
 2. Plain English, short sentences, no long dashes.
 
 ## Report

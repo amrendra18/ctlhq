@@ -49,10 +49,10 @@ Run these from the repository root. Each one exits 0 when everything is in order
    bin/ctlhq-check
    ```
 
-3. **The privacy test.** `tests/privacy/run.sh` scans every tracked file and path for home-folder paths such as `/Users/<name>/`, and for the words in a private word list. The gate runs it with the word list of each folder in `~/.ctlhq/layers.toml` (the file `privacy/private-terms.txt` in that folder). With no layers file, only the path check runs. To use one list directly, give its path:
+3. **The privacy test.** `tests/privacy/run.sh` scans every tracked file and path, and every untracked one Git does not ignore, for home-folder paths such as `/Users/<name>/`, and for the words in a private word list. It reads first-commit's lists with the reader `bin/ctlhq-first-push` uses: the user list `~/.config/first-commit/private-values.txt` (or `$XDG_CONFIG_HOME/first-commit/private-values.txt` when that is an absolute path), and the project list `.local/first-commit/private-values.txt`. With no list, only the path check runs. To use another list instead, give its path:
 
    ```bash
-   PRIVACY_TERMS=/path/to/private-terms.txt bash tests/privacy/run.sh
+   PRIVACY_TERMS=/path/to/private-values.txt bash tests/privacy/run.sh
    ```
 
    The list holds one word per line: your user name, your project names, anything that must not ship.

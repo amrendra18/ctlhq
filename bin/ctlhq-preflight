@@ -32,7 +32,7 @@ Setting: OWNER is the line
   github_owner = "<your GitHub account>"
 in ~/.ctlhq/first-push.toml (HOME is honoured), the same line ctlhq-first-push and ctlhq-push
 read. A "#" comment may follow the value. FIRST_PUSH_CONFIG is ignored here, as in
-ctlhq-push; ctlhq-first-push uses it only for public_terms. Without the line, check 8 says
+ctlhq-push and ctlhq-first-push. Without the line, check 8 says
 "not configured".
 
 Output: one numbered line per check, "ready" or "missing", the check, and what was found.

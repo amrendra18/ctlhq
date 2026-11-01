@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/privacy/run.sh: scans every path and file that `git ls-files` lists for personal values.
+# tests/privacy/run.sh: scans every tracked file, and every untracked file Git does not ignore, for personal values.
 #
 # Usage: tests/privacy/run.sh [--root DIR] [--help]
 #
@@ -10,20 +10,22 @@
 # (such as /home/.config/) is not a home folder. Session ids and ~/projects/<name> paths are
 # not shapes; the word list covers the known ones.
 #
-# Private words come from the layers: every layer listed in $HOME/.ctlhq/layers.toml (read
-# with bin/ctlhq-install's own parser) that holds privacy/private-terms.txt adds its words.
-# PRIVACY_TERMS=<file> replaces that lookup, for runs without a layers file. With neither,
-# only the path shapes run. In a word file each non-blank line that does not start with "#"
-# is one word, matched case-insensitively wherever no letter stands directly before or after
-# it, so digits and underscores count as boundaries ("<word>2" and "<word>_v2" match,
-# "x<word>" does not).
+# Private words come from first-commit's lists, found and read by bin/ctlhq-first-push's own
+# reader: the user list ~/.config/first-commit/private-values.txt (or
+# $XDG_CONFIG_HOME/first-commit/private-values.txt when XDG_CONFIG_HOME is an absolute path),
+# and the project list .local/first-commit/private-values.txt, in a linked worktree also the
+# main worktree's. PRIVACY_TERMS=<file> replaces that lookup. With no list, only the path
+# shapes run. In a word file each non-blank line that does not start with "#"
+# is one word, matched in NFC form and case-folded, as bin/ctlhq-first-push folds it, wherever
+# no letter stands directly before or after it, so digits and underscores count as boundaries
+# ("<word>2" and "<word>_v2" match, "x<word>" does not).
 #
 # The owner's own GitHub address is not a private word. Before the word check, every
 # github.com/<owner> and github.com:<owner> is removed from the line or name, in any letter
 # case. <owner> is the github_owner line of $HOME/.ctlhq/first-push.toml, read with
 # bin/ctlhq-push's own parser. Without that file or that line nothing is removed.
 #
-# Both checks run on every tracked path (each file and folder name) and on file content.
+# Both checks run on every path it reads (each file and folder name) and on file content.
 # In a path, a home folder is a folder: Users/<name>/ or home/<name>/. Output
 # never prints a private word or a home folder name: a path shows them as "<private word>"
 # and "<name>", so this output is safe to paste anywhere.
@@ -40,7 +42,7 @@
 # nor a name may be printed.
 #
 # Exit 0 with no hits, 1 when a control fails or the scan finds hits (one "file:line: kind"
-# or "path: kind in name" line each), 2 on a usage error, an unreadable layers.toml or
+# or "path: kind in name" line each), 2 on a usage error, an unreadable word list or
 # github_owner line, or a PRIVACY_TERMS file that does not exist. Writes only under a temp folder.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -50,16 +52,17 @@ usage() { echo "usage: tests/privacy/run.sh [--root DIR] [--help]" >&2; exit 2; 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--root) [ $# -ge 2 ] || usage; root="$2"; shift 2 ;;
-	-h | --help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	-h | --help) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 	*) usage ;;
 	esac
 done
-git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "privacy: not a Git work tree: $root" >&2; exit 2; }
+top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" || { echo "privacy: not a Git work tree: $root" >&2; exit 2; }
+root="$top"
 
 # scan ROOT: prints one hit line per hit and the skipped count on stderr; exits 0 with no
-# hits, 1 with any, 2 when layers.toml cannot be read.
+# hits, 1 with any, 2 when a word list cannot be read.
 scan() {
-	python3 -I - "$1" "$here/../../bin/ctlhq-install" "$here/../../bin/ctlhq-check" "$here/../../bin/ctlhq-push" <<'PY'
+	python3 -I - "$1" "$here/../../bin/ctlhq-first-push" "$here/../../bin/ctlhq-check" "$here/../../bin/ctlhq-push" <<'PY'
 import os
 import re
 import subprocess
@@ -79,7 +82,7 @@ CONTENT_SHAPE = re.compile(r"(?<![A-Za-z0-9_.~$}\\-])" + SLASH + r"(?:users|home
                            + r"(\$\{[A-Za-z_]+\}|<[^<>/\\\s]+>|\$?[A-Za-z0-9_-][A-Za-z0-9._-]*)(?![A-Za-z0-9._-])", re.I)
 TEXT_CONTROLS = set("\t\n\r\f\v")
 
-root, installer, checker, pusher = sys.argv[1:5]
+root, first_pusher, checker, pusher = sys.argv[1:5]
 
 
 def load(name, path):
@@ -89,34 +92,26 @@ def load(name, path):
     return module
 
 
-def term_files():
+first_push = load("ctlhq_first_push", first_pusher)
+words = []
+try:
     if os.environ.get("PRIVACY_TERMS"):
         given = Path(os.environ["PRIVACY_TERMS"])
         if not given.is_file():
             print(f"privacy: PRIVACY_TERMS names no file: {given}", file=sys.stderr)
             sys.exit(2)
-        return [given]
-    install = load("ctlhq_install", installer)
-    home = Path(os.path.realpath(os.path.expanduser("~")))
-    if not (home / install.SETTINGS).is_file():
-        return []
-    try:
-        layers = install.load_settings(home).layers
-    except ValueError as e:
-        print(f"privacy: {e}", file=sys.stderr)
-        sys.exit(2)
-    return [layer / "privacy" / "private-terms.txt" for layer in layers]
-
-
-words = []
-for terms_file in term_files():
-    if terms_file.is_file():
-        with open(terms_file, encoding="utf-8") as fh:
-            words += [w.strip() for w in fh if w.strip() and not w.strip().startswith("#")]
+        term_lists = [(given, f"PRIVACY_TERMS file {given}")]
+    else:
+        term_lists = [(path, label) for path, label, _ in first_push.word_lists(Path(root))]
+    for terms_file, label in term_lists:
+        words += first_push.read_values(terms_file, label)
+except first_push.EnvError as e:
+    print(f"privacy: {e.what}", file=sys.stderr)
+    sys.exit(2)
 word_re = None
 if words:
     alternatives = "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
-    word_re = re.compile(r"(?<![^\W\d_])(?:" + alternatives + r")(?![^\W\d_])", re.I)
+    word_re = re.compile(r"(?<![^\W\d_])(?:" + alternatives + r")(?![^\W\d_])")
 
 push = load("ctlhq_push", pusher)
 try:
@@ -130,6 +125,18 @@ owner_re = re.compile(rf"github\.com[/:](?ai:{re.escape(owner)})(?![\w-])", re.I
 def unowned(text):
     """text without the owner's own GitHub address."""
     return owner_re.sub("", text) if owner_re else text
+
+
+def folded(text):
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def masked(text):
+    text = unicodedata.normalize("NFC", text)
+    starts = [i for i, c in enumerate(text) for _ in c.casefold()]
+    for m in reversed(list(word_re.finditer(folded(text)))):
+        text = text[:starts[m.start()]] + "<private word>" + text[starts[m.end() - 1] + 1:]
+    return text
 
 
 def private_homes(text):
@@ -146,7 +153,7 @@ def shown(rel):
     for m in reversed(private_homes(text)):
         text = text[:m.start(1)] + "<name>" + text[m.end(1):]
     if word_re:
-        text = word_re.sub("<private word>", text)
+        text = masked(text)
     return text[1:]
 
 
@@ -174,7 +181,8 @@ def readme_exempt(lines):
     return range(credits.start - 1, credits.stop - 1)
 
 
-listed = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, check=True).stdout
+listed = subprocess.run(["git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                        capture_output=True, check=True).stdout
 hits = []
 named = set()
 skipped = 0
@@ -184,7 +192,7 @@ for rel in sorted(p for p in listed.decode("utf-8", "replace").split("\0") if p)
     parts = rel.split("/")
     for depth in range(1, len(parts) + 1):
         prefix = "/".join(parts[:depth])
-        if word_re and prefix not in named and word_re.search(unowned(parts[depth - 1])):
+        if word_re and prefix not in named and word_re.search(unowned(folded(parts[depth - 1]))):
             named.add(prefix)
             hits.append(f"{shown(prefix)}: private word in name")
     for m in private_homes("/" + rel):
@@ -211,7 +219,7 @@ for rel in sorted(p for p in listed.decode("utf-8", "replace").split("\0") if p)
             continue
         if content_homes(line):
             hits.append(f"{shown(rel)}:{i + 1}: home-folder path")
-        if word_re and word_re.search(unowned(line)):
+        if word_re and word_re.search(unowned(folded(line))):
             hits.append(f"{shown(rel)}:{i + 1}: private word")
 
 for h in hits:
@@ -227,7 +235,8 @@ fail=0
 control() { echo "privacy: control failed: $1"; fail=1; }
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 terms_override="${PRIVACY_TERMS-}"
-unset PRIVACY_TERMS
+xdg_override="${XDG_CONFIG_HOME-}"
+unset PRIVACY_TERMS XDG_CONFIG_HOME
 encode() { python3 -I -c 'import sys; open(sys.argv[1], "wb").write(sys.argv[2].encode(sys.argv[3]))' "$@"; }
 
 # The planted values are built from pieces so this file never matches its own scan.
@@ -239,8 +248,8 @@ upper_owner="$(printf '%s' "$owner" | tr '[:lower:]' '[:upper:]')"
 users="Us""ers"
 planted_path="/$users/$person/notes.txt"
 repo="$tmp/repo"
-layer="$tmp/layer"
-mkdir -p "$repo/docs" "$repo/$planted_word" "$repo/fixtures/$users/$person" "$tmp/home/.ctlhq" "$tmp/empty-home" "$tmp/bad-home/.ctlhq" "$tmp/no-owner-home/.ctlhq" "$tmp/bad-owner-home/.ctlhq" "$layer/skills" "$layer/privacy"
+user_list="$tmp/home/.config/first-commit/private-values.txt"
+mkdir -p "$repo/docs" "$repo/$planted_word" "$repo/fixtures/$users/$person" "$tmp/home/.ctlhq" "$tmp/home/.config/first-commit" "$tmp/empty-home" "$tmp/bad-home/.config/first-commit" "$tmp/no-owner-home/.ctlhq" "$tmp/bad-owner-home/.ctlhq"
 git -C "$repo" init -q
 printf '# Demo\n\nPlain text.\n' >"$repo/README.md"
 printf 'one\nthe %s project\n' "$upper_word" >"$repo/docs/a.md"
@@ -280,9 +289,8 @@ $planted_word
 " utf-16-be
 printf '\211PNG\r\n\032\n\000\000\000\rIHDR %s\n' "$planted_word" >"$repo/docs/h.bin"
 printf 'a %s inside LICENSE\n' "$planted_word" >"$repo/LICENSE"
-printf '# a comment line\n\n%s\n' "$planted_word" >"$layer/privacy/private-terms.txt"
-printf 'layers = ["%s", "%s"]\n' "$(cd "$here/../.." && pwd)" "$layer" >"$tmp/home/.ctlhq/layers.toml"
-printf 'layers = "not a list"\n' >"$tmp/bad-home/.ctlhq/layers.toml"
+printf '# a comment line\n\n%s\n' "$planted_word" >"$user_list"
+ln -s "$tmp/no-such-list" "$tmp/bad-home/.config/first-commit/private-values.txt"
 printf 'github_owner = "%s"  # the account\n' "$owner" >"$tmp/home/.ctlhq/first-push.toml"
 printf 'other = "x"\n' >"$tmp/no-owner-home/.ctlhq/first-push.toml"
 printf 'github_owner = %s\n' "$owner" >"$tmp/bad-owner-home/.ctlhq/first-push.toml"
@@ -324,13 +332,13 @@ grep -qx 'privacy: binary files skipped (not UTF-8 or UTF-16 text): 1' "$tmp/err
 
 out="$(HOME="$tmp/empty-home" scan "$repo" 2>/dev/null)"; rc=$?
 [ "$rc" -eq 1 ] || control "without a word list the planted paths still exit 1 (got $rc)"
-printf '%s\n' "$out" | grep -q 'private word' && control "without a layers file no word is reported"
+printf '%s\n' "$out" | grep -q 'private word' && control "without a user list no word is reported"
 printf '%s\n' "$out" | grep -qx 'fixtures/Users/<name>/: home-folder path in name' || control "without a word list a home folder in a path is reported"
 
-out="$(HOME="$tmp/empty-home" PRIVACY_TERMS="$layer/privacy/private-terms.txt" scan "$repo" 2>/dev/null)"
-printf '%s\n' "$out" | grep -qx 'docs/a.md:2: private word' || control "PRIVACY_TERMS supplies the words without a layers file"
+out="$(HOME="$tmp/empty-home" PRIVACY_TERMS="$user_list" scan "$repo" 2>/dev/null)"
+printf '%s\n' "$out" | grep -qx 'docs/a.md:2: private word' || control "PRIVACY_TERMS supplies the words without a user list"
 printf '%s\n' "$out" | grep -qx 'docs/j.md:1: private word' || control "without a first-push.toml the owner's address line is reported"
-out="$(HOME="$tmp/no-owner-home" PRIVACY_TERMS="$layer/privacy/private-terms.txt" scan "$repo" 2>/dev/null)"
+out="$(HOME="$tmp/no-owner-home" PRIVACY_TERMS="$user_list" scan "$repo" 2>/dev/null)"
 printf '%s\n' "$out" | grep -qx 'docs/j.md:1: private word' || control "without a github_owner line the owner's address line is reported"
 
 HOME="$tmp/bad-owner-home" scan "$repo" >/dev/null 2>&1; rc=$?
@@ -340,7 +348,25 @@ HOME="$tmp/empty-home" PRIVACY_TERMS="$tmp/no-such-file" scan "$repo" >/dev/null
 [ "$rc" -eq 2 ] || control "a PRIVACY_TERMS file that does not exist exits 2 (got $rc)"
 
 HOME="$tmp/bad-home" scan "$repo" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 2 ] || control "an unreadable layers.toml exits 2 (got $rc)"
+[ "$rc" -eq 2 ] || control "a user list that links to nothing exits 2 (got $rc)"
+
+out="$(HOME="$tmp/empty-home" XDG_CONFIG_HOME="$tmp/home/.config" scan "$repo" 2>/dev/null)"
+printf '%s\n' "$out" | grep -qx 'docs/a.md:2: private word' || control "an absolute XDG_CONFIG_HOME names the user list"
+
+proj="$tmp/proj"
+mkdir -p "$proj/.local/first-commit"
+git -C "$proj" init -q
+printf '.local/\n' >"$proj/.gitignore"
+printf '%s\n' "$planted_word" >"$proj/.local/first-commit/private-values.txt"
+printf 'the %s here\n' "$planted_word" >"$proj/notes.md"
+git -C "$proj" add -A
+git -C "$proj" -c user.name=t -c user.email=t@example.com -c commit.gpgsign=false commit -qm initial
+git -C "$proj" worktree add -q "$tmp/proj-linked" 2>/dev/null
+for d in "$proj" "$tmp/proj-linked"; do
+	out="$(HOME="$tmp/empty-home" scan "$d" 2>/dev/null)"; rc=$?
+	[ "$rc" -eq 1 ] && [ "$out" = "notes.md:1: private word" ] ||
+		control "a word only in the project list is reported in ${d#"$tmp"/} (got $rc: $out)"
+done
 
 git -C "$repo" rm -rq --cached docs fixtures "$planted_word"
 rm -rf "${repo:?}/docs" "${repo:?}/fixtures" "${repo:?}/${planted_word:?}"
@@ -360,7 +386,7 @@ HOME="$tmp/home" scan "$repo" >/dev/null 2>&1; rc=$?
 
 [ "$fail" -eq 0 ] || exit 1
 
-out="$(PRIVACY_TERMS="$terms_override" scan "$root")"; rc=$?
+out="$(PRIVACY_TERMS="$terms_override" XDG_CONFIG_HOME="$xdg_override" scan "$root")"; rc=$?
 [ "$rc" -eq 2 ] && exit 2
 if [ "$rc" -ne 0 ]; then
 	printf '%s\n' "$out"
