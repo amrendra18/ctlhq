@@ -59,7 +59,7 @@ INSTALL = {
     "first-commit": ("install first-commit from https://github.com/amrendra18/first-commit and put it on PATH",) * 2,
 }
 NEEDED_BY = {
-    "python3": "every Python tool in bin/ (ctlhq-models, ctlhq-skills, ctlhq-unslop, ctlhq-playbook, ...)",
+    "python3": "every Python tool in bin/ (ctlhq-models, ctlhq-skills, ctlhq-unslop, ctlhq-playbook, ...) and ctlhq-worktree-audit",
     "bash": "the bin/ wrappers (ctlhq-plan-lint, ctlhq-worktree-audit, ctlhq-watch-pr, ctlhq-orch) and tests/*/run.sh",
     "git": "ctlhq-worktree-audit, ctlhq-no-comments --diff, every playbook that commits",
     "node": "ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, the ctlhq-plan-lint and stand-ins tests",

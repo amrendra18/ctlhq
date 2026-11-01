@@ -100,6 +100,16 @@ col() { # table worktree "n n ...": the named columns of that worktree's row, sp
 	printf '%s\n' "$1" | awk -F'\t' -v w="$tmp/$2" -v cs="$3" '$9 == w {n = split(cs, c, " "); s = ""; for (i = 1; i <= n; i++) s = s (i > 1 ? " " : "") $(c[i]); print s}'
 }
 
+hh="$tmp/home-hang"; hr="$tmp/hang-repo"
+mkdir -p "$hh/.ctlhq" "$tmp/hang-bin"
+cp "$HOME/.gitconfig" "$hh/.gitconfig"
+g init -q "$hr"; commit "$hr" a.txt
+HOME="$hh" git -C "$hr" worktree add -q "$tmp/hang-wt" -b hang-br >/dev/null 2>&1 || bad "setup: hang worktree"
+printf '#!/bin/sh\nexec /bin/sleep 97\n' > "$tmp/hang-bin/leases-hang"; chmod +x "$tmp/hang-bin/leases-hang"
+printf 'command = "leases-hang status"\n' > "$hh/.ctlhq/worktree-lease.toml"
+(HOME="$hh" PATH="$tmp/hang-bin:$PATH" "$wa" --no-fetch -b main "$hr" > "$tmp/hang.out" 2> "$tmp/hang.err"; echo $? > "$tmp/hang.rc") &
+hang_pid=$!
+
 # 1. --help through the wrapper.
 out="$("$wa" --help 2>&1)"; expect_rc 0 $? "--help exits 0"
 expect_grep '^ctlhq-worktree-audit: ' "$(printf '%s\n' "$out" | head -1)" "--help first line is 'ctlhq-worktree-audit: ...'"
@@ -114,10 +124,11 @@ out="$(cd "$m" && "$wa" --no-fetch 2>"$tmp/err")"; rc=$?
 expect_rc 0 "$rc" "audit exits 0 after the table"
 expect_eq "warn: no -b given; MERGED checks against origin/main" "$(cat "$tmp/err")" "no -b warns and names origin/HEAD's branch"
 expect_eq "# base: origin/main" "$(printf '%s\n' "$out" | sed -n 1p)" "first line names the base"
-expect_eq "$(printf 'SIZE\tAGE\tMERGED\tDIRTY\tREMOTE\tPR\tLAST_CHAT\tBUCKET\tWORKTREE')" "$(printf '%s\n' "$out" | sed -n 2p)" "column header"
+expect_eq "# lease: none" "$(printf '%s\n' "$out" | sed -n 2p)" "no lease setting: the second line says none"
+expect_eq "$(printf 'SIZE\tAGE\tMERGED\tDIRTY\tREMOTE\tPR\tLAST_CHAT\tBUCKET\tWORKTREE')" "$(printf '%s\n' "$out" | sed -n 3p)" "column header"
 expect_eq "" "$(row "$out" main)" "the main worktree is not listed"
-expect_eq "$tmp/wt-scratch" "$(printf '%s\n' "$out" | sed -n 3p | cut -f9)" "rows are sorted by size, largest first"
-expect_eq 9 "$(printf '%s\n' "$out" | sed -n 3p | awk -F'\t' '{print NF}')" "a row has 9 tab-separated columns"
+expect_eq "$tmp/wt-scratch" "$(printf '%s\n' "$out" | sed -n 4p | cut -f9)" "rows are sorted by size, largest first"
+expect_eq 9 "$(printf '%s\n' "$out" | sed -n 4p | awk -F'\t' '{print NF}')" "a row has 9 tab-separated columns"
 
 # 3. Buckets and columns per worktree.
 expect_eq "YES clean no-remote - - safe" "$(col "$out" wt-merged '3 4 5 6 7 8')" "wt-merged: commit in the base gives safe"
@@ -258,6 +269,117 @@ expect_grep 'needs a whole number, got: abc' "$err" "--recent-days abc is explai
 expect_eq "$before_list" "$(git -C "$m" worktree list --porcelain)" "the worktree list is unchanged"
 expect_eq "$before_wip" "$(git -C "$tmp/wt-wip" status --porcelain)" "uncommitted work in wt-wip is unchanged"
 
+no_lease="$(cd "$m" && "$wa" --no-fetch 2>"$tmp/err")"
+slot="$tmp/wt-slot"
+g -C "$m" worktree add -q "$slot" -b slot-br
+mkdir -p "$tmp/lease-bin" "$HOME/.ctlhq"
+cat > "$tmp/lease-bin/leases" <<'SH'
+#!/bin/sh
+echo "leases $*" >> "$HOME/leases.log"
+cat "$HOME/leases.out"
+exit "$(cat "$HOME/leases.rc")"
+SH
+chmod +x "$tmp/lease-bin/leases"
+conf="$HOME/.ctlhq/worktree-lease.toml"
+with_lease() { (cd "$m" && PATH="$tmp/lease-bin:$PATH" "$wa" --no-fetch 2>"$tmp/err"); }
+safe_rows() { printf '%s\n' "$1" | awk -F'\t' '$8 == "safe"' | grep -c ''; }
+listing="$(printf '{"slots":[{"slot_id":"1","workspace_path":"%s"}],"count":1}' "$slot")"
+
+printf '%s\n' "$listing" > "$HOME/leases.out"; echo 0 > "$HOME/leases.rc"; : > "$HOME/leases.log"
+out="$(with_lease)"
+expect_eq "safe" "$(col "$out" wt-slot 8)" "no setting: a merged clean worktree is safe"
+expect_eq "" "$(cat "$HOME/leases.log")" "no setting: the lease manager on PATH is never called"
+expect_eq "$no_lease" "$(printf '%s\n' "$out" | awk -F'\t' -v w="$slot" '$9 != w')" "no setting: every other line equals the output before the slot existed"
+
+printf '# the lease manager\ncommand = "leases status --format json"  # lists slots\n' > "$conf"
+out="$(with_lease)"; rc=$?
+expect_rc 0 "$rc" "a listed slot: the audit exits 0"
+expect_eq "leased" "$(col "$out" wt-slot 8)" "a listed slot is bucket leased, never safe"
+expect_eq "leases status --format json" "$(cat "$HOME/leases.log")" "the audit runs the setting's command once"
+expect_eq "safe safe" "$(col "$out" wt-merged 8) $(col "$out" wt-mergedpr 8)" "a listed slot: other rows keep their buckets"
+expect_eq "" "$(grep -v '^warn: no -b given' "$tmp/err")" "a listed slot: no lease warning"
+expect_eq "# lease: ok" "$(printf '%s\n' "$out" | sed -n 2p)" "a listed slot: the second line says ok"
+echo edit >> "$slot/a.txt"
+expect_eq "wip:1 leased" "$(col "$(with_lease)" wt-slot "4 8")" "a listed slot with a tracked edit is leased, and DIRTY keeps wip:1"
+g -C "$slot" checkout -- a.txt
+
+printf '{"slots":[{"workspace_path":"%s/wt-merged/inner"},{"workspace_path":"%s/wt-merg"}]}\n' "$tmp" "$tmp" > "$HOME/leases.out"
+expect_eq "safe" "$(col "$(with_lease)" wt-merged 8)" "a slot path longer or shorter than a worktree path does not make it leased"
+ln -s "$tmp" "$tmp/link"
+printf '{"slots":[{"workspace_path":"%s/link/wt-slot/"}]}\n' "$tmp" > "$HOME/leases.out"
+expect_eq "leased" "$(col "$(with_lease)" wt-slot 8)" "a slot path through a symlink and with a trailing slash still makes it leased"
+rm "$tmp/link"
+
+printf '%s\n' '{"error":{"code":"x","message":"lease state\nis locked","next":[]}}' > "$HOME/leases.out"
+echo 1 > "$HOME/leases.rc"
+out="$(with_lease)"; rc=$?
+expect_rc 0 "$rc" "a failed lease command: the audit still exits 0 after the table"
+expect_eq "# lease: failed; no worktree row is safe" "$(printf '%s\n' "$out" | sed -n 2p)" "a failed lease command: the second line says failed"
+expect_eq 0 "$(safe_rows "$out")" "a failed lease command: no worktree row is safe"
+expect_eq "review review" "$(col "$out" wt-merged 8) $(col "$out" wt-slot 8)" "a failed lease command: rows that would be safe are review"
+expect_eq "warn: lease setting: leases status --format json failed: lease state is locked; no worktree row is marked safe" "$(grep '^warn: lease' "$tmp/err")" "a failed lease command: one warn line names its error.message"
+expect_grep "^fix: cat $conf, then run its command to see the error\$" "$(cat "$tmp/err")" "a failed lease command: a fix line"
+
+check_failed() {
+	expect_eq 0 "$(safe_rows "$out")" "$1: no worktree row is safe"
+	expect_grep '^warn: lease setting: leases status --format json failed: ' "$(cat "$tmp/err")" "$1: a warn line"
+}
+printf '%s\n' "$listing" > "$HOME/leases.out"; out="$(with_lease)"; check_failed "exit 1 with a slot list"
+expect_eq "review" "$(col "$out" wt-slot 8)" "exit 1 with a slot list: the slot is not leased"
+expect_grep 'failed: exit 1 and no error.message' "$(cat "$tmp/err")" "exit 1 with a slot list: the warn line names the exit code"
+echo 0 > "$HOME/leases.rc"
+for body in 'not json' '' '{"slots":null}' '{"slots":[{"slot_id":"1"}]}'; do
+	printf '%s' "$body" > "$HOME/leases.out"; out="$(with_lease)"; check_failed "exit 0 with '$body'"
+done
+
+printf 'comand = "leases status --format json"\n' > "$conf"; : > "$HOME/leases.log"
+out="$(with_lease)"
+expect_eq 0 "$(safe_rows "$out")" "no command line: no worktree row is safe"
+expect_eq "warn: lease setting: $conf has no line command = \"<command>\"; no worktree row is marked safe" "$(grep '^warn: lease' "$tmp/err")" "no command line: the warn line names the file"
+expect_eq "" "$(cat "$HOME/leases.log")" "no command line: nothing runs"
+rm -f "$conf"
+
+help="$("$wa" --help 2>&1)"
+for word in 'leased \(a worktree' '~/.ctlhq/worktree-lease.toml' '"workspace_path"' '30 seconds'; do
+	expect_grep "$word" "$help" "--help names $word"
+done
+g -C "$m" worktree remove "$slot"
+
+g -C "$m" branch gone-merged main
+g -C "$m" worktree add -q "$tmp/wt-gone" -b gone-unmerged; commit "$tmp/wt-gone" u1.txt; commit "$tmp/wt-gone" u2.txt
+g -C "$m" worktree remove "$tmp/wt-gone"
+brow() { printf '%s\n' "$1" | awk -F'\t' -v b="$2" 'NF == 5 && $4 == b'; }
+out="$(cd "$m" && "$wa" --no-fetch 2>/dev/null)"; rc=$?
+expect_rc 0 "$rc" "branch rows: the audit exits 0"
+expect_eq "$(printf 'YES\t0\tsafe\tgone-merged\tgit -C %s branch -d gone-merged' "$m")" "$(brow "$out" gone-merged)" "a merged branch with no worktree is safe, with its git branch -d command"
+expect_eq "$(printf 'no\t2\thold-unmerged\tgone-unmerged\t-')" "$(brow "$out" gone-unmerged)" "an unmerged branch with no worktree is held with its commit count, never safe"
+expect_eq "$(printf 'no\t1\thold-unmerged\tlocal-base\t-')" "$(brow "$out" local-base)" "a branch with one commit not in the base is held"
+expect_eq "" "$(brow "$out" merged-br)" "a branch that has a worktree gets no branch row"
+expect_eq "" "$(brow "$out" main)" "the base's own branch gets no branch row"
+expect_grep '^# branches with no worktree: [0-9]+$' "$out" "a line counts the branches with no worktree"
+expect_eq "$(printf 'MERGED\tNOT_IN_BASE\tBUCKET\tBRANCH\tNEXT')" "$(printf '%s\n' "$out" | sed -n '/^# branches with no worktree/{n;p;}')" "the branch rows have their own header"
+expect_eq "" "$(brow "$("$wa" --no-fetch -b local-base "$m" 2>/dev/null)" local-base)" "-b local-base: the base branch itself gets no branch row"
+expect_grep 'git -C <repo> branch -d' "$("$wa" --help 2>&1)" "--help names the branch rows and git branch -d"
+expect_grep 'git -C <repo> branch -D' "$("$wa" --help 2>&1)" "--help names git branch -D for a branch at its merged pull request's head"
+g -C "$m" worktree add -q "$tmp/wt-gone" -b sq-gone; commit "$tmp/wt-gone" g1.txt
+g -C "$m" worktree remove "$tmp/wt-gone"
+cp "$HOME/gh.json" "$tmp/gh.json.saved"
+printf '[{"number":21,"state":"MERGED","headRefName":"sq-gone","headRefOid":"%s"}]' "$(git -C "$m" rev-parse sq-gone)" > "$HOME/gh.json"
+out="$(cd "$m" && "$wa" --no-fetch 2>/dev/null)"
+expect_eq "$(printf 'no\t1\tsafe\tsq-gone\tgit -C %s branch -D sq-gone' "$m")" "$(brow "$out" sq-gone)" "a squash-merged branch at its pull request's head is safe, with git branch -D"
+for st in CLOSED OPEN; do
+	printf '[{"number":21,"state":"%s","headRefName":"sq-gone","headRefOid":"%s"}]' "$st" "$(git -C "$m" rev-parse sq-gone)" > "$HOME/gh.json"
+	out="$(cd "$m" && "$wa" --no-fetch 2>/dev/null)"
+	expect_eq "$(printf 'no\t1\thold-unmerged\tsq-gone\t-')" "$(brow "$out" sq-gone)" "a branch whose pull request at its tip is $st is held"
+done
+printf '[{"number":21,"state":"MERGED","headRefName":"sq-gone","headRefOid":"%s"}]' "$(git -C "$m" rev-parse sq-gone)" > "$HOME/gh.json"
+g -C "$m" worktree add -q "$tmp/wt-gone" sq-gone; commit "$tmp/wt-gone" g2.txt
+g -C "$m" worktree remove "$tmp/wt-gone"
+out="$(cd "$m" && "$wa" --no-fetch 2>/dev/null)"
+expect_eq "$(printf 'no\t2\thold-unmerged\tsq-gone\t-')" "$(brow "$out" sq-gone)" "a squash-merged branch with a commit after the pull request's head is held"
+cp "$tmp/gh.json.saved" "$HOME/gh.json"
+g -C "$m" branch -D gone-merged gone-unmerged sq-gone
+
 # 12. Positive control: a copy whose loop no longer skips the main worktree must fail check 2.
 mk="$tmp/mutant/skills/x"; mkdir -p "$mk/bin" "$mk/scripts"
 cp "$root/skills/ctlhq-mode/bin/ctlhq-worktree-audit" "$mk/bin/ctlhq-worktree-audit"
@@ -265,6 +387,12 @@ sed 's/^	\[ "\$wt" = "\$main_wt" \] && continue$/	:/' "$root/skills/ctlhq-mode/s
 if cmp -s "$root/skills/ctlhq-mode/scripts/worktree-audit.sh" "$mk/scripts/worktree-audit.sh"; then bad "control: planted defect did not change the script"; else ok; fi
 out="$(cd "$m" && "$mk/bin/ctlhq-worktree-audit" --no-fetch 2>/dev/null)"
 if [ -n "$(row "$out" main)" ]; then ok; else bad "control: listing the main worktree is caught by the main-worktree check"; fi
+
+wait "$hang_pid"
+expect_eq 0 "$(cat "$tmp/hang.rc")" "a hanging lease command: the audit exits 0 after the table"
+expect_eq "warn: lease setting: leases-hang status timed out after 30 s; no worktree row is marked safe" "$(grep '^warn: lease' "$tmp/hang.err")" "a hanging lease command: one warn line names the time limit"
+expect_eq "review" "$(awk -F'\t' -v w="$tmp/hang-wt" '$9 == w {print $8}' "$tmp/hang.out")" "a hanging lease command: a merged clean worktree is review, never safe"
+if pgrep -f 'sleep 97' >/dev/null; then bad "a hanging lease command that execs: its process is stopped"; else ok; fi
 
 echo "$pass checks passed"
 [ "$fail" -eq 0 ] || { echo "$fail checks failed"; exit 1; }

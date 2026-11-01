@@ -40,8 +40,32 @@ local), ahead<n>-behind<m> (diverged), no-remote, or detached.
 Buckets: hold-wip (tracked uncommitted edits), hold-open-pr (PR open or draft),
 verify-recent-chat (a chat touched it within --recent-days), safe (its commit is in the
 base, or its PR is merged), review (everything else, including a PR closed without
-merge and a branch with no PR).
-Needs git, jq, du, and rg. Uses gh for PR state when it is available.
+merge and a branch with no PR), leased (a worktree the lease command lists; never safe).
+Branch rows follow the worktree rows, after a line "# branches with no worktree: <n>":
+one row per local branch that no worktree has checked out, except the base's own branch
+(main for origin/main). Columns: MERGED, NOT_IN_BASE (commits not in the base), BUCKET,
+BRANCH, NEXT. A branch in the base is safe, and NEXT is its delete command,
+`git -C <repo> branch -d <branch>`. That command checks the branch against HEAD or its
+upstream, so it may refuse; it never deletes unmerged work. A branch whose pull request
+merged (a squash merge, for example), and whose tip is still that pull request's head
+commit, is safe too, and NEXT is `git -C <repo> branch -D <branch>`. Any other branch,
+including one with commits after the merged head, is hold-unmerged, never safe. Without
+gh, only a branch in the base is safe.
+
+Lease setting. A lease manager is a separate tool that hands out reusable worktrees.
+~/.ctlhq/worktree-lease.toml names its listing command in one line:
+  command = "<command that prints the leased worktrees as JSON>"
+Without the file, the audit reads no leases. With it, the audit runs the command once
+with /bin/sh, for at most 30 seconds. On success the command exits 0 and prints:
+  {"slots": [{"workspace_path": "/absolute/path", ...}, ...]}
+On failure it exits nonzero and may print {"error": {"message": "<why>"}}.
+A worktree at a listed workspace_path is bucket leased. When the file has no command
+line, or the command times out, exits nonzero, or prints no slots array, a "warn:" line
+names the error and no worktree row is safe.
+The line after "# base:" is "# lease: none" without the file, "# lease: ok" after the
+command ran, or "# lease: failed; no worktree row is safe".
+
+Needs git, jq, du, rg, and python3. Uses gh for PR state when it is available.
 LAST_CHAT is the newest chat that names the worktree's path, found in the Claude Code
 transcript folders of the main worktree and of the worktree (~/.claude/projects/<slug>/)
 and in every Codex session on this machine (~/.codex/sessions/, all workspaces, because

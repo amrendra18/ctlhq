@@ -16,8 +16,13 @@
 #   --recent-days <n>: a chat within the last n days puts the worktree in
 #   verify-recent-chat (default 4).
 # REMOTE: pushed, ahead<n>, behind<n>, ahead<n>-behind<m> (diverged), no-remote, detached.
-# Buckets: hold-wip, hold-open-pr, verify-recent-chat, safe (commit in the base
+# Buckets: leased, hold-wip, hold-open-pr, verify-recent-chat, safe (commit in the base
 # or PR merged), review (everything else, including a PR closed without merge).
+# ~/.ctlhq/worktree-lease.toml (command = "<cmd>") names a command that lists leased worktrees
+# as JSON; it runs once, for at most 30 seconds. A line "# lease: none", "ok", or "failed" follows
+# "# base:"; after a failure no worktree row is safe. Branch rows follow the table: each local
+# branch with no worktree is safe with its `git branch -d` command when in the base, safe with
+# `git branch -D` when its tip is the head commit of its merged PR, else hold-unmerged.
 # Timestamps use BSD stat -f and date -r (macOS); GNU stat -c and date -d are
 # the fallback.
 # Exit 0 after the table, 1 when not in a git repo or no base ref, 2 on a usage error.
@@ -88,14 +93,54 @@ if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1; then
 		"ctlhq-worktree-audit -b <ref> $(q "$repo") with a ref that \`git -C $(q "$repo") branch -a\` lists$hint"
 fi
 
-# PR state by branch, fetched once from gh as [{number, state, head}] with a
+# PR state by branch, fetched once from gh as [{number, state, head, oid}] with a
 # lowercase state. Empty when gh cannot read this repo's PRs.
 prs=$(mktemp)
 if raw=$(gh pr list --author "@me" --state all --limit 1000 \
-	--json number,state,headRefName 2>/dev/null); then
-	printf '%s' "$raw" | jq '[.[] | {number, state: (.state | ascii_downcase), head: .headRefName}]' > "$prs" 2>/dev/null
+	--json number,state,headRefName,headRefOid 2>/dev/null); then
+	printf '%s' "$raw" | jq '[.[] | {number, state: (.state | ascii_downcase), head: .headRefName, oid: .headRefOid}]' > "$prs" 2>/dev/null
 fi
 [ -s "$prs" ] || echo "[]" > "$prs"
+
+leased_paths='
+import json, os, re, subprocess, sys
+try:
+    cmd = re.search(r"^\s*command\s*=\s*\"([^\"]*)\"", open(sys.argv[1]).read(), re.M)
+except OSError as e:
+    sys.exit(f"cannot read {sys.argv[1]}: {e.strerror}")
+if not cmd:
+    sys.exit(f"{sys.argv[1]} has no line command = \"<command>\"")
+try:
+    p = subprocess.run(cmd[1], shell=True, capture_output=True, timeout=30)
+except subprocess.TimeoutExpired:
+    sys.exit(f"{cmd[1]} timed out after 30 s")
+try:
+    out = json.loads(p.stdout)
+except ValueError:
+    out = {}
+try:
+    paths = "".join(os.path.realpath(s["workspace_path"]) + "\n" for s in out["slots"])
+except Exception:
+    paths = None
+if p.returncode or paths is None:
+    try:
+        why = " ".join(out["error"]["message"].split())
+    except Exception:
+        why = f"exit {p.returncode} and no error.message"
+    sys.exit(f"{cmd[1]} failed: {why}")
+sys.stdout.write(paths)
+'
+conf="$HOME/.ctlhq/worktree-lease.toml"
+slots=$(mktemp)
+branches=$(mktemp)
+lease=none
+if [ -e "$conf" ] || [ -L "$conf" ]; then
+	lease=ok
+	if ! why=$(python3 -I -c "$leased_paths" "$conf" 2>&1 > "$slots"); then
+		lease=failed
+		printf 'warn: lease setting: %s; no worktree row is marked safe\nfix: cat %s, then run its command to see the error\n' "$why" "$(q "$conf")" >&2
+	fi
+fi
 
 # Claude Code keeps a workspace's chats in ~/.claude/projects/<workspace path with
 # "/" as "-">, or with "/", ".", and "_" as "-"; both forms are tried, as
@@ -117,6 +162,7 @@ else
 fi
 
 echo "# base: $base"
+if [ "$lease" = failed ]; then echo "# lease: failed; no worktree row is safe"; else echo "# lease: $lease"; fi
 printf "SIZE\tAGE\tMERGED\tDIRTY\tREMOTE\tPR\tLAST_CHAT\tBUCKET\tWORKTREE\n"
 
 git worktree list --porcelain | sed -n 's/^worktree //p' | while IFS= read -r wt; do
@@ -177,9 +223,28 @@ git worktree list --porcelain | sed -n 's/^worktree //p' | while IFS= read -r wt
 			else case "$pr" in */merged) bucket=safe ;; *) bucket=review ;; esac; fi ;;
 		esac ;;
 	esac
+	if grep -qxF -- "$wt" "$slots"; then bucket=leased
+	elif [ "$lease" = failed ] && [ "$bucket" = safe ]; then bucket=review; fi
 
 	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
 		"$size" "$age" "$merged" "$dirty" "$remote" "$pr" "$last" "$bucket" "$wt"
 done | sort -t$'\t' -k1,1 -rh
 
-rm -f "$prs"
+wt_branches=$(git worktree list --porcelain | sed -n 's#^branch refs/heads/##p')
+git for-each-ref --format='%(refname)' refs/heads | while IFS= read -r ref; do
+	b="${ref#refs/heads/}"
+	[ "$b" = "${base#origin/}" ] && continue
+	printf '%s\n' "$wt_branches" | grep -qxF -- "$b" && continue
+	n=$(git rev-list --count "$base..$ref" 2>/dev/null) || n="?"
+	if [ "$n" = 0 ]; then printf 'YES\t0\tsafe\t%s\tgit -C %s branch -d %s\n' "$b" "$(q "$repo")" "$(q "$b")"
+	elif jq -e --arg b "$b" --arg t "$(git rev-parse "$ref")" 'any(.[]; .head == $b and .state == "merged" and .oid == $t)' "$prs" >/dev/null 2>&1; then
+		printf 'no\t%s\tsafe\t%s\tgit -C %s branch -D %s\n' "$n" "$b" "$(q "$repo")" "$(q "$b")"
+	else printf 'no\t%s\thold-unmerged\t%s\t-\n' "$n" "$b"; fi
+done > "$branches"
+echo "# branches with no worktree: $(grep -c '' "$branches")"
+if [ -s "$branches" ]; then
+	printf "MERGED\tNOT_IN_BASE\tBUCKET\tBRANCH\tNEXT\n"
+	cat "$branches"
+fi
+
+rm -f "$prs" "$slots" "$branches"
