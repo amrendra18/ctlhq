@@ -41,7 +41,7 @@ Run the workstreams of one wave in `PLAN.md` section 5.3 in parallel, one builde
 
 ### 3.2 Review the result yourself
 
-Run your own review script from outside the repository with a throwaway state folder (`review-script-template.sh`). Read the code; name the files. Recompute one headline number. Answer the five questions in writing: completeness, correctness, quality, scale, reliability. Then spawn one fresh reviewer that did not write the code, with only the diff, the milestone block and the question "how could this pass while broken?". Save its report to `.local/reviews/M<n>.md`.
+Run your own review script from outside the repository with a throwaway state folder (`review-script-template.sh`). Read the code; name the files. Recompute one headline number. Answer the five questions in writing: completeness, correctness, quality, scale, reliability. Then run the `commit-review` skill on the diff. Save its report to `.local/reviews/M<n>.md`.
 
 ### 3.3 Fix list, then re-review
 

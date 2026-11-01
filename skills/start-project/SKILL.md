@@ -18,7 +18,7 @@ Skip this step when the operator named the folder.
 ## 2. Challenge (same first reply)
 
 1. Restate the goals and use cases as a numbered list, in the operator's own words where they fit.
-2. Spawn a fresh reviewer on the model `ctlhq-models get planners-and-reviewers` prints (in Codex, add `--host codex`; the `blind-review` skill, section 4, says how to spawn it there). Give it only the operator's idea and the inputs the idea names, never your own questions. It returns numbered questions with recommendations and a list of push-backs. Save its brief to a temporary file before spawning, and copy the brief and its report to `.local/briefs/` and `.local/reviews/` once the folder exists. While it works, write your own list.
+2. Spawn a fresh reviewer on the model `ctlhq-models get planners-and-reviewers` prints (in Codex, add `--host codex`; the `commit-review` skill, section 2, says how to spawn it there). Give it only the operator's idea and the inputs the idea names, never your own questions. It returns numbered questions with recommendations and a list of push-backs. Save its brief to a temporary file before spawning, and copy the brief and its report to `.local/briefs/` and `.local/reviews/` once the folder exists. While it works, write your own list.
 3. Merge both lists: drop duplicates, keep each point that would change the product or the plan, order by impact, and name each disagreement between the two lists with your recommendation.
 4. For each unclear, conflicting, missing, or weak point, ask one numbered yes-or-no question with a recommendation. Cover the user journeys, edge cases (empty, large, error, first run), platform, and what is out of scope. For a product with a screen, ask whether it ships an app or site icon.
 5. Where you disagree with the ask, say so and give the reason. The goal is a plan the operator will not need to change later.
@@ -42,7 +42,7 @@ Skip this step when the operator named the folder.
 4. Workstreams and waves: give every writable file and shared resource one owner. Rows in one wave run in parallel.
 5. Hooks: first-commit guards every commit and push. When `first-commit` is not on `PATH`, copy the install block from first-commit `README.md` section "First run" into the operator's block. `first-commit setup --dry-run`, `setup`, and `doctor` follow there, pinned to the commit of first-commit's latest tag (`skills/run-method/references/hooks-and-permissions.md` section 3). Setup leaves a `*.first-commit-proposal.md` beside each document this step wrote; merge it into that document and delete it.
 6. Run `ctlhq-plan-lint PLAN.md` and fix every line it prints until it exits 0.
-7. Run the `blind-review` skill on `PLAN.md` with the `planners-and-reviewers` model. Fix its findings, rerun `ctlhq-plan-lint`, and only then show the plan to the operator.
+7. Run the `plan-review` skill on `PLAN.md` with the `planners-and-reviewers` model. Fix its findings, rerun `ctlhq-plan-lint`, and only then show the plan to the operator.
 
 ## 6. Approve and hand over
 

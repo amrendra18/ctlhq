@@ -56,7 +56,7 @@ Tests alone are not sufficient verification. A PR is verified only when its unit
 - [ ] Use `gh` for every PR operation. Never require `gt`.
 - [ ] Open the PR ready, never draft, per **Opening a PR**. Use the run's built-in PR tool when it has one, else `gh pr create --base <base-branch>`. A stack child targets its parent branch.
 - [ ] Run the repo's lint and typecheck once before the PR-facing push. Push with hooks on.
-- [ ] Run the cleanup pass (ctlhq-mode's Non-negotiables) before each commit and `/no-comments` before review.
+- [ ] Run the cleanup pass (ctlhq-mode's Non-negotiables) and `/commit-review` before each commit, and `/pr-review` before the code-ready push of each pull request.
 - [ ] Triage every comment from an automated reviewer (a review bot such as Bugbot, CodeRabbit, or Copilot code review) or the security reviewer per the `automated-review-triage` reference of the ctlhq-mode skill (`skills/ctlhq-mode/references/automated-review-triage.md` in the ctlhq repository).
 - [ ] Rebase onto current trunk before the code-ready report and babysit. Keep that merge base in fix rounds. Rebase again only at merge prep, on a `git merge-tree` conflict with trunk, or on a CI failure that comes from a change on trunk.
 

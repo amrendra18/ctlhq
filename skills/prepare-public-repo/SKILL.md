@@ -40,7 +40,7 @@ bin/ctlhq-privacy-scan --root <worktree> --joined   # also words split across qu
 5. **Nothing lost.** A read-only agent compares the base commit with the combined worktree and the private place, with [the content-audit brief](references/content-audit-brief.md). It runs after the combine and before the gate. Every line labelled LOST goes back, or the operator decides to drop it.
 6. **Gate, review, commit.**
    1. Run the gate with `ctlhq-run-gate -- <check command>` after the last edit. `ctlhq-commit` refuses a gate older than the tree, so rerun it after any change.
-   2. Get a fresh review per `/blind-review`. With no `PLAN.md` milestone for this work, the checklist is the "Done when" list.
+   2. Get a fresh review per `/commit-review`. With no `PLAN.md` milestone for this work, the checklist is the "Done when" list.
    3. Commit on the combine branch with `ctlhq-commit --gate gate -- <paths>`. Commit only on the operator's own words, or under the project's written commit rule (for example a `PLAN.md` section 10 row). This commit is the readiness commit.
 7. **Banner.** Only when the operator asks for one, make banner options with [the banner brief](references/banner-brief.md) and let the operator pick by number.
 8. **Report.** Give the findings summary in the format below. It names the readiness commit hash and asks whether to bring that commit to `main`.

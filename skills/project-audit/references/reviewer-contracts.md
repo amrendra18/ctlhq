@@ -156,7 +156,7 @@ Provide the behavior-to-evidence matrix, coverage gaps, weak evidence, and the `
 
 Determine whether the code reads as if one careful author wrote it to one standard: tools enforce what can be measured, and the rest is consistent, named for what it does, and small enough to hold in your head. Lens 3 owns component boundaries, dependency direction, and removal; this lens owns how code reads inside and between modules.
 
-Run the project's own configured linters and type checker first, and report their gaps. Mechanical rules belong in tool configuration, so a finding a tool could catch also proposes the tool rule.
+Run the project's own configured linters and type checker first, and report their gaps. Answer questions 4 to 9 in the **commit-review** skill's `references/questions.md` for the scope. Mechanical rules belong in tool configuration, so a finding a tool could catch also proposes the tool rule.
 
 ### Required coverage
 
