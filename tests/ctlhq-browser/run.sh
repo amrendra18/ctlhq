@@ -140,6 +140,34 @@ chmod +x "$tmp/chrome-wrapper"
 kill -0 "$(cat "$tmp/helper.pid" 2>/dev/null || echo 0)" 2>/dev/null && bad "the helper in Chrome's group is gone after the run" || ok
 kill -0 "$ext_pid" 2>/dev/null && ok || bad "the outside Chrome still runs after the tool's own runs"
 
+cat >"$tmp/stall-wrapper" <<WRAP
+#!/bin/sh
+for a in "\$@"; do case "\$a" in --user-data-dir=*) dir="\${a#--user-data-dir=}";; esac; done
+n="\$(cat "$tmp/stalls")"
+[ "\$n" -gt 0 ] && { echo \$((n - 1)) >"$tmp/stalls"; (
+  until [ -s "\$dir/DevToolsActivePort" ]; do sleep 0.05; done
+  [ -z "\${STALL_AFTER:-}" ] || { until curl -s --max-time 5 "http://127.0.0.1:\$(head -1 "\$dir/DevToolsActivePort")/json/list" | grep -Fq "\"url\": \"\$STALL_AFTER\""; do sleep 0.1; done; sleep 2; }
+  kill -STOP \$\$ ) & }
+exec "$chrome" "\$@"
+WRAP
+chmod +x "$tmp/stall-wrapper"
+echo 1 >"$tmp/stalls"
+err="$("$fb" --chrome "$tmp/stall-wrapper" screenshot "$site/clean" --size 640x480 --out "$tmp/s.png" 2>&1)"; expect_rc 0 $? "a run whose first Chrome stops answering exits 0"
+expect_grep 'starting a new Chrome' "$err" "control: the first Chrome stopped answering and was replaced"
+expect_eq 640x480 "$(png_size "$tmp/s.png")" "the second Chrome wrote the screenshot"
+expect_eq "0 0" "$(leftovers)" "no Chrome process or profile left by the stalled run"
+echo 1 >"$tmp/stalls"
+out="$(STALL_AFTER="$site/" "$fb" --chrome "$tmp/stall-wrapper" console "$site/" --wait 15 2>"$tmp/stall.err")"; expect_rc 1 $? "console whose first Chrome stops answering after the load exits 1 on the planted page"
+expect_grep 'starting a new Chrome' "$(cat "$tmp/stall.err")" "control: the first Chrome stopped answering after the load and was replaced"
+expect_eq 1 "$(printf '%s\n' "$out" | grep -c planted-console-error)" "the planted error is printed once"
+expect_eq "$(printf '%s\n' "$out" | sort -u | wc -l)" "$(printf '%s\n' "$out" | wc -l)" "every console entry is printed once"
+echo 2 >"$tmp/stalls"
+rm -f "$tmp/s.png"
+err="$("$fb" --chrome "$tmp/stall-wrapper" screenshot "$site/clean" --out "$tmp/s.png" 2>&1)"; expect_rc 1 $? "a run whose second Chrome also stops answering exits 1"
+expect_eq 1 "$(printf '%s\n' "$err" | grep -c 'starting a new Chrome')" "a second stalled Chrome gets no second retry"
+[ -e "$tmp/s.png" ] && bad "no file is written when both Chromes stop answering" || ok
+expect_eq "0 0" "$(leftovers)" "no Chrome process or profile left by the twice-stalled run"
+
 # 9. SIGTERM during a run: exit 143, Chrome and profile gone.
 "$fb" screenshot "$site/clean" --wait 60 --out "$tmp/never.png" 2>/dev/null & run_pid=$!
 own_tab_open() { # the tool's own Chrome lists a tab at $site/clean, so the run is past navigation
@@ -158,7 +186,7 @@ expect_grep '^[1-9][0-9]* 1$' "$running" "control: the tool's Chrome was running
 expect_eq "0 0" "$(leftovers)" "no Chrome process or profile left after SIGTERM"
 
 # 10. --attach uses the outside Chrome, closes only its own tab, and leaves that Chrome running.
-tabs() { curl -s "http://127.0.0.1:$eport/json/list" | python3 -c 'import json,sys; print(sum(1 for t in json.load(sys.stdin) if t["type"]=="page"))'; }
+tabs() { curl -s --max-time 5 "http://127.0.0.1:$eport/json/list" | python3 -c 'import json,sys; print(sum(1 for t in json.load(sys.stdin) if t["type"]=="page"))'; }
 before="$(tabs)"
 out="$("$fb" --attach "$eport" console "$site/" 2>/dev/null)"; expect_rc 1 $? "--attach console exits 1 on the planted page"
 expect_grep 'planted-console-error' "$out" "--attach reports the planted error"

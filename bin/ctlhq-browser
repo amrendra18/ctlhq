@@ -34,7 +34,10 @@ Options:
 Chrome lifetime. Without --attach, the tool starts Chrome with a new temporary profile
 under $TMPDIR (ctlhq-browser-*) and a free remote debugging port, in its own process
 group. On exit, also after an error or Ctrl-C, it closes that Chrome, kills only that
-process group, and deletes the profile.
+process group, and deletes the profile. If that Chrome stops answering on its debugging
+port, the tool stops it and runs the subcommand once more with a new Chrome. The
+second run counts against the same overall time limit, so a freeze late in a long run
+can still end in a timeout.
 
 Requires Node 22 or later (built-in WebSocket); no packages.
 
@@ -162,6 +165,7 @@ class CDP {
       timer = setTimeout(() => { off(); reject(new Failure(`${what || method} did not arrive within ${timeoutMs / 1000} s`)); }, timeoutMs);
     });
     p.cancel = () => { clearTimeout(timer); off(); };
+    p.catch(() => {});
     return p;
   }
   close() { try { this.ws.close(); } catch {} }
@@ -189,11 +193,15 @@ class OwnedChrome {
       if (this.exited) throw new Failure(`Chrome exited during start: ${this.stderrTail.trim().split('\n').slice(-3).join(' | ')}`);
       try {
         const [port, wsPath] = fs.readFileSync(portFile, 'utf8').split('\n');
-        if (port && wsPath) return `ws://127.0.0.1:${port.trim()}${wsPath.trim()}`;
+        if (port && wsPath) { this.port = port.trim(); return `ws://127.0.0.1:${this.port}${wsPath.trim()}`; }
       } catch {}
       await sleep(100);
     }
     throw new Failure(`Chrome did not open its debugging port within ${timeoutMs / 1000} s`);
+  }
+  async hung() {
+    if (!this.port || this.exited) return false;
+    try { await devtoolsVersion(this.port); return false; } catch { return true; }
   }
   groupAlive() {
     if (!this.child || !this.child.pid) return false;
@@ -220,9 +228,13 @@ class OwnedChrome {
   }
 }
 
+function devtoolsVersion(port) {
+  return fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(5000) });
+}
+
 async function attachUrl(port) {
   let r;
-  try { r = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(5000) }); } catch (e) {
+  try { r = await devtoolsVersion(port); } catch (e) {
     throw new Failure(`no Chrome answers on 127.0.0.1:${port} (${e.cause ? e.cause.code || e.cause.message : e.message})`);
   }
   const v = await r.json();
@@ -241,8 +253,9 @@ function remoteText(arg) {
   return arg.description || arg.type;
 }
 
-async function run(o) {
+async function run(o, chrome) {
   const timeoutMs = o.timeout * 1000;
+  const live = () => { if (chrome && chrome.abandoned) throw new Failure('this run was abandoned'); };
   const cdp = await CDP.connect(o.wsUrl, 10000);
   o.cdp = cdp;
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
@@ -313,10 +326,12 @@ async function run(o) {
   if (nav.errorText) { loaded.cancel(); throw new Failure(`${o.url} did not load: ${nav.errorText}`); }
   await loaded;
   await sleep(o.wait * 1000);
+  live();
 
   if (o.cmd === 'screenshot') {
     const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, s);
     const buf = Buffer.from(data, 'base64');
+    live();
     writeOut(o.out, buf);
     log(`wrote ${o.out}: PNG ${w}x${h}, ${buf.length} bytes`);
   } else if (o.cmd === 'trace') {
@@ -336,6 +351,7 @@ async function run(o) {
     const buf = Buffer.concat(parts);
     let events = '?';
     try { const j = JSON.parse(buf.toString('utf8')); events = (Array.isArray(j) ? j : j.traceEvents || []).length; } catch {}
+    live();
     writeOut(o.out, buf);
     log(`wrote ${o.out}: ${events} trace events over ${o.seconds} s, ${buf.length} bytes`);
   } else if (o.cmd === 'heap') {
@@ -348,6 +364,7 @@ async function run(o) {
     const text = chunks.join('');
     let nodes = '?';
     try { nodes = JSON.parse(text).snapshot.node_count; } catch {}
+    live();
     writeOut(o.out, text);
     log(`wrote ${o.out}: heap snapshot, ${nodes} nodes, ${Buffer.byteLength(text)} bytes`);
   } else if (o.cmd === 'console') {
@@ -369,6 +386,17 @@ async function run(o) {
   }
 }
 
+async function runOwned(o, chrome) {
+  o.wsUrl = await chrome.start(o.chrome, o.headed, 20000);
+  const watch = (async () => {
+    while (!chrome.abandoned) {
+      await sleep(5000);
+      if (!chrome.abandoned && await chrome.hung()) throw new Failure('Chrome stopped answering on its debugging port');
+    }
+  })();
+  try { await Promise.race([run(o, chrome), watch]); } finally { chrome.abandoned = true; }
+}
+
 async function main() {
   let o;
   try { o = parseArgs(process.argv.slice(2)); } catch (e) {
@@ -379,7 +407,7 @@ async function main() {
   }
   if (o.help) { process.stdout.write(HELP); return 0; }
 
-  const chrome = o.attach ? null : new OwnedChrome();
+  let chrome = o.attach ? null : new OwnedChrome();
   let finished = false;
   const cleanup = async () => {
     if (o.cdp && o.targetId && !o.cdp.closed) {
@@ -408,8 +436,19 @@ async function main() {
 
   let code = 0;
   try {
-    o.wsUrl = o.attach ? await attachUrl(o.attach) : await chrome.start(o.chrome, o.headed, 20000);
-    await run(o);
+    if (o.attach) {
+      o.wsUrl = await attachUrl(o.attach);
+      await run(o);
+    } else {
+      try { await runOwned(o, chrome); } catch (e) {
+        if (!(e instanceof Failure) || !(await chrome.hung()) || finished) throw e;
+        log(`${e.message}; starting a new Chrome`);
+        await cleanup();
+        if (finished) return null;
+        chrome = new OwnedChrome(); o.cdp = null; o.targetId = null;
+        await runOwned(o, chrome);
+      }
+    }
     code = o.exitCode || 0;
   } catch (e) {
     if (!(e instanceof Failure)) log(`error: ${e.stack || e}`); else log(e.message);
