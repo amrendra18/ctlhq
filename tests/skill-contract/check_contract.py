@@ -17,6 +17,9 @@ Checks, each reported as `file:line: message`:
      lines are reported too). The separate tools are the names any skill there lists. A call is inline code or a
      fenced code line whose first word, or the first word after &&, ||, ;, |, or a
      parenthesis, is the tool's name followed by one more word.
+  7. every "the **X** skill's section N", "the X skill, section N", "X's section N", "`X`
+     section N" or "**X** section N", or "section N of X" that names a skill X points at a "## N." heading in
+     that skill's SKILL.md.
 
 Placeholders such as `<title>` and globs are skipped. `--help` runs with HOME set to an
 empty temp folder and stdin closed. Prints "N checks passed" and exits 0, or prints every
@@ -37,6 +40,13 @@ NOT_SKILL_WORDS = {"project-local"}
 PATHCH = r"A-Za-z0-9_./~$@-"
 SKILLS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "bin", "ctlhq-skills")
 CHAIN = re.compile(r"&&|\|\||[;|()]")
+SECTION_REFS = [re.compile(p) for p in (
+    r"\b[Tt]he (?P<mark>\*\*|`)?(?P<name>[a-z0-9][a-z0-9-]*)(?P=mark)? skill['’]s section (?P<n>\d+)\b",
+    r"(?<![A-Za-z0-9_*`-])(?P<mark>\*\*|`)?(?P<name>[a-z0-9][a-z0-9-]*)(?P=mark)?['’]s section (?P<n>\d+)\b",
+    r"\b[Ss]ection (?P<n>\d+) of (?:the )?(?P<mark>\*\*|`)?(?P<name>[a-z0-9][a-z0-9-]*)",
+    r"\b[Tt]he (?P<mark>\*\*|`)?(?P<name>[a-z0-9][a-z0-9-]*)(?P=mark)? skill, section (?P<n>\d+)\b",
+    r"(?P<mark>\*\*|`)(?P<name>[a-z0-9][a-z0-9-]*)(?P=mark) section (?P<n>\d+)\b",
+)]
 
 
 def scan_files(root):
@@ -100,6 +110,7 @@ class Checker:
         ag = os.path.join(root, "agents")
         self.agents = set(p[:-3] for p in os.listdir(ag) if p.endswith(".md")) if os.path.isdir(ag) else set()
         self.help = {}
+        self.sections = {}
         self.home = tempfile.mkdtemp(prefix="skill-contract-home.")
         self.problems = []
         self.passed = 0
@@ -264,6 +275,20 @@ class Checker:
                     else:
                         self.problem(path, n, "`%s` is a separate tool that skills/%s/SKILL.md does not name under `metadata:` as `separate-tools`" % (tool, s))
 
+    def section_refs(self, path, n, line):
+        for pat in SECTION_REFS:
+            for m in pat.finditer(line):
+                name, num = m.group("name"), m.group("n")
+                if name not in self.skills:
+                    continue
+                if name not in self.sections:
+                    with open(os.path.join(self.root, "skills", name, "SKILL.md"), encoding="utf-8") as fh:
+                        self.sections[name] = set(re.findall(r"(?m)^## (\d+)\.", fh.read()))
+                if num in self.sections[name]:
+                    self.ok()
+                else:
+                    self.problem(path, n, "`%s`: skills/%s/SKILL.md has no `## %s.` heading" % (m.group(0), name, num))
+
     def run(self):
         self.separate_tools()
         for path in scan_files(self.root):
@@ -282,6 +307,7 @@ class Checker:
                 for span in re.findall(r"`([^`]+)`", line):
                     self.invocation(path, i, span)
                 self.skill_names(path, i, line)
+                self.section_refs(path, i, line)
         return self
 
 

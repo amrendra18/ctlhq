@@ -49,10 +49,13 @@ name: alpha
 ---
 # alpha
 
+## 1. Steps
+
 Fine look-alikes: run `bin/good run --json`, read `references/real.md` and `references/<topic>.md`.
 Also `skills/ctlhq-mode/playbooks/real.md`, `/loop`, `/alpha`, the `ctlhq-mode` skill, ctlhq-agent.
 Also the project-local skill, the verification skill, `$HOME/projects/widget/bin/widget`, and /Users/x/tmp/file.
 Also the name `sidecar` alone, and `sidecar.md is a file`.
+Also the **alpha** skill's section 1, alpha's section 1, section 1 of `alpha`, the `alpha` skill, section 1, `alpha` section 1, and the plan's section 10.
 
 ```
 bin/good run --json    # a fenced line that is fine
@@ -68,6 +71,8 @@ DEFECT-6 read `playbooks/missing.md` here.
 DEFECT-7 read `references/missing.md` here.
 DEFECT-8 use `/ghost-skill` here.
 DEFECT-9 use the `phantom` skill here.
+DEFECT-13 read the **alpha** skill's section 9 here.
+DEFECT-14 read **alpha** section 8 here.
 ```
 good stroll            # DEFECT-10 a fenced line with an unknown subcommand
 ```
@@ -91,15 +96,17 @@ expect_grep "^$f:$(ln DEFECT-9): skill \`phantom\` \(named as the phantom skill\
 expect_grep "^$f:$(ln DEFECT-10): \`good stroll\`: subcommand \`stroll\` is not in \`good --help\`" "$out" "control 10: unknown subcommand on a fenced line reported"
 expect_grep "^$f:$(ln DEFECT-11): \`sidecar\` is a separate tool that skills/alpha/SKILL.md does not name" "$out" "control 11: a separate tool the skill's front matter does not name is reported"
 expect_grep "^skills/alpha/references/real.md:3: \`sidecar\` is a separate tool" "$out" "control 12: a call in a references file after && is reported"
-expect_eq 12 "$(printf '%s\n' "$out" | grep -c '^skills/\|^agents/')" "exactly the 12 planted problems are reported (no false positives on the look-alikes)"
-expect_grep '^12 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "summary line counts 12 problems"
+expect_grep "^$f:$(ln DEFECT-13): \`the \*\*alpha\*\* skill's section 9\`: skills/alpha/SKILL.md has no \`## 9\.\` heading" "$out" "control 13: a section number the named skill does not have reported"
+expect_grep "^$f:$(ln DEFECT-14): \`\*\*alpha\*\* section 8\`: skills/alpha/SKILL.md has no \`## 8\.\` heading" "$out" "control 14: a section the bare marked form names is checked too"
+expect_eq 14 "$(printf '%s\n' "$out" | grep -c '^skills/\|^agents/')" "exactly the 14 planted problems are reported (no false positives on the look-alikes)"
+expect_grep '^14 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "summary line counts 14 problems"
 
 cp "$fx/skills/alpha/SKILL.md" "$tmp/alpha.md"
 printf -- '---\nname: alpha\nmetadata:\n  separate-tools: sidecar\n---\n' >"$fx/skills/alpha/SKILL.md"
 sed '1,3d' "$tmp/alpha.md" >>"$fx/skills/alpha/SKILL.md"
 out="$(python3 "$chk" --root "$fx" 2>&1)"
 expect_nogrep 'sidecar' "$out" "a named separate tool is accepted in SKILL.md and references/"
-expect_grep '^10 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "only the 10 other planted problems remain"
+expect_grep '^12 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "only the 12 other planted problems remain"
 cp "$tmp/alpha.md" "$fx/skills/alpha/SKILL.md"
 expect_nogrep 'widget|/Users/x|project-local|verification|`loop`|`alpha`|ctlhq-agent|ctlhq-mode|real\.md|<topic>' "$out" "look-alikes are not reported"
 
@@ -126,8 +133,8 @@ printf -- '---\nname: flow\nmetadata:\n  separate-tools: [sidecar, other]\n---\n
 printf -- '---\nname: block\nmetadata:\n  separate-tools:\n    - sidecar\n---\n# block\n' >"$lf/skills/block/SKILL.md"
 out="$(python3 "$chk" --root "$lf" 2>&1)"; rc=$?
 expect_rc 1 "$rc" "separate-tools written as a YAML list exits 1"
-expect_grep '^skills/flow/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 13: a list in brackets is reported with file:line"
-expect_grep '^skills/block/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 14: a list on the lines after separate-tools: is reported with file:line"
+expect_grep '^skills/flow/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 15: a list in brackets is reported with file:line"
+expect_grep '^skills/block/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 16: a list on the lines after separate-tools: is reported with file:line"
 
 # 3. This repository: every SKILL.md, playbook, and agent file.
 out="$(python3 "$chk" --root "$root" 2>&1)"; rc=$?

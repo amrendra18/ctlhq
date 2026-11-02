@@ -513,6 +513,27 @@ expect_grep "HEAD's parent is not ${h0:0:12}" "$fixl" "the fix: line says HEAD's
 expect_grep "git reset --soft ${h0:0:12}" "$fixl" "the fix: line names that earlier commit"
 case "$fixl" in *HEAD~1*) bad "the fix: line leaves out git reset --soft HEAD~1";; *) ok;; esac
 
+fresh review; r="$(pwd -P)"; printf 'a2\n' > a.txt; h="$(git rev-parse HEAD)"; i="$(index_sum)"
+mkdir -p .local/reviews; : > .local/reviews/empty.md; printf ' \n\t\n' > .local/reviews/blank.md; mkdir .local/reviews/folder.md; printf 'r\n' > .local/reviews/locked.md; chmod 000 .local/reviews/locked.md
+for case in 'missing.md|does not exist' 'folder.md|is not a regular file' 'locked.md|cannot be read' 'empty.md|is empty' 'blank.md|is empty'; do
+  f="${case%%|*}"; why="${case#*|}"
+  err="$("$fc" --review ".local/reviews/$f" "${four[@]}" -- a.txt 2>&1)"; expect_rc 3 $? "R1: a review file that $why exits 3"
+  expect_grep "^ctlhq-commit: review file $r/\.local/reviews/$f $why( \(.*\))?; refusing to commit$" "$err" "R1: the '$f' refusal names the file and why"
+  expect_grep '^fix: save the reviewer' "$err" "R1: the '$f' refusal has a fix: line"
+  expect_eq "$i" "$(index_sum)" "R1: the '$f' refusal leaves the index unchanged"
+done
+chmod 644 .local/reviews/locked.md
+expect_eq "$h" "$(git rev-parse HEAD)" "R1: no commit after the review refusals"
+printf 'accept\n' > .local/reviews/a.md
+out="$("$fc" --review .local/reviews/a.md "${four[@]}" -- a.txt 2>&1)"; expect_rc 0 $? "R2: a saved review file commits"
+expect_grep "^review: \.local/reviews/a\.md$" "$out" "R2: the review path is printed relative to the repository"
+review_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["review"])' ".local/commits/$1.json"; }
+expect_eq ".local/reviews/a.md" "$(review_of "$(git rev-parse HEAD)")" "R2: the receipt records the review file's path, as it does the message file's"
+"$fc" --review "" "${four[@]}" -- a.txt >/dev/null 2>&1; expect_rc 2 $? "R2: an empty --review value is a usage error"
+printf 'a3\n' > a.txt; "$fc" "${four[@]}" -- a.txt >/dev/null 2>&1
+expect_eq "None" "$(review_of "$(git rev-parse HEAD)")" "R3: without --review the receipt's review is null"
+expect_grep '\[--review FILE\]' "$("$fc" --help)" "R4: --help lists --review"
+
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then echo "$fail checks failed"; exit 1; fi
 exit 0
