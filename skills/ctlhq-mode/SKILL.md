@@ -56,7 +56,7 @@ Remaining triggers:
 - "Is it finished?", "can a newcomer use this?", or about to call a project done → the **adoption-test** skill: follow the README on a fresh checkout as a newcomer, log every friction, declare the tier.
 - About to claim done in a project with `scripts/verify` → run it. "Done" means a harness run whose evidence folder (`.local/verify/<UTC time>/`) and exit code the reply names. A claim without that folder is not done.
 - A new idea or project ("I have an idea for X", "start a new project") → the **start-project** skill, which ends with an approved `PLAN.md` and hands over to **run-method**. Other multi-step work built, researched, or reviewed end to end, including a new feature in an existing project → the **run-method** skill.
-- Before the first milestone of a build or an autonomous run → `ctlhq-preflight --repo <project>`. Each `missing` line, with its `fix:` line, goes to `BLOCKED.md` before work starts.
+- Before the first milestone of a build or an autonomous run → `ctlhq-preflight --repo <project> --hooks`. Each `missing` line, with its `fix:` line, goes to `BLOCKED.md` before work starts.
 - A check needs a new host permission (screen recording, browser access, a sandbox grant) → one attempt. If it fails, write the exact grant to `BLOCKED.md` with the operator as owner, then keep working on everything else.
 - The operator accepted a milestone and the next feature is pending → the **project-audit** skill at `quick` depth on the accepted commit, before the next feature starts.
 - Cleanup, "too many docs", stale files, disk space, or the end of a long work block → the **garden** skill (`ctlhq-doc-diet` reports; deletion only after the operator's yes).

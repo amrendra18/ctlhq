@@ -13,7 +13,7 @@ Deleting `.git` cannot be undone without the backup, so the backup comes first a
 
 ## Steps
 
-1. **Preconditions.** Stop at the first one that fails, and say which. [The verification commands](references/verify.md) section 0 checks 1 to 6 in one block.
+1. **Preconditions.** Stop at the first one that fails, and say which. [The verification commands](references/verify.md) section 0 checks 1 to 6 and 11 in one block.
    1. The `/prepare-public-repo` report, or the operator in their own words, names the readiness commit. `git rev-parse HEAD` prints that same hash. Otherwise stop.
    2. `git status --porcelain` prints nothing, so the tree is clean. `git worktree list` shows one worktree.
    3. `git ls-files -ci --exclude-standard` prints nothing, so no tracked file is also ignored. After the reset, `git add -A` would leave such a file out.
@@ -24,6 +24,7 @@ Deleting `.git` cannot be undone without the backup, so the backup comes first a
    8. The operator has created the empty GitHub repository (no README, license, or `.gitignore`) and named its owner and name.
    9. The remote is private, per [the verification commands](references/verify.md) section 1. When anyone can read it, stop and ask, unless the operator chose a public remote in their own words. A private remote lets the scan run before anyone can see the commit.
    10. `git rev-parse 'HEAD^{tree}'` prints the old tree ID. Record it for the reset block and step 4.
+   11. `ctlhq-preflight --repo <repo> --hooks --need git,ssh-add,ssh-keygen,tar` exits 0. With a `.pre-commit-config.yaml`, it runs the commit hooks on the whole tree. A plain hook file goes away with `.git`. When the project expects it, reinstall it before the reset commit ([the reset block](references/reset-block.md) optional line 2, [the notes](references/notes.md) row 8). It also checks `.git` writes, the signing key, free disk for the backup, and the tools. Add `--min-disk <GiB>` when `.git` is larger than 2 GiB.
 2. **Back up `.git`.** Write a named archive outside the repository. Then extract it to scratch and check its tree ID, as in [the verification commands](references/verify.md) section 2.
 3. **Reset.** Write the commit message from [the message template](references/commit-message.md) to a file outside the repository. Ask the operator about the block's two optional lines (time zone, commit hooks). Then give the operator [the reset block](references/reset-block.md), filled in, ready to paste. Agents are usually blocked from removing `.git`, `git init`, and `git config`, so the operator runs it.
 4. **Verify.** Run every check in [the verification commands](references/verify.md) section 3. They prove one commit, the same tree ID as before, the intended author and email, a good signature, and `ctlhq-first-push` exit 0. The last check reruns the gate on the new commit.

@@ -206,6 +206,32 @@ print(len(c), c[0]["state"], "ctlhq-preflight --help, check 8" in c[0]["fix"])
 ')"
 expect_eq "1 missing True" "$res" "--json carries the push guard check"
 
+hrepo="$tmp/hooks-repo"
+git init -q "$hrepo"
+printf 'fine\n' >"$hrepo/a.txt"
+git -C "$hrepo" add a.txt
+hrun() { (cd "$hrepo" && PATH="$root/tests/stand-ins/pre-commit:$PATH" SSH_AUTH_SOCK="$full" "$pf" --min-disk 0 --need git "$@" 2>&1); }
+hook_rows() { printf '%s\n' "$1" | grep -cE '^[0-9]+\. [a-z]+ +hook pre-commit '; }
+out="$(hrun --hooks)"; expect_rc 0 $? "no hook exits 0 with --hooks"
+expect_eq 0 "$(hook_rows "$out")" "no hook prints no hook row"
+printf '#!/bin/sh\nexit 1\n' >"$hrepo/.git/hooks/pre-commit"; chmod +x "$hrepo/.git/hooks/pre-commit"
+out="$(hrun --hooks)"; expect_rc 0 $? "a plain hook file exits 0, because git runs it at the first commit"
+expect_eq 1 "$(hook_rows "$out")" "a plain hook file prints 1 hook row"
+expect_grep '^7\. ready +hook pre-commit +\.git/hooks/pre-commit runs at the first commit$' "$out" "a plain hook file is ready and says when it runs"
+expect_eq 0 "$(hook_rows "$(hrun)")" "without --hooks there is no hook row"
+printf 'repos: []\n' >"$hrepo/.pre-commit-config.yaml"
+out="$(hrun --hooks)"; expect_rc 0 $? "a passing pre-commit run exits 0"
+expect_eq 1 "$(hook_rows "$out")" "a passing pre-commit run prints 1 hook row"
+expect_grep '^7\. ready +hook pre-commit +pre-commit run --all-files exited 0$' "$out" "a passing pre-commit run is ready"
+printf 'fine \n' >"$hrepo/a.txt"
+out="$(hrun --hooks)"; expect_rc 1 $? "a failing pre-commit run exits 1"
+expect_eq 1 "$(hook_rows "$out")" "a failing pre-commit run prints 1 hook row"
+expect_grep '^7\. missing +hook pre-commit +pre-commit run --all-files exited 1: a\.txt$' "$out" "a failing pre-commit run is missing with the output's last line"
+expect_grep 'fix: run `pre-commit run --all-files` for its full output' "$(line_of 'missing +hook pre-commit' "$out")" "the failing row has a fix line"
+out="$(cd "$hrepo" && PATH="/usr/bin:/bin" SSH_AUTH_SOCK="$full" "$pf" --min-disk 0 --need git --hooks 2>&1)"; expect_rc 1 $? "a config with no pre-commit on PATH exits 1"
+expect_grep '^7\. missing +hook pre-commit +pre-commit is not on PATH$' "$out" "a config with no pre-commit on PATH is missing"
+expect_grep 'pre-commit run --all-files' "$("$pf" --help)" "--help names what --hooks runs"
+
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then
 	echo "$fail checks failed"

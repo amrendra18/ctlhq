@@ -1,7 +1,7 @@
 # Stand-ins
 
-Stand-ins replace outside systems in tests: Claude Code, GitHub, and your commit signing
-key. None of them makes a network call or touches your ssh-agent. The test is
+Stand-ins replace outside systems in tests: Claude Code, GitHub, your commit signing
+key, and pre-commit. None of them makes a network call or touches your ssh-agent. The test is
 `tests/stand-ins/run.sh`; `bin/ctlhq-test` runs it.
 
 ## Fake Claude Code (`claude/claude`)
@@ -94,3 +94,16 @@ checks that your ssh-agent's key count is the same before and after.
 
 What it does not cover: GPG keys, hardware keys (a YubiKey stand-in belongs in the projects
 that use hardware keys), passphrases, and signing a push or a tag on a real host.
+
+## Fake pre-commit (`pre-commit/pre-commit`)
+
+What it replaces: `pre-commit run --all-files`, the one call `ctlhq-preflight --hooks` makes, so
+a test needs no hook download.
+
+How to use it: put `tests/stand-ins/pre-commit` first on `PATH` and run it in a Git work tree.
+It plays one hook, `trailing-whitespace`. It prints `Passed` and exits 0 when no tracked file
+has a line that ends in a space. Otherwise it prints `Failed`, then the names of those files,
+and exits 1. Any other arguments exit 2. `tests/ctlhq-preflight/run.sh` uses it.
+
+What it does not cover: reading `.pre-commit-config.yaml`, any other hook, fixing files, and
+every other `pre-commit` command.

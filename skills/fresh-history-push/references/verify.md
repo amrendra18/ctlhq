@@ -2,7 +2,7 @@
 
 Read each exit code directly. Replace every `<placeholder>`.
 
-## 0. Preconditions 1 to 6
+## 0. Preconditions 1 to 6 and 11
 
 Run it in `<repo>`, the main folder. Each line prints its precondition number and exit code.
 
@@ -23,6 +23,8 @@ ctlhq-run-gate -- <check command>
 echo "5 gate exit $?"
 p="$(git rev-parse --git-path info/exclude)" && { test ! -e "$p" || { grep -qvE '^[[:space:]]*(#|$)' "$p"; test $? -eq 1; }; }
 echo "6 no info/exclude pattern exit $?"
+ctlhq-preflight --repo "<repo>" --hooks --need git,ssh-add,ssh-keygen,tar
+echo "11 preflight exit $?"
 ```
 
 1. Every line must print exit 0. Any other code fails that precondition. A failing Git command fails its line too.
