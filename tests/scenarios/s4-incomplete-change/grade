@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -u
+[ $# -eq 1 ] || { echo "usage: grade DIR" >&2; exit 2; }
+"$(dirname "$0")/../../../bin/ctlhq-rename-check" --root "$1" vexlo
+rc=$?
+[ "$rc" -le 1 ] || exit 2
+git -C "$1" grep -qi --untracked tarnby || { echo "the new name tarnby appears nowhere"; rc=1; }
+exit "$rc"

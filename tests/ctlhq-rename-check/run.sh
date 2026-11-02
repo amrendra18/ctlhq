@@ -104,6 +104,20 @@ expect_grep '^start\.md:1: content: bright-loom$' "$out" "a link's target text i
 expect_eq 0 "$(count '^alias\.md:' "$out")" "a link is not followed into the file it points to"
 expect_eq "2 hits, 0 allowed" "$(printf '%s\n' "$out" | tail -1)" "the linked file counts once, under its own path"
 
+s4="$root/tests/scenarios/s4-incomplete-change"
+"$s4/setup" "$tmp/s4-start" >/dev/null; expect_rc 0 $? "s4 setup builds the start state"
+out="$("$s4/grade" "$tmp/s4-start" 2>&1)"; rc=$?
+expect_rc 1 "$rc" "the s4 grader fails the start state"
+expect_grep '^6 hits, 0 allowed$' "$out" "the s4 start state has 6 hits"
+"$s4/setup" --renamed "$tmp/s4-renamed" >/dev/null; expect_rc 0 $? "s4 setup builds the renamed state"
+out="$("$s4/grade" "$tmp/s4-renamed" 2>&1)"; rc=$?
+expect_rc 0 "$rc" "the s4 grader passes a finished rename"
+expect_eq "0 hits, 0 allowed" "$out" "a finished rename prints only the summary"
+git -C "$tmp/s4-renamed" rm -rq .
+out="$("$s4/grade" "$tmp/s4-renamed" 2>&1)"; rc=$?
+expect_rc 1 "$rc" "the s4 grader fails a tree with neither name"
+expect_grep '^the new name tarnby appears nowhere$' "$out" "the grader names the missing new name"
+
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then
 	echo "$fail checks failed"
