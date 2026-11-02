@@ -161,7 +161,45 @@ if [ -f "$tmp/plain-copy/sub/file.txt" ]; then ok; else bad "plain copy carries 
 "$at" checkout "$tmp/nosuch" "$tmp/x" >/dev/null 2>&1; expect_rc 2 $? "checkout of a missing repo exits 2"
 if [ -e "$tmp/x" ]; then bad "a refused checkout must not create dest"; else ok; fi
 
-# 8. Usage errors.
+# 8. clean-home.
+real="$tmp/realhome"
+mkdir -p "$real/.local/bin" "$tmp/work/bin"
+printf '#!/bin/sh\necho mine\n' > "$real/.local/bin/only-mine"
+chmod +x "$real/.local/bin/only-mine"
+run_real() { env -i HOME="$real" PATH="$real/.local/bin:$PATH" TERM=dumb LANG=C SHELL=/bin/sh TMPDIR="$tmp" USER=author SSH_AUTH_SOCK="$tmp/agent.sock" "$@"; }
+out="$(run_real sh -c 'only-mine' 2>&1)"; rc=$?
+expect_rc 0 "$rc" "the fixture command runs from the real HOME's PATH"
+out="$(run_real "$at" clean-home "$tmp/newhome" "$tmp/work" sh -c 'only-mine' 2>&1)"; rc=$?
+expect_rc 127 "$rc" "clean-home: a command found only under the real HOME exits 127"
+out="$(run_real "$at" clean-home "$tmp/newhome" "$tmp/work" only-mine 2>&1)"; rc=$?
+expect_rc 127 "$rc" "clean-home: running that command directly exits 127"
+expect_grep '^ctlhq-adoption-test: command not found in the clean PATH: only-mine$' "$out" "clean-home names the missing command"
+out="$(run_real "$at" clean-home "$tmp/newhome" "$tmp/work" sh -c 'printf "%s|%s|" "$HOME" "$(pwd -P)"; git --version >/dev/null && echo git' 2>/dev/null)"; rc=$?
+expect_rc 0 "$rc" "clean-home: a system command still runs"
+expect_eq "$(cd "$tmp" && pwd -P)/newhome|$(cd "$tmp/work" && pwd -P)|git" "$out" "clean-home sets HOME and runs in the folder"
+if [ -d "$tmp/newhome" ] && [ -z "$(ls -A "$tmp/newhome")" ]; then ok; else bad "clean-home creates the new HOME empty"; fi
+printf '#!/bin/sh\necho relative\n' > "$tmp/work/bin/demo"; chmod +x "$tmp/work/bin/demo"
+out="$(cd "$tmp" && run_real "$at" clean-home "$tmp/newhome" "$tmp/work" bin/demo 2>/dev/null)"; expect_eq relative "$out" "clean-home resolves a relative command path against the folder"
+printf '#!/bin/sh\necho folder\n' > "$tmp/work/demo"; chmod +x "$tmp/work/demo"
+out="$(cd "$tmp/work" && run_real env PATH=":$tmp/work/bin:/usr/bin:/bin" "$at" clean-home "$tmp/newhome" "$tmp/work" demo 2>/dev/null)"; expect_eq relative "$out" "clean-home with an empty PATH entry still runs the command found on the clean PATH"
+out="$(run_real "$at" clean-home "$tmp/newhome" "$tmp/work" /usr/bin/env 2>/dev/null)"
+expect_eq "HOME LANG PATH SHELL TERM TMPDIR" "$(printf '%s\n' "$out" | cut -d= -f1 | sort | xargs)" "clean-home passes only HOME, PATH, TERM, LANG, SHELL, and TMPDIR"
+expect_eq 0 "$(count '^SSH_AUTH_SOCK=|^USER=|^PATH=(.*:)?'"$real"'/\.local/bin(:|$)' "$out")" "clean-home shows 0 of 3 planted values (SSH_AUTH_SOCK, USER, a PATH entry under the real HOME)"
+out="$(run_real env TMPDIR="$real/tmp" "$at" clean-home "$tmp/newhome" "$tmp/work" /usr/bin/env 2>/dev/null)"
+expect_no_grep '^TMPDIR=' "$out" "clean-home drops a kept variable that names a path under the real HOME"
+err="$(run_real "$at" clean-home "$tmp/newhome" "$tmp/work" true 2>&1 >/dev/null)"
+expect_grep '^clean-home: HOME=.*newhome; dropped 1 PATH entries and [0-9]+ variables; kept HOME, LANG, PATH, SHELL, TERM, TMPDIR$' "$err" "clean-home reports the new HOME and what it dropped and kept"
+run_real "$at" clean-home "$real" "$tmp/work" true >/dev/null 2>&1; expect_rc 2 $? "clean-home refuses the real HOME"
+run_real "$at" clean-home "$real/sub" "$tmp/work" true >/dev/null 2>&1; expect_rc 2 $? "clean-home refuses a folder under the real HOME"
+if [ -e "$real/sub" ]; then bad "a refused clean-home must not create the folder"; else ok; fi
+run_real "$at" clean-home "$tmp/newhome" "$tmp/nowork" true >/dev/null 2>&1; expect_rc 2 $? "clean-home with a missing folder exits 2"
+run_real "$at" clean-home "$tmp/newhome" "$tmp/work" >/dev/null 2>&1; expect_rc 2 $? "clean-home without a command exits 2"
+run_real "$at" clean-home "$tmp/newhome" "$tmp/work" sh -c 'exit 5' >/dev/null 2>&1; expect_rc 5 $? "clean-home passes the command's exit code through"
+printf 'echo hi\n' > "$tmp/work/noexec"; out="$(run_real "$at" clean-home "$tmp/newhome" "$tmp/work" ./noexec 2>&1)"; expect_rc 126 $? "clean-home: a command that is not executable exits 126"
+expect_grep '^ctlhq-adoption-test: command not executable: \./noexec$' "$out" "clean-home names the command that is not executable"
+run_real "$at" clean-home "$tmp/newhome" "$tmp/work" sh -c 'kill -TERM $$' >/dev/null 2>&1; expect_rc 143 $? "clean-home reports a command killed by a signal as 128 plus the signal number"
+
+# 9. Usage errors.
 "$at" >/dev/null 2>&1; expect_rc 2 $? "no command exits 2"
 "$at" bogus >/dev/null 2>&1; expect_rc 2 $? "unknown command exits 2"
 "$at" commands >/dev/null 2>&1; expect_rc 2 $? "commands without a path exits 2"
