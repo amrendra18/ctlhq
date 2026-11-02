@@ -6,15 +6,11 @@ Set up each reviewer's worktree before you spawn it:
 
 ```bash
 git -C <project> worktree add <scratch>/review-a -b public-review-a <base commit>
-mkdir -p <scratch>/review-a/.local/first-commit
-cp <project>/.local/first-commit/private-values.txt <scratch>/review-a/.local/first-commit/
-git -C <scratch>/review-a check-ignore -q .local/first-commit/private-values.txt
 cd <scratch>/review-a && npm ci --ignore-scripts
 ```
 
-1. The `cp` line brings in the word list, which Git ignores, so a new worktree lacks it. Copy any other ignored file the checks need the same way.
-2. `check-ignore -q` must exit 0, so nobody can commit the copied list.
-3. The last line installs dependencies without running their install scripts. Use the project's own install command when it has no `package-lock.json`.
+1. Copy no private-value list; `tests/privacy/run.sh` reads the main folder's list from a worktree. Copy in any other ignored file the checks need.
+2. The last line installs dependencies without running their install scripts. Use the project's own install command when it has no `package-lock.json`.
 
 ```markdown
 # Brief: public-readiness review and cleanup of <project>

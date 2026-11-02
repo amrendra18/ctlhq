@@ -9,8 +9,8 @@ The reviewer changes the file in its copy for a "change" item, and writes a prop
 
 | # | Kind | Items |
 | --- | --- | --- |
-| 1 | change | 1 personal data and secrets, 2 internal language, 4 docs for strangers, 5 tracked versus ignored, 6 code correctness, 7 checks |
-| 2 | propose | 3 license and attribution, the banner, removing a dependency, the project's own name on the word list |
+| 1 | change | 1 personal data and secrets, 2 internal language, 3 license and attribution, 4 docs for strangers, 5 tracked versus ignored, 6 code correctness, 7 checks |
+| 2 | propose | the banner, removing a dependency |
 
 ## 1. Personal data and secrets
 
@@ -21,7 +21,7 @@ The reviewer changes the file in its copy for a "change" item, and writes a prop
 | 3 | Machine details | Home-folder paths (`/Users/<name>/`, `/home/<name>/`), machine and host names, local IP addresses, user names, temp-folder paths with session IDs. |
 | 4 | Identities | Email addresses and names other than the intended public identity and credited authors. |
 
-Accept the owner's name in the repository's own address, the copyright line, and the commit author. Report it anywhere else.
+Accept the owner's name in the repository's own GitHub address and the license file's copyright line, with the `.repo-policy.json` of skill rule 3. Report it anywhere else.
 
 Gitleaks may not be on PATH. `ctlhq-first-push` first looks for it at `~/.ctlhq/bin/gitleaks`, so look there too.
 
@@ -53,14 +53,14 @@ git ls-files -co --exclude-standard -z | xargs -0 grep -nIE '/(Users|home)/[A-Za
 
 ## 3. License and attribution
 
-The operator picks the license in Confirm. The reviewer checks the files against that pick.
+The plan block from Confirm names the license, as step 1.5 of the skill sets it. The reviewer writes a missing `LICENSE` and checks the files against that license.
 
 | # | Check |
 | --- | --- |
-| 1 | `LICENSE` holds the exact standard text of the chosen license, with the right year and holder. |
+| 1 | The license file holds the exact standard text of the chosen license, with the right year and holder. |
 | 2 | Every adapted work keeps its own copyright notice, as its license requires. |
 | 3 | Credits are factual and modest. They name the adapted work, its source, and its license. |
-| 4 | The README names the license and points to `LICENSE`. It holds no copyright line of its own. |
+| 4 | The README names the license and points to the license file. It holds no copyright line of its own. |
 
 ## 4. Docs for strangers
 

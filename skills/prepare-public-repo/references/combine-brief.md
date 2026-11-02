@@ -1,7 +1,7 @@
 # Combine brief template
 
 The main agent reads every reviewer's report and diff first. It picks one reviewer's change as the base, then lists each port from the other reviewers file by file.
-One builder applies the picks in a fresh worktree from the same base, set up like a reviewer's (word list copied in, dependencies installed).
+One builder applies the picks in a fresh worktree from the same base, set up like a reviewer's (dependencies installed; no private-value list copied).
 Large renames go in a second phase on top of the first, so the gate checks each phase alone.
 Before the builder deletes anything, the main agent has copied every piece of content that leaves the public tree, and is not obsolete, to the private place.
 
