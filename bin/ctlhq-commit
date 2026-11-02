@@ -41,12 +41,15 @@ Steps, in order:
      against HEAD, so a submodule's staged commit counts whatever the ignore settings say)
      to a path that is not named and not inside a named folder, because `git commit` takes
      the whole index. Then it keeps a copy of the index and stages each named path by
-     name: a path on disk with `git add -A -- <path>`, so deletions inside a named folder
-     are staged too; a path gone from disk but still tracked (or already staged as deleted) with
-     `git rm -r --cached -- <path>`. Unnamed paths are never staged. Any refusal or
+     name with `git add -A -- <path>`, so deletions inside a named folder are staged too.
+     A path gone from disk but still tracked, or already staged as deleted, goes to
+     `git rm -r --cached -- <path>` instead. So does a path still on disk whose deletion is
+     staged (`git rm --cached`), when git ignores all of it (for example through .gitignore).
+     A file in HEAD, absent from the index, on disk and not ignored, named or in a named
+     folder, refuses (exit 3) before staging. Unnamed paths are never staged. Any refusal or
      failure from here until the commit exists puts the index back byte for byte from
-     that copy (written to index.lock, then renamed, as git does), so partly staged files
-     and staged files from before the first commit stay as they were. So does an
+     that copy (written to index.lock, then renamed, as git does), so partly staged
+     files and staged files from before the first commit stay as they were. So does an
      interrupt (Ctrl-C or SIGTERM) or an unexpected error, as long as HEAD has not moved;
      the run then ends as the interrupt or error would. The tool's `git add`, `git rm`,
      `git write-tree` and `git commit` run with splitIndex.sharedIndexExpire=never, so a
@@ -98,9 +101,9 @@ failed), a hook changed the commit, a named path is not committed afterwards, or
 tree is dirty afterwards without --allow-dirty (in the last three cases the commit exists
 and its hash is printed); 2 usage; 3 gate not green, it ran on a different tree, the
 index would commit content the gate did not test or that differs from the files on
-disk, or the index holds staged changes outside the named paths; 5 no valid co-author
-line (4 is retired). An interrupt ends the run as Python does: 130 for Ctrl-C, 143 for
-SIGTERM.
+disk, the index holds staged changes outside the named paths, or a file is staged as
+deleted but still on disk and not ignored; 5 no valid co-author line (4 is retired).
+An interrupt ends the run as Python does: 130 for Ctrl-C, 143 for SIGTERM.
 
 .local/ must be ignored by git, or the message file itself dirties the tree.
 
@@ -197,9 +200,9 @@ def add_trailer(message: str, line: str) -> str:
     return f"{body}\n\n{line}\n"
 
 
-def git(args: list[str]) -> subprocess.CompletedProcess:
+def git(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
     # surrogateescape keeps file names that are not UTF-8 intact on the way back to git.
-    return subprocess.run(["git"] + args, capture_output=True, encoding="utf-8", errors="surrogateescape")
+    return subprocess.run(["git"] + args, input=stdin, capture_output=True, encoding="utf-8", errors="surrogateescape")
 
 
 def lit(args: list[str]) -> subprocess.CompletedProcess:
@@ -251,6 +254,16 @@ def top_relative(p: str, root: Path, prefix: str) -> str:
         parent, name = os.path.split(os.path.normpath(p))
         return os.path.normpath(os.path.join(os.path.relpath(os.path.realpath(parent), root.resolve()), name))
     return os.path.normpath(os.path.join(prefix, p))
+
+
+def listed(root: Path, args: list[str], named: list[str]) -> dict[str, bool]:
+    """Each top-relative path git lists for the named paths (True), and each folder above one (False)."""
+    found: dict[str, bool] = {}
+    for e in filter(None, lit(["-C", str(root)] + args + ["--"] + named).stdout.split("\0")):
+        parts = e.split("/")
+        found.update(dict.fromkeys(("/".join(parts[:i]) or "." for i in range(len(parts))), False))
+        found[e] = True
+    return found
 
 
 def covered(path: str, named: list[str]) -> bool:
@@ -499,16 +512,31 @@ def main(argv: list[str]) -> int:
     print(co_author_note)
 
     # 5. stage each named path, deletions included
-    on_disk = [p for p in paths if os.path.lexists(p)]
-    gone = [p for p in paths if p not in on_disk]
-    missing = [p for p in gone if lit(["ls-files", "--error-unmatch", "--", p]).returncode != 0
-               and not lit(["ls-tree", "-r", "--name-only", "HEAD", "--", p]).stdout.strip()]
+    prefix = git(["rev-parse", "--show-prefix"]).stdout.strip()
+    named = [top_relative(p, root, prefix) for p in paths]
+    pairs = list(zip(paths, named))
+    on_disk = {p for p in paths if os.path.lexists(p)}
+    in_index = listed(root, ["ls-files", "-z"], named)
+    in_head = listed(root, ["ls-tree", "-r", "-z", "--name-only", "HEAD"], named)
+    missing = [p for p, n in pairs if p not in on_disk and n not in in_index and n not in in_head]
     if missing:
         print(f"ctlhq-commit: {', '.join(missing)}: not on disk and not tracked by git, so there is nothing to stage", file=sys.stderr)
         print("fix: check the spelling, or drop the path from the list after --. Paths are names, never patterns.", file=sys.stderr)
         return 1
-    prefix = git(["rev-parse", "--show-prefix"]).stdout.strip()
-    named = [top_relative(p, root, prefix) for p in paths]
+    kept = [n for p, n in pairs if p in on_disk and n in in_head and n not in in_index]
+    dropped = [f for f, is_file in in_head.items() if is_file and f not in in_index
+               and (os.path.islink(root / f) or os.path.isfile(root / f))]
+    asked = kept + dropped
+    ignored = {s[2:] for s in git(["-C", str(root), "check-ignore", "--no-index", "--stdin", "-z"],
+                                  "".join(f"./{n}\0" for n in asked)).stdout.split("\0") if s} if asked else set()
+    retracked = [os.path.relpath(f, prefix or ".") for f in dropped if f not in ignored]
+    if retracked:
+        print(f"ctlhq-commit: {', '.join(retracked)}: staged as deleted but still on disk, and git does not ignore it; refusing to commit", file=sys.stderr)
+        print("why: git add would track it again, so the staged deletion would be lost.", file=sys.stderr)
+        print("fix: to stop tracking it, add the path to .gitignore and name .gitignore after -- too; to keep it tracked, run `git add <path>`. With --gate, rerun the gate, then ctlhq-commit.", file=sys.stderr)
+        return 3
+    to_rm = [p for p in paths if p not in on_disk]
+    to_add = [p for p, n in pairs if p in on_disk and n not in ignored]
     try:
         stray = unnamed_staged(named)
     except OSError as e:
@@ -524,14 +552,14 @@ def main(argv: list[str]) -> int:
         return code
 
     try:
-        if on_disk:
-            r = lit(KEEP_SHARED + ["add", "-A", "--"] + on_disk)
+        if to_add:
+            r = lit(KEEP_SHARED + ["add", "-A", "--"] + to_add)
             if r.returncode != 0:
                 sys.stderr.write(r.stderr)
                 print(f"ctlhq-commit: git add failed (exit {r.returncode})", file=sys.stderr)
                 return undo(1)
-        if gone:
-            r = lit(KEEP_SHARED + ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"] + gone)
+        if to_rm:
+            r = lit(KEEP_SHARED + ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"] + to_rm)
             if r.returncode != 0:
                 sys.stderr.write(r.stderr)
                 print(f"ctlhq-commit: git rm --cached failed (exit {r.returncode})", file=sys.stderr)

@@ -178,6 +178,47 @@ git rm -q staged-gone.txt
 "$fc" --allow-dirty "${four[@]}" -- staged-gone.txt >/dev/null 2>&1; expect_rc 0 $? "a path already staged as deleted commits"
 expect_eq "" "$(git ls-files -- staged-gone.txt)" "the staged deletion is committed"
 
+printf '6\n' > keep.txt; "$fc" --allow-dirty "${four[@]}" -- keep.txt >/dev/null 2>&1; git rm -q --cached keep.txt
+idx="$(git ls-files -s)"
+err="$("$fc" --allow-dirty "${four[@]}" -- keep.txt 2>&1)"; expect_rc 3 $? "a staged deletion of a file git does not ignore exits 3"
+expect_eq "$idx" "$(git ls-files -s)" "the refused file leaves the index unchanged"
+expect_grep 'add the path to \.gitignore and name \.gitignore after -- too; to keep it tracked, run `git add <path>`' "$err" "the refusal names both ways out and says to name .gitignore"
+git reset -q -- keep.txt
+printf '7\n' > untrack.txt; "$fc" --allow-dirty "${four[@]}" -- untrack.txt >/dev/null 2>&1
+git rm -q --cached untrack.txt; printf 'untrack.txt\n' >> .gitignore
+out="$("$fc" --allow-dirty "${four[@]}" -- untrack.txt .gitignore 2>&1)"; expect_rc 0 $? "a staged deletion of an ignored file still on disk commits"
+expect_eq "" "$(git ls-tree --name-only HEAD -- untrack.txt)" "the ignored file is no longer tracked in HEAD"
+expect_eq "7" "$(cat untrack.txt 2>/dev/null)" "the ignored file stays on disk"
+
+printf '8\n' > swap; "$fc" --allow-dirty "${four[@]}" -- swap >/dev/null 2>&1
+git rm -q --cached swap; rm swap; mkdir swap; printf '9\n' > swap/y
+out="$("$fc" --allow-dirty "${four[@]}" -- swap 2>&1)"; expect_rc 0 $? "a file replaced by a folder commits"
+expect_eq "swap/y" "$(git ls-tree -r --name-only HEAD -- swap)" "the folder's file replaces the file in HEAD"
+
+mkdir keepdir; printf '1\n' > keepdir/k; "$fc" --allow-dirty "${four[@]}" -- keepdir >/dev/null 2>&1
+git rm -rq --cached keepdir; printf 'keepdir/\n' >> .gitignore
+out="$("$fc" --allow-dirty "${four[@]}" -- keepdir/ .gitignore 2>&1)"; expect_rc 0 $? "an ignored folder staged as deleted commits"
+expect_eq "" "$(git ls-tree -r --name-only HEAD -- keepdir)" "the ignored folder is no longer tracked in HEAD"
+expect_eq "1" "$(cat keepdir/k 2>/dev/null)" "the ignored folder stays on disk"
+
+mkdir fd; printf '1\n' > fd/a; "$fc" --allow-dirty "${four[@]}" -- fd >/dev/null 2>&1
+git rm -rq --cached fd; rm -r fd; printf '2\n' > fd
+out="$("$fc" --allow-dirty "${four[@]}" -- fd 2>&1)"; expect_rc 0 $? "a folder replaced by a file commits"
+expect_eq "fd" "$(git ls-tree -r --name-only HEAD -- fd)" "the file replaces the folder in HEAD"
+
+mkdir part; printf '1\n' > part/k; "$fc" --allow-dirty "${four[@]}" -- part >/dev/null 2>&1
+git rm -rq --cached part; printf 'part/k\n' >> .gitignore; printf '2\n' > part/new
+out="$("$fc" --allow-dirty "${four[@]}" -- part .gitignore 2>&1)"; expect_rc 0 $? "a folder staged as deleted whose only tracked file is ignored commits as on disk"
+expect_eq "part/new" "$(git ls-tree -r --name-only HEAD -- part)" "the folder's new file is committed and its ignored file is not"
+expect_eq "" "$(git status --porcelain -- part)" "nothing in the folder is left uncommitted"
+
+mkdir vendor; printf '1\n' > vendor/lib.js; printf 'a\n' > notes.txt; "$fc" --allow-dirty "${four[@]}" -- vendor notes.txt >/dev/null 2>&1
+git rm -rq --cached vendor; printf 'b\n' >> notes.txt; idx="$(git ls-files -s)"
+err="$("$fc" --allow-dirty "${four[@]}" -- vendor notes.txt 2>&1)"; expect_rc 3 $? "a folder staged as deleted with a file git does not ignore exits 3"
+expect_grep '^ctlhq-commit: vendor/lib\.js: staged as deleted' "$err" "the refusal names the file inside the folder"
+expect_eq "$idx" "$(git ls-files -s)" "the index is unchanged after the folder refusal"
+git reset -q -- vendor; git checkout -q -- notes.txt
+
 # 10. A named path still dirty after the commit exits 1, even with --allow-dirty.
 git rm -q --cached unnamed.txt; "$fc" --allow-dirty "${four[@]}" -- unnamed.txt >/dev/null 2>&1
 printf '5\n' > hooked.txt; "$fc" --allow-dirty "${four[@]}" -- hooked.txt >/dev/null 2>&1
@@ -304,6 +345,9 @@ expect_eq "BAD" "$(git show :f1.txt)" "the G4 refusal leaves the staged f1.txt a
 git reset -q -- f1.txt
 out="$("$fc" --gate gate "${four[@]}" -- 'f[1].txt' 2>&1)"; expect_rc 0 $? "a file named 'f[1].txt' commits by its own name"
 expect_eq 'f[1].txt' "$(git show --name-only --format= HEAD)" "the commit holds only 'f[1].txt'"
+git --literal-pathspecs rm -q --cached -- 'f[1].txt'; printf 'f\\[1\\].txt\n' >> .gitignore
+out="$("$fc" "${four[@]}" -- 'f[1].txt' .gitignore 2>&1)"; expect_rc 0 $? "an ignored 'f[1].txt' staged as deleted commits next to a tracked f1.txt"
+expect_eq 'f1.txt' "$(git ls-tree --name-only HEAD | grep '^f')" "HEAD keeps f1.txt and drops 'f[1].txt'"
 
 # 17. Final guard: the index tree must match the gate's tree on every path the commit changes,
 # and the commit must hold that index tree.
