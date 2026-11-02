@@ -18,7 +18,7 @@ Deleting `.git` cannot be undone without the backup, so the backup comes first a
    4. `git submodule status` prints nothing. A submodule's history lives inside `.git`, which the reset deletes.
    5. The gate is green on this tree. Run `ctlhq-run-gate -- <check command>` now and read its exit line.
    6. `.git/info/exclude` holds no active pattern. Each one moves into `.gitignore` first.
-   7. The word list `.local/first-commit/private-values.txt` exists, and `git check-ignore -q .local/first-commit/private-values.txt` exits 0. `ctlhq-first-push` needs it in step 4.
+   7. A private-values list exists: first-commit's user list `~/.config/first-commit/private-values.txt`, or `.local/first-commit/private-values.txt` with `git check-ignore -q .local/first-commit/private-values.txt` exiting 0. `ctlhq-first-push` needs one in step 4.
    8. The operator has created the empty GitHub repository (no README, license, or `.gitignore`) and named its owner and name.
    9. The remote is private, per [the verification commands](references/verify.md) section 1. When anyone can read it, stop and ask, unless the operator chose a public remote in their own words. A private remote lets the scan run before anyone can see the commit.
    10. `git rev-parse 'HEAD^{tree}'` prints the old tree ID. Record it for the reset block and step 4.

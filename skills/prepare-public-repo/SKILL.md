@@ -10,13 +10,12 @@ This skill reviews and fixes that tree. It never touches `.git` history, remotes
 
 ## Tool
 
-Paths such as `bin/ctlhq-privacy-scan` are relative to the ctlhq repository (the folder that holds this `skills/` directory). `<project>` and `<worktree>` are folders of the repository being prepared.
+Paths such as `tests/privacy/run.sh` are relative to the ctlhq repository (the folder that holds this `skills/` directory). `<project>` and `<worktree>` are folders of the repository being prepared.
 
-`bin/ctlhq-privacy-scan` (a symlink to `skills/prepare-public-repo/bin/ctlhq-privacy-scan`) finds private words in the current files, tracked and untracked, and never prints a word. It skips the owner's own GitHub address and the `LICENSE` file, as `tests/privacy/run.sh` does. It also skips the words in `public_terms` of `ctlhq-first-push`. `--help` defines the word number and every exit code.
+`tests/privacy/run.sh` finds private words in tracked files and in untracked files Git does not ignore, and never prints a word. It reads first-commit's lists with the reader `ctlhq-first-push` uses, so both check the same words. It skips the owner's own GitHub address and the `LICENSE` file. `--help` defines every exit code.
 
 ```
-bin/ctlhq-privacy-scan --root <worktree>            # file:line and word number per hit; the word list is .local/first-commit/private-values.txt
-bin/ctlhq-privacy-scan --root <worktree> --joined   # also words split across quotes, "_", "+", ".", or line breaks
+tests/privacy/run.sh --root <worktree>   # file:line per hit; ignored files are not read
 ```
 
 ## Steps
@@ -26,7 +25,7 @@ bin/ctlhq-privacy-scan --root <worktree> --joined   # also words split across qu
    2. Preconditions. Precondition 1 never stops the run. Preconditions 2 and 3 stop it at the first one that fails; say which.
       1. `GIT_OPTIONAL_LOCKS=0 git -C <project> status --short` prints nothing. When it prints lines, name each uncommitted edit and copy it to the private place before any work. Then go on.
       2. `git -C <project> ls-files -ci --exclude-standard` prints nothing, so no tracked file is also ignored.
-      3. The word list `<project>/.local/first-commit/private-values.txt` exists, and `git -C <project> check-ignore -q .local/first-commit/private-values.txt` exits 0. `ctlhq-privacy-scan` and `ctlhq-first-push` both read it.
+      3. A private-values list exists: first-commit's user list `~/.config/first-commit/private-values.txt`, or `<project>/.local/first-commit/private-values.txt` with `git -C <project> check-ignore -q .local/first-commit/private-values.txt` exiting 0. Test each with `test -e` only. `tests/privacy/run.sh` and `ctlhq-first-push` both read every list that exists.
    3. The list names the project and the base commit. It also holds the output of `git -C <project> worktree list`, the worktrees that existed before this run.
    4. It names the gate, which is the exact check command. When the full gate needs something a subagent cannot provide (a screen, a signing key, a network service), name the fast gate the reviewers run instead. Add a search for docs that tools read, and say what stays unproven until the main agent runs the full gate.
    5. It names the license. The operator settles it here, before the docs item links to it.
@@ -67,7 +66,7 @@ bin/ctlhq-privacy-scan --root <worktree> --joined   # also words split across qu
 
 ## Rules
 
-1. Never print a private word or a secret. Name the file, line, and kind, or the word number.
+1. Never print a private word or a secret. Name the file, line, and kind.
 2. Removing a file from the public tree is reversible only while a copy exists. Copy it to the private place before the delete.
 3. The owner's name may appear in the repository's own address, the copyright line, and the commit author. Accept a word-list hit there. Report one anywhere else.
 4. The project's own name may be on the operator's word list. Then every mention of the project is a hit. The fix is a per-repository exception. The project's word list leaves that one word out. Never remove the word from the operator's own list. This is the operator's decision, so ask it as a numbered question.

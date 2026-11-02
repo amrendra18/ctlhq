@@ -22,7 +22,7 @@ tmp="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ctlhq-preflight-test.XXXXXX")" && pwd -P
 export HOME="$tmp/home"   # the push owner setting is read from here, never the real home folder
 mkdir -p "$HOME/.ctlhq"
 settings="$HOME/.ctlhq/first-push.toml"
-printf 'public_terms = ["Acme Corp"]\ngithub_owner = "acme"\n' >"$settings"
+printf 'other = "x"\ngithub_owner = "acme"\n' >"$settings"
 sockdir="$(mktemp -d /tmp/fpf.XXXXXX)"   # Unix socket paths must stay short
 agents=""
 site_pid=""
@@ -176,7 +176,7 @@ expect_grep "missing +push guard +cannot read $tmp/sys-bad.cfg: " "$out" "an unr
 out="$(cd "$repo" && GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM="$tmp/sys-ready.cfg" SSH_AUTH_SOCK="$full" "$pf" --min-disk 0 --need git --push-guard 2>&1)"
 expect_grep 'fix: unset GIT_CONFIG_NOSYSTEM, then rerun' "$(line_of 'missing +push guard +GIT_CONFIG_NOSYSTEM is set' "$out")" "GIT_CONFIG_NOSYSTEM turns the guard off and is reported"
 owner_fix='fix: Add the line github_owner = "<your GitHub account>" to ~/\.ctlhq/first-push\.toml, then run this command again\.$'
-printf 'public_terms = ["Acme Corp"]\n' >"$settings"
+printf 'other = "x"\n' >"$settings"
 out="$(grun "$tmp/sys-ready.cfg" --min-disk 0 --need git --push-guard)"; expect_rc 1 $? "an unset owner exits 1"
 expect_grep 'missing +push guard +not configured: no github_owner in ~/\.ctlhq/first-push\.toml$' "$out" "an unset owner says not configured"
 expect_grep "$owner_fix" "$(line_of 'missing +push guard' "$out")" "an unset owner names the file and the key in its fix"

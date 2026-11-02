@@ -15,13 +15,14 @@ Settings: ~/.ctlhq/first-push.toml (HOME is honoured).
                                            ctlhq-push and ctlhq-preflight read the same
                                            line. Without it, a GitHub push target is a
                                            push.owner-not-configured finding.
-  public_terms = ["term", ...]             terms that are not treated as private.
-                                           FIRST_PUSH_CONFIG names another file to read
-                                           this line from.
 
 What it checks, in order:
-  1. Policy. The private-values list (.local/first-commit/private-values.txt) must exist,
-     hold at least one value, be ignored by .gitignore, and not be tracked. A missing list
+  1. Policy. The private values come from first-commit's two lists, read together: the
+     user list ~/.config/first-commit/private-values.txt (HOME honoured), or
+     $XDG_CONFIG_HOME/first-commit/private-values.txt when XDG_CONFIG_HOME is an absolute
+     path, which may be a link to a file; and the project list
+     .local/first-commit/private-values.txt, in a linked worktree also the main worktree's.
+     A project list must be ignored by .gitignore and not tracked. No value from any list
      is a finding.
   2. Push target. A GitHub push address of origin (or --remote NAME) must be
      github.com/OWNER/... in any address form; another owner is a finding, and so is any
@@ -110,6 +111,7 @@ from pathlib import Path
 OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
 GITLEAKS_FOLDER = Path(".ctlhq") / "bin"
 PRIVATE_VALUES_FILE = ".local/first-commit/private-values.txt"
+USER_VALUES = "first-commit/private-values.txt"
 CONTRIBUTOR_PATH = ".local/first-commit/contributor.json"
 LICENSE_NAMES = ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING")
 README = re.compile(r"(?i)readme(\.[^/]+)?")
@@ -247,6 +249,74 @@ def text_list(value, label: str, rel: str) -> list:
 
 
 POLICY_FILE = ".repo-policy.json"
+LIST_WHY = "Without the list, ctlhq-first-push cannot look for your private values."
+
+
+def read_values(path: Path, label: str) -> list:
+    """The distinct private values of one list, in NFC form and case-folded."""
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise EnvError(f"{label} is unreadable or not UTF-8 text", LIST_WHY,
+                       "Save the list as UTF-8 text, one value per line, readable by you "
+                       "(check with `ls -l` on the file), then run ctlhq-first-push again.") from error
+    values: list = []
+    for line in text.splitlines():
+        value = unicodedata.normalize("NFC", line.strip()).casefold()
+        if value and not value.startswith("#") and value not in values:
+            values.append(value)
+    return values
+
+
+def user_list() -> tuple:
+    """(path, label) of first-commit's user list. A relative XDG_CONFIG_HOME counts as unset,
+    as in first-commit. The label never holds the full path, which may hold a private value."""
+    xdg = os.environ.get("XDG_CONFIG_HOME", "")
+    if os.path.isabs(xdg):
+        return Path(xdg) / USER_VALUES, f"$XDG_CONFIG_HOME/{USER_VALUES}"
+    return Path.home() / ".config" / USER_VALUES, f"~/.config/{USER_VALUES}"
+
+
+def main_worktree(root: Path) -> Path | None:
+    """The main worktree when root is a linked worktree, as first-commit finds it: the first
+    entry of `git worktree list`, or None when that is root itself or a bare repository."""
+    first = git(root, "worktree", "list", "--porcelain").stdout.split(b"\n\n")[0]
+    lines = first.split(b"\n")
+    if not lines[0].startswith(b"worktree ") or b"bare" in lines[1:]:
+        return None
+    main = Path(os.fsdecode(lines[0][len(b"worktree "):])).resolve()
+    return None if main == root.resolve() else main
+
+
+def word_lists(root: Path) -> list:
+    """The private-values lists that exist, as (path, label, repository folder or None), read
+    as first-commit reads them: the user list, then the project list, and in a linked worktree
+    also the main worktree's project list."""
+    lists = []
+    path, label = user_list()
+    try:
+        found = path.is_file()
+    except OSError as error:
+        raise EnvError(f"the user list {label} cannot be read", LIST_WHY,
+                       f"Make the folder that holds {label} readable by you (check with `ls -ld` "
+                       "on that folder), then run ctlhq-first-push again.") from error
+    if found:
+        lists.append((path, f"the user list {label}", None))
+    elif os.path.lexists(path):
+        raise EnvError(f"the user list {label} is not a file or a link to one", LIST_WHY,
+                       f"Replace {label} with a file, or a link to a file, then run ctlhq-first-push again.")
+    main = main_worktree(root)
+    places = [(root, "")] + ([(main, " in the main worktree")] if main else [])
+    for place, where in places:
+        path = place / PRIVATE_VALUES_FILE
+        name = f"the private-values file {PRIVATE_VALUES_FILE}{where}"
+        if path.is_symlink():
+            raise EnvError(f"{name} is a symbolic link", LIST_WHY,
+                           f"Replace {PRIVATE_VALUES_FILE}{where} with a regular file, as first-commit "
+                           "requires, then run ctlhq-first-push again.")
+        if path.exists():
+            lists.append((path, name, place))
+    return lists
 
 
 def load_policy(root: Path) -> Policy:
@@ -268,37 +338,22 @@ def load_policy(root: Path) -> Policy:
             policy.allowed_emails.add(email)
 
     values: list = []
-    rel = PRIVATE_VALUES_FILE
-    path = root / rel
-    if not path.is_symlink() and path.exists():
-        try:
-            text = path.read_bytes().decode("utf-8")
-        except (OSError, UnicodeDecodeError) as error:
-            raise EnvError(f"the private-values file {rel} is unreadable or not UTF-8 text",
-                           "Without the list, ctlhq-first-push cannot look for your private values.",
-                           "Save the list as UTF-8 text, one value per line, readable by you "
-                           "(check with `ls -l` on the file), then run ctlhq-first-push again.") from error
-        for line in text.splitlines():
-            value = unicodedata.normalize("NFC", line.strip()).casefold()
-            if value and not value.startswith("#") and value not in values:
-                values.append(value)
-        if git(root, "ls-files", "--cached", "--", rel).stdout.strip():
-            policy.findings.append((rel, "policy.private-values-tracked"))
-        elif git(root, "check-ignore", "-q", "--", rel, check=False).returncode != 0:
-            policy.findings.append((rel, "policy.private-values-not-ignored"))
+    for path, label, place in word_lists(root):
+        values += [v for v in read_values(path, label) if v not in values]
+        if place is None:
+            continue
+        if git(place, "ls-files", "--cached", "--", PRIVATE_VALUES_FILE).stdout.strip():
+            policy.findings.append((PRIVATE_VALUES_FILE, "policy.private-values-tracked"))
+        elif git(place, "check-ignore", "-q", "--", PRIVATE_VALUES_FILE, check=False).returncode != 0:
+            policy.findings.append((PRIVATE_VALUES_FILE, "policy.private-values-not-ignored"))
     if not values:
-        policy.findings.append((rel, "policy.private-values-missing"))
-    public = public_terms()
-    policy.private_values = tuple(value for value in values if value not in public)
+        policy.findings.append((PRIVATE_VALUES_FILE, "policy.private-values-missing"))
+    policy.private_values = tuple(values)
     return policy
 
 
 def owner_file() -> Path:
     return Path.home() / ".ctlhq" / "first-push.toml"
-
-
-def settings_file() -> Path:
-    return Path(os.environ.get("FIRST_PUSH_CONFIG") or owner_file())
 
 
 def owner_fix(path: Path) -> str:
@@ -332,37 +387,6 @@ def configured_owner() -> str | None:
     except ValueError as error:
         raise EnvError(str(error), "ctlhq-first-push stops rather than guess which GitHub account a push may go to.",
                        owner_fix(path)) from error
-
-
-def public_terms() -> set:
-    """Terms the operator declared public for ctlhq-first-push, from the settings file: a line
-    `public_terms = ["term", ...]`. A missing file means no public terms. These terms are
-    dropped from the private-values list before the check."""
-    path = settings_file()
-    if not path.is_file():
-        return set()
-    why = ("This file lists the terms you declared public; ctlhq-first-push stops rather than guess which "
-           "terms are private.")
-    shape = 'public_terms = ["term one", "term two"] (double quotes, commas between terms, all on one line)'
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as error:
-        raise EnvError(f"the public-terms file {shown(path)} is unreadable or not UTF-8 text", why,
-                       f"Save {shown(path)} as UTF-8 text readable by you, with the line {shape}; "
-                       "or point FIRST_PUSH_CONFIG at another file.") from error
-    match = re.search(r"(?m)^public_terms\s*=\s*(\[.*?\])\s*$", text)
-    if not match:
-        return set()
-    line = text.count("\n", 0, match.start()) + 1
-    malformed = EnvError(f"public_terms in {shown(path)} line {line} is not a list of quoted strings", why,
-                         f"Rewrite line {line} of {shown(path)} as {shape}.")
-    try:
-        terms = json.loads(match.group(1))
-    except ValueError as error:
-        raise malformed from error
-    if not isinstance(terms, list) or not all(isinstance(term, str) for term in terms):
-        raise malformed
-    return {unicodedata.normalize("NFC", term.strip()).casefold() for term in terms if term.strip()}
 
 
 # ---------------------------------------------------------------- personal-data rules
@@ -900,7 +924,7 @@ def hook_command(root: Path, action: str) -> int:
 
 # ---------------------------------------------------------------- fix text
 
-PUBLIC_TERMS_FILE = "~/.ctlhq/first-push.toml"
+PUBLIC_VALUE = "or remove the value from your private-values list if it is public"
 DETECTOR_EXCEPTION = "approve this exact line with a privacy_detector_exceptions entry in .repo-policy.json"
 KEY_WHY = "Anyone who reads this key or token can act as you."
 WHY = {
@@ -935,7 +959,7 @@ def remedy(finding: dict) -> str:
     """The action for one personal-data or gitleaks finding, without the history step."""
     rule, where, file, line = finding["rule"], finding["where"], finding["file"], finding["line"]
     if where == "identity":
-        allow = {"privacy.private-literal": f", or add the value to public_terms in {PUBLIC_TERMS_FILE} if it is public",
+        allow = {"privacy.private-literal": f", {PUBLIC_VALUE}",
                  "privacy.unapproved-email": ", or add the address to public_emails in .repo-policy.json if it is public",
                  }.get(rule, "")
         return (f"Set a public {line} identity for new commits with `git config user.name` and "
@@ -949,9 +973,11 @@ def remedy(finding: dict) -> str:
     redacted = file == "<path redacted>" and line is None
     if rule == "privacy.private-literal":
         if redacted:
-            return (f"Rename the file with `git mv` so its path no longer holds the value, or add the value "
-                    f"to public_terms in {PUBLIC_TERMS_FILE} if it is public.")
-        return f"{verb} {target}, or add the value to public_terms in {PUBLIC_TERMS_FILE} if it is public."
+            return f"Rename the file with `git mv` so its path no longer holds the value, {PUBLIC_VALUE}."
+        if where == "message":
+            return f"{verb} {target}, {PUBLIC_VALUE}."
+        return (f"{verb} {target}, or approve this exact line with a private_literal_exceptions entry "
+                "in .repo-policy.json.")
     if rule == "privacy.unapproved-email":
         return f"{verb} {target}, or add the address to public_emails in .repo-policy.json if it is public."
     if rule in ("privacy.user-home-path", "privacy.ssh-fingerprint"):
@@ -975,7 +1001,9 @@ def explain(finding: dict, context: dict) -> tuple:
     why = WHY.get(rule, "")
     if rule == "policy.private-values-missing":
         fix = (f"Create {file} with one private value per line, make sure git ignores it "
-               f"(`git check-ignore {file}` must print the path), then run ctlhq-first-push again.")
+               f"(`git check-ignore {file}` must print the path), then run ctlhq-first-push again. "
+               f"Or put your private values in ~/.config/{USER_VALUES} "
+               f"($XDG_CONFIG_HOME/{USER_VALUES} when XDG_CONFIG_HOME is an absolute path), which every project reads.")
     elif rule == "policy.private-values-not-ignored":
         fix = f"Add the line `{file}` to .gitignore, then run `git check-ignore {file}`; it must print the path."
     elif rule == "policy.private-values-tracked":

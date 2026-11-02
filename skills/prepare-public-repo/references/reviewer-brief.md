@@ -50,7 +50,7 @@ Do every item of <path to this skill>/references/checklist.md.
 ## Checks before you report (read each exit code directly)
 
 1. <the gate named in Confirm>: exit 0, or name each failing row and why. <When this is the fast gate: also list each doc that a tool or test reads, found by searching the code for doc file names, and say what stays unproven.>
-2. `ctlhq-privacy-scan --root <your worktree>` and `--joined`: exit 0, or each hit with its file:line, word number, and your judgment. Never print a word.
+2. `tests/privacy/run.sh --root <your worktree>`, run from the ctlhq repository: exit 0, or each hit with its file:line and your judgment. Never print a word.
 3. The copy of the listed files, as the checklist shows: `rsync` and the count check exit 0. Then `gitleaks dir` on that copy: exit 0, or each finding with its kind.
 4. `git diff --quiet -- <protected paths>`: exit 0.
 5. `git status --short` and `git diff --stat`, including deletions and new files.
@@ -61,5 +61,5 @@ Do every item of <path to this skill>/references/checklist.md.
 2. For the docs item, a table: # | file | keep, merge, or delete | reason | where its content goes.
 3. Every piece of content that leaves the public tree and is not obsolete, so the main agent can move it to the private place.
 4. Questions as numbered items, each with your recommendation.
-5. Plain English, short sentences, no long dashes, every table with a leading # column. Never print a private value; name the file, line, and kind, or the word number.
+5. Plain English, short sentences, no long dashes, every table with a leading # column. Never print a private value; name the file, line, and kind.
 ```

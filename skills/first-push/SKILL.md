@@ -27,6 +27,6 @@ A push copies the whole history, so every commit must be clean.
 1. Run `bin/ctlhq-first-push` and read its exit code directly.
 2. Follow each `fix:` line, then the `next:` line. Rerun after each change.
 3. Ask the operator the three calls the command cannot make. Never quote a private value.
-   1. Is the term truly public? If yes, it goes in `public_terms`.
+   1. Is the term truly public? If yes, remove it from the private-values list, or approve the exact line with a `private_literal_exceptions` entry in `.repo-policy.json`.
    2. Which license should the repository use?
    3. Should the history be rewritten, or should a fresh repository start?

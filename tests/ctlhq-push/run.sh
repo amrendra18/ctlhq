@@ -23,7 +23,7 @@ trap 'rm -rf "$tmp"' EXIT
 export HOME="$tmp/home"
 mkdir -p "$HOME/.ctlhq"
 settings="$HOME/.ctlhq/first-push.toml"
-printf '# ctlhq-first-push settings\npublic_terms = ["Acme Corp"]\ngithub_owner = "acme"\n' >"$settings"
+printf '# ctlhq-first-push settings\nother = "x"\ngithub_owner = "acme"\n' >"$settings"
 repo="$tmp/repo"
 mkdir -p "$repo"
 git -C "$repo" init -q -b main
@@ -79,7 +79,7 @@ done
 # The owner setting: unset, malformed, unreadable, letter case, a trailing comment, and FIRST_PUSH_CONFIG.
 git -C "$repo" remote set-url mine git@github.com:acme/widgets.git
 owner_fix='^fix: Add the line github_owner = "<your GitHub account>" to ~/\.ctlhq/first-push\.toml, then run this command again\.$'
-printf 'public_terms = ["Acme Corp"]\n' >"$settings"
+printf 'other = "x"\n' >"$settings"
 out="$("$fp" -C "$repo" mine main 2>&1)"; rc=$?
 expect_rc 3 "$rc" "no github_owner line is refused"
 expect_grep '^ctlhq-push: no github_owner is set in ~/\.ctlhq/first-push\.toml' "$out" "unset owner names the file and the key"
