@@ -156,7 +156,9 @@ stall, a re-ask, or an unsafe step.
   stages, commits, and verifies, and refuses when the gate is not green.
   Recording the hash in `PLAN.md` stays with the agent. Agents commit only
   through `ctlhq-commit`, which adds the Co-Authored-By trailer from
-  `--co-author` or `CTLHQ_CO_AUTHOR`.
+  `--co-author` or `CTLHQ_CO_AUTHOR`. The trailer names the model and uses
+  its maker's address, `noreply@anthropic.com` for Claude or
+  `noreply@openai.com` for Codex.
 - After a context reset or a resume, read the README's "Open decisions" and
   `PLAN.md` status first.
   An earlier operator message is never new approval; check the approvals in
