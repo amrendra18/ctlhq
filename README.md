@@ -187,6 +187,7 @@ Network use:
 5. `ctlhq-name-check --registry` asks npm and PyPI whether a name is taken.
 6. `ctlhq-env` with the `tart` provider downloads the machine image a recipe in `envs/` names.
 7. `ctlhq-preflight --service`, `ctlhq-serve`, and `ctlhq-browser` request only the URLs you give them.
+8. `ctlhq-preflight --hooks` runs `pre-commit`, which may download hook code.
 
 **Test machine drivers.** The `tart` and `utm` providers of `ctlhq-env` are untested on a real machine; only fake stand-ins of `tart` and `utmctl` have run them.
 `ctlhq-env restore` with `tart` runs `tart delete` on the virtual machine (VM) the recipe names, then clones it back from the snapshot.

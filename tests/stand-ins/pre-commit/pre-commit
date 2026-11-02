@@ -1,0 +1,32 @@
+#!/bin/sh
+if [ "$*" = "--help" ] || [ "$*" = "-h" ]; then
+	cat <<'EOF'
+pre-commit: a fake of 'pre-commit run --all-files' for tests, so no hook code is downloaded.
+
+Usage: pre-commit run --all-files
+
+It plays one hook, trailing-whitespace, on the tracked files of the Git work tree it runs in.
+Exit 0 and "Passed" when no tracked line ends in a space; exit 1, "Failed" and the names of
+those files otherwise; exit 2 for any other arguments.
+
+Not covered: reading .pre-commit-config.yaml, any other hook, fixing files, and every other
+pre-commit command.
+EOF
+	exit 0
+fi
+if [ "$*" != "run --all-files" ]; then
+	echo "pre-commit stand-in: only 'pre-commit run --all-files' is faked, got: pre-commit $*" >&2
+	exit 2
+fi
+title="trim trailing whitespace"
+bad="$(git grep -l -e ' $')"
+if [ -z "$bad" ]; then
+	echo "$title.................................................Passed"
+	exit 0
+fi
+echo "$title.................................................Failed"
+echo "- hook id: trailing-whitespace"
+echo "- exit code: 1"
+echo
+echo "$bad"
+exit 1

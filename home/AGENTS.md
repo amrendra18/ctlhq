@@ -131,6 +131,7 @@ stall, a re-ask, or an unsafe step.
 - Run the permission preflight before the first milestone: `.git` write,
   `git add`, `git commit`, the signing key, sockets, network. Write every
   missing allowance to `BLOCKED.md` with the exact command, before any work.
+  Before an irreversible step, also run `ctlhq-preflight --hooks`.
 
 ### During work
 

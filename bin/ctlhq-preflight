@@ -2,7 +2,7 @@
 """ctlhq-preflight: report each permission, tool, and service a run needs as ready or missing, with the exact fix line.
 
 Usage:
-  ctlhq-preflight [--repo DIR] [--min-disk GIB] [--need TOOL,TOOL] [--service URL ...] [--push-guard] [--json]
+  ctlhq-preflight [--repo DIR] [--min-disk GIB] [--need TOOL,TOOL] [--service URL ...] [--push-guard] [--hooks] [--json]
 
 Checks, in order:
   1. git work tree   DIR (default: the current folder) is inside a git work tree.
@@ -27,6 +27,15 @@ Checks, in order:
                      system settings, or when OWNER is not configured. Rules count in
                      any letter case of OWNER, but git applies them with exact case, so
                      write remote addresses in the case the rules use.
+  9. hook pre-commit only with --hooks, and only when the repository has a pre-commit
+                     hook. With .pre-commit-config.yaml at the top of the work tree, it
+                     runs `pre-commit run --all-files` there: ready on exit 0, otherwise
+                     missing with the output's last line. pre-commit may download the
+                     hook repositories that the config names, and their code runs on this
+                     machine, so use --hooks only in a repository whose config you trust.
+                     Without that file, an executable pre-commit file in the hooks folder
+                     (core.hooksPath is honoured) is ready without running: git runs it at
+                     the first commit. Push hooks are never run.
 
 Setting: OWNER is the line
   github_owner = "<your GitHub account>"
@@ -59,9 +68,11 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_TOOLS = ["git", "python3", "node", "ssh-add"]
-USAGE = "usage: ctlhq-preflight [--repo DIR] [--min-disk GIB] [--need TOOL,TOOL] [--service URL ...] [--push-guard] [--json]"
+USAGE = "usage: ctlhq-preflight [--repo DIR] [--min-disk GIB] [--need TOOL,TOOL] [--service URL ...] [--push-guard] [--hooks] [--json]"
 BLOCKED = "push-blocked://not-your-repo/"
 OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+HOOK_ROW = "hook pre-commit"
+PRE_COMMIT = ["pre-commit", "run", "--all-files"]
 
 
 def guard_rules(owner: str) -> list:
@@ -284,8 +295,32 @@ def check_push_guard() -> tuple:
             f"as root, add the missing rules: {adds} ({doc})")
 
 
+def check_hooks(repo: Path) -> list:
+    rc, top = git(repo, "rev-parse", "--show-toplevel")
+    if rc != 0:
+        return []
+    if (Path(top) / ".pre-commit-config.yaml").is_file():
+        command = " ".join(PRE_COMMIT)
+        try:
+            r = subprocess.run(PRE_COMMIT, cwd=top, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, errors="replace")
+        except FileNotFoundError:
+            return [(HOOK_ROW, False, "pre-commit is not on PATH", "install pre-commit, or add the folder that holds it to PATH")]
+        if r.returncode == 0:
+            return [(HOOK_ROW, True, f"{command} exited 0", "")]
+        lines = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+        return [(HOOK_ROW, False, f"{command} exited {r.returncode}: {lines[-1] if lines else '(no output)'}",
+                 f"run `{command}` for its full output, fix what it reports, then rerun")]
+    rc, hooks = git(Path(top), "rev-parse", "--git-path", "hooks")
+    hook = Path(top) / hooks / "pre-commit"
+    if rc == 0 and hook.is_file() and os.access(hook, os.X_OK):
+        label = shown(hook) if os.path.isabs(hooks) else f"{hooks}/pre-commit"
+        return [(HOOK_ROW, True, f"{label} runs at the first commit", "")]
+    return []
+
+
 def parse(argv: list) -> dict:
-    o = {"repo": Path.cwd(), "min_disk": 2.0, "need": [], "service": [], "json": False, "push_guard": False}
+    o = {"repo": Path.cwd(), "min_disk": 2.0, "need": [], "service": [], "json": False, "push_guard": False, "hooks": False}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -295,8 +330,8 @@ def parse(argv: list) -> dict:
             o["json"] = True
             i += 1
             continue
-        if a == "--push-guard":
-            o["push_guard"] = True
+        if a in ("--push-guard", "--hooks"):
+            o[a[2:].replace("-", "_")] = True
             i += 1
             continue
         if a not in ("--repo", "--min-disk", "--need", "--service"):
@@ -349,6 +384,8 @@ def main(argv: list) -> int:
         rows.append(check_service(u))
     if o["push_guard"]:
         rows.append(check_push_guard())
+    if o["hooks"]:
+        rows += check_hooks(repo)
     checks = [{"n": n, "check": c, "state": "ready" if ok else "missing", "detail": d, "fix": f}
               for n, (c, ok, d, f) in enumerate(rows, 1)]
     ready = sum(1 for c in checks if c["state"] == "ready")

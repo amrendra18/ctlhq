@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# tests/stand-ins/run.sh: checks for the three stand-ins in this folder (fake claude, fake gh,
-# throwaway signing key), and for ctlhq-watch-pr's own TypeScript replayed on recorded GitHub
-# responses through the fake gh (node runs it with tests/stand-ins/watch-pr-replay.mjs,
-# because bun is not installed here).
+# tests/stand-ins/run.sh: checks for the four stand-ins in this folder (fake claude, fake gh,
+# throwaway signing key, fake pre-commit), and for ctlhq-watch-pr's own TypeScript replayed on
+# recorded GitHub responses through the fake gh (node runs it with
+# tests/stand-ins/watch-pr-replay.mjs, because bun is not installed here).
 # Every check group runs once on the real stand-in and then once per planted defect (a
 # changed copy of the stand-in, or of a recording); each planted defect must make its group
 # fail. The last check proves every group has at least one planted defect.
@@ -513,12 +513,33 @@ ps_ "stop that accepts no folder" g_sk_usage stop '>&2; exit 2; }
 [ -d "$1" ]'
 real_stop "$other"
 
+# ---------------------------------------------------------------- fake pre-commit
+g_pc_help() {
+	local out rc; out="$("$1" --help)"; rc=$?
+	expect_rc 0 "$rc" "pre-commit --help exits 0"
+	expect_grep '^pre-commit: ' "$(printf '%s\n' "$out" | head -1)" "pre-commit --help first line is 'pre-commit: ...'"
+}
+g_pc_usage() {
+	"$1" run >/dev/null 2>&1; expect_rc 2 $? "pre-commit run without --all-files exits 2"
+	"$1" --bogus >/dev/null 2>&1; expect_rc 2 $? "pre-commit with an unknown argument exits 2"
+}
+pc_groups="g_pc_help g_pc_usage"
+fpc="$si/pre-commit/pre-commit"
+for g in $pc_groups; do "$g" "$fpc"; done
+ppc() {
+	local d; d="$(newdir)"; plant "$fpc" "$d/pre-commit" "$3" "$4"; control "$1" "$2" "$d/pre-commit"
+}
+ppc "a help first line without 'pre-commit: '" g_pc_help 'pre-commit: a fake' 'Pre-commit: a fake'
+ppc "pre-commit that accepts other arguments" g_pc_usage '>&2
+	exit 2' '>&2
+	exit 0'
+
 # ---------------------------------------------------------------- operator agent, every group controlled
 g_operator() { expect_eq "$op_before" "$1" "the operator's agent key count is the same before and after"; }
 op_after="$(op_keys)"
 g_operator "$op_after"
 control "a planted different count" g_operator "planted-$op_before"
-all_groups="$claude_groups $gh_groups $wp_groups $sk_groups g_operator"
+all_groups="$claude_groups $gh_groups $wp_groups $sk_groups $pc_groups g_operator"
 missing=""
 for g in $all_groups; do grep -qx "$g" "$tmp/controlled" || missing="$missing $g"; done
 expect_eq "" "$missing" "every check group has at least one planted-defect control"
