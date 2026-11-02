@@ -2,6 +2,8 @@
 name: fresh-history-push
 description: Replace a repository's whole Git history with one signed commit of the current tree, push it to a GitHub remote, and scan a fresh clone of what the remote holds. By default the remote must be private, and the skill stops when anyone can read it; a public remote needs the operator's own words. Use after /prepare-public-repo, when the operator wants a repository published without its old history. It never changes repository visibility or GitHub settings; the operator does that after the scan.
 disable-model-invocation: true
+metadata:
+  separate-tools: gitleaks
 ---
 
 # Fresh-history push

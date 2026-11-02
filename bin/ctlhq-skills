@@ -7,6 +7,7 @@ Usage:
   ctlhq-skills [--agents] path <name>                the absolute SKILL.md path; exit 2 if unknown
   ctlhq-skills [--json] [--full] show <name>         one skill: name, description, tools, invocation, path
                                                       (--full appends the SKILL.md body; help and info are aliases of show)
+  ctlhq-skills tools [--dir DIR ...]                 one skill<TAB>tool line per separate tool a skill names
 
 find matches case-insensitively, all words, in the name, the folder name, or the description.
 --json prints a JSON array of {name, description, path, invocable}; invocable is
@@ -20,9 +21,15 @@ front matter is listed under its folder name; name and folder both work for path
 A folder without a SKILL.md, or an unreadable file, is skipped with a note on
 stderr, so a partly ported skills/ folder still lists.
 
-"tools" lists the executables under skills/<folder>/bin/.
+In show, "tools" lists the executables under skills/<folder>/bin/.
 
-Exit 0 on success, 1 when find matches nothing, 2 on a usage error or an unknown name.
+tools reads `separate-tools: <name> ...` under `metadata:` in the front matter of each
+DIR/*/SKILL.md (default: this repository's skills/; --dir repeats). The skill is the
+folder name. A value that is empty or holds `[`, `]`, or `,` prints
+"<file>:<line>: separate-tools must be names separated by spaces" on stderr.
+
+Exit 0 on success, 1 when find matches nothing or a separate-tools value is a problem,
+2 on a usage error or an unknown name.
 """
 from __future__ import annotations
 
@@ -33,6 +40,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+TOOLS_RE = re.compile(r"^[ \t]+separate-tools:[ \t]*(.*)$")
 
 
 def unquote(v: str) -> str:
@@ -119,6 +127,44 @@ def tools_of(folder: str) -> list:
     return sorted(t.name for t in b.iterdir() if t.is_file()) if b.is_dir() else []
 
 
+def separate_tools(path: Path):
+    lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+    if lines[0].strip() != "---":
+        return None
+    in_metadata = False
+    for n, line in enumerate(lines[1:], 2):
+        if line.strip() == "---":
+            return None
+        if line[:1] not in (" ", "\t"):
+            in_metadata = line.rstrip() == "metadata:"
+            continue
+        m = TOOLS_RE.match(line) if in_metadata else None
+        if m:
+            return n, m.group(1).strip()
+    return None
+
+
+def list_tools(dirs: list) -> int:
+    rc = 0
+    for d in dirs:
+        for f in sorted(Path(d).expanduser().glob("*/SKILL.md")):
+            try:
+                found = separate_tools(f)
+            except OSError as e:
+                print(f"skipped {f}: {e}", file=sys.stderr)
+                continue
+            if not found:
+                continue
+            n, value = found
+            if not value or re.search(r"[][,]", value):
+                print(f"{f}:{n}: separate-tools must be names separated by spaces", file=sys.stderr)
+                rc = 1
+                continue
+            for name in value.split():
+                print(f"{f.parent.name}\t{name}")
+    return rc
+
+
 def body_of(path: str) -> str:
     text = Path(path).read_text(encoding="utf-8")
     if text.startswith("---"):
@@ -167,8 +213,10 @@ def main(argv: list) -> int:
     with_agents = False
     as_json = False
     full = False
+    dirs: list = []
     rest: list = []
-    for a in argv:
+    args = iter(argv)
+    for a in args:
         if a in ("-h", "--help"):
             print(__doc__.strip())
             return 0
@@ -178,11 +226,28 @@ def main(argv: list) -> int:
             as_json = True
         elif a == "--full":
             full = True
+        elif a == "--dir":
+            d = next(args, None)
+            if d is None:
+                print("--dir needs a folder", file=sys.stderr)
+                return 2
+            dirs.append(d)
         elif a.startswith("-"):
             print(f"unknown option {a}", file=sys.stderr)
             return 2
         else:
             rest.append(a)
+    if rest[:1] == ["tools"]:
+        if as_json or with_agents or full:
+            print("tools takes only --dir", file=sys.stderr)
+            return 2
+        if len(rest) > 1:
+            print("tools takes no names", file=sys.stderr)
+            return 2
+        return list_tools(dirs or [ROOT / "skills"])
+    if dirs:
+        print("--dir works only with tools", file=sys.stderr)
+        return 2
     records = load(with_agents)
     if not rest:
         emit(records, as_json)

@@ -1,13 +1,13 @@
 ---
 name: run-method
 description: Run a build, research or planning ask with one fixed method. Use when the operator asks to build, plan, research, review or finish a project, or says "do it end to end". A new project or idea starts with the start-project skill. Covers confirm, plan with a goal state, the milestone loop with supervised subagents, acceptance and hand-off.
+metadata:
+  separate-tools: first-commit
 ---
 
 # Run method
 
 Same steps in Codex and Claude Code. Templates live in `references/`. Tools named here live in this repository's `bin/`.
-
-This skill needs first-commit, a separate tool that creates the project's Git repository and installs its Git hooks (section 4). Get it from `https://github.com/amrendra18/first-commit`.
 
 ## 1. Confirm (before any work)
 
@@ -32,7 +32,7 @@ This skill needs first-commit, a separate tool that creates the project's Git re
 
 ## 4. Bootstrap once (operator)
 
-Hand the operator one pasted block with only the one-time setup that needs the operator: first-commit setup (it creates the repository and the hooks) and the permission allow rules for `git add` and `git commit` in that folder (`references/hooks-and-permissions.md`). The operator does no other repository work. Before the first milestone, run `ctlhq-preflight --repo <project>` (add `--need`, `--min-disk`, and `--service` for what the plan uses), then the project checks in `PROMPT.md` section 2. Every `missing` line, with its `fix:` line, and any other failure goes to `BLOCKED.md` before work.
+Hand the operator one pasted block with only the one-time setup that needs the operator. It creates the repository and holds the permission allow rules for `git add` and `git commit` in that folder (`references/hooks-and-permissions.md` section 3). When `first-commit` is on PATH, the block runs its setup. Otherwise the block runs `git init`, and the reply says in one line that the project has no hooks and no identity or signing setup until the operator installs first-commit (`https://github.com/amrendra18/first-commit`) and runs its setup in the project. The operator does no other repository work. Before the first milestone, run `ctlhq-preflight --repo <project>` (add `--need`, `--min-disk`, and `--service` for what the plan uses), then the project checks in `PROMPT.md` section 2. Every `missing` line, with its `fix:` line, and any other failure goes to `BLOCKED.md` before work.
 
 ## 5. Loop per milestone
 

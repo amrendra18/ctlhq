@@ -83,13 +83,19 @@ expect_grep '^missing +models.toml +.*create: ctlhq-models init' "$out" "missing
 "$doctor" --models >/dev/null 2>&1; expect_rc 2 $? "--models without a path exits 2"
 "$doctor" extra >/dev/null 2>&1; expect_rc 2 $? "stray argument exits 2"
 
-# 9. node is required at 22.18 or newer; Google Chrome and first-commit are reported. The doctor
-# runs with a PATH of this folder only, so the machine's own node and first-commit stay out.
+# 9. node is required at 22.18 or newer; Google Chrome and the separate tools are reported. The
+# doctor runs with a PATH of this folder only, so the machine's own node and first-commit stay
+# out, and with a HOME whose installed skills name present and absent separate tools.
 fake="$tmp/fakebin"
-mkdir -p "$fake"
+mkdir -p "$fake" "$tmp/home/.claude/skills/alpha" "$tmp/home/.codex/skills/beta" "$tmp/home/.agents/skills/gamma"
 for t in python3 bash git; do ln -s "$(command -v "$t")" "$fake/$t"; done
+printf -- '---\nname: alpha\ndescription: a fixture skill.\nmetadata:\n  separate-tools: present-tool absent-tool\n---\n' >"$tmp/home/.claude/skills/alpha/SKILL.md"
+printf -- '---\nname: beta\ndescription: a fixture skill.\nmetadata:\n  short-description: beta\n  separate-tools: present-tool\n---\n' >"$tmp/home/.codex/skills/beta/SKILL.md"
+printf -- '---\nname: gamma\ndescription: a fixture skill.\nmetadata:\n  separate-tools: agents-tool\n---\n' >"$tmp/home/.agents/skills/gamma/SKILL.md"
+printf '#!/bin/sh\ntouch "%s"\n' "$tmp/separate-tool-ran" >"$fake/present-tool"
+chmod +x "$fake/present-tool"
 fakenode() { printf '#!/bin/sh\necho v%s\n' "$1" >"$fake/node"; chmod +x "$fake/node"; }
-dr() { out="$(PATH="$fake" CTLHQ_CHROME="$1" "$doctor" --no-tools --models "$tmp/none.toml" 2>&1)"; rc=$?; }
+dr() { out="$(HOME="$tmp/home" PATH="$fake" CTLHQ_CHROME="$1" "$doctor" --no-tools --models "$tmp/none.toml" 2>&1)"; rc=$?; }
 dr "$tmp/no-chrome"
 expect_rc 1 "$rc" "without node the doctor exits 1"
 expect_grep '^missing +node +install: .+ +needed by ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, the ctlhq-plan-lint and stand-ins tests$' "$out" "a missing node is reported with its install line"
@@ -100,15 +106,32 @@ fakenode 22.18.0; dr "$tmp/no-chrome"
 expect_rc 0 "$rc" "node 22.18.0 exits 0 without Chrome and first-commit"
 expect_grep '^ok +node +22\.18\.0 ' "$out" "node 22.18.0 is ok"
 expect_grep '^missing +Google Chrome +install: .+ +needed by ctlhq-browser, ctlhq-icon-sheet, and their tests$' "$out" "a missing Chrome is reported"
-expect_grep '^missing +first-commit +install: install first-commit from https://github.com/amrendra18/first-commit and put it on PATH +needed by /start-project and /run-method only$' "$out" "a missing first-commit names the repository placeholder and its two skills"
+expect_grep '^missing +first-commit +not on PATH +needed by run-method, start-project$' "$out" "a missing first-commit names the repository skills that name it"
+expect_grep '^ok +present-tool +found \('"$fake"'/present-tool\) +needed by alpha, beta$' "$out" "a present separate tool shows its path and both host skills"
+expect_grep '^missing +absent-tool +not on PATH +needed by alpha$' "$out" "an absent separate tool is missing and names its skill"
+expect_grep '^missing +agents-tool +not on PATH +needed by gamma$' "$out" "a skill installed for the agents host is read too"
 expect_grep '^missing +bun +install: .+ +needed by ctlhq-watch-pr, ctlhq-orch, and the TypeScript unit tests \(the bun-tests row of ctlhq-test\)$' "$out" "a missing bun names the unit tests it runs"
 printf '#!/bin/sh\necho "Google Chrome 130.0.6723.58"\n' >"$tmp/chrome"
-printf '#!/bin/sh\ntouch "%s"\n' "$tmp/first-commit-ran" >"$fake/first-commit"
+printf '#!/bin/sh\ntouch "%s"\n' "$tmp/separate-tool-ran" >"$fake/first-commit"
 chmod +x "$tmp/chrome" "$fake/first-commit"
 dr "$tmp/chrome"
 expect_grep '^ok +Google Chrome +130\.0\.6723 \('"$tmp"'/chrome\)' "$out" "CTLHQ_CHROME names the Chrome that is reported"
-expect_grep '^ok +first-commit +found \('"$fake"'/first-commit\)' "$out" "first-commit on PATH is found"
-if [ -e "$tmp/first-commit-ran" ]; then bad "the doctor never runs first-commit"; else ok; fi
+expect_rc 0 "$rc" "separate tools never change the exit code"
+expect_grep '^ok +first-commit +found \('"$fake"'/first-commit\) +needed by run-method, start-project$' "$out" "first-commit on PATH is found"
+mkdir -p "$tmp/home/.ctlhq/bin"
+own="$(cd "$tmp/home/.ctlhq/bin" && pwd)"
+cp "$fake/present-tool" "$own/absent-tool"
+cp "$fake/present-tool" "$own/present-tool"
+dr "$tmp/chrome"
+expect_rc 0 "$rc" "a separate tool in ~/.ctlhq/bin exits 0"
+expect_grep '^missing +absent-tool +not on PATH; a copy is in ~/\.ctlhq/bin +needed by alpha$' "$out" "a separate tool only in ~/.ctlhq/bin is missing, with a note"
+expect_grep '^ok +present-tool +found \('"$fake"'/present-tool\) +needed by alpha, beta$' "$out" "the PATH copy is the one reported"
+mkdir -p "$tmp/home/.claude/skills/delta"
+printf -- '---\nname: delta\ndescription: a fixture skill.\nmetadata:\n  separate-tools: [x, y]\n---\n' >"$tmp/home/.claude/skills/delta/SKILL.md"
+dr "$tmp/chrome"
+expect_rc 0 "$rc" "a malformed separate-tools value never changes the exit code"
+expect_grep '^invalid +separate-tools +.*delta/SKILL\.md:5: separate-tools must be names separated by spaces$' "$out" "a malformed separate-tools value gives an invalid row"
+if [ -e "$tmp/separate-tool-ran" ]; then bad "the doctor never runs a separate tool"; else ok; fi
 
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then

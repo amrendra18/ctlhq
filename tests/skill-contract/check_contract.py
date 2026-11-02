@@ -11,7 +11,12 @@ Checks, each reported as `file:line: message`:
   3. every `playbooks/<file>.md` named exists;
   4. every `references/<path>` named exists;
   5. every skill named as `/<name>` or as "the `<name>` skill" exists, or is a declared
-     external skill (skills/ctlhq-help/SKILL.md, "not bundled" list).
+     external skill (skills/ctlhq-help/SKILL.md, "not bundled" list);
+  6. every separate tool a skill calls, in its SKILL.md, playbooks/, or references/, is
+     named in that skill's front matter, as `bin/ctlhq-skills tools` reads it (its problem
+     lines are reported too). The separate tools are the names any skill there lists. A call is inline code or a
+     fenced code line whose first word, or the first word after &&, ||, ;, |, or a
+     parenthesis, is the tool's name followed by one more word.
 
 Placeholders such as `<title>` and globs are skipped. `--help` runs with HOME set to an
 empty temp folder and stdin closed. Prints "N checks passed" and exits 0, or prints every
@@ -30,6 +35,8 @@ EXTERNAL_SKILLS = {"loop", "goal", "skill-creator", "orchestrate", "plugin"}
 NOT_SKILL_WORDS = {"project-local"}
 
 PATHCH = r"A-Za-z0-9_./~$@-"
+SKILLS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "bin", "ctlhq-skills")
+CHAIN = re.compile(r"&&|\|\||[;|()]")
 
 
 def scan_files(root):
@@ -51,6 +58,28 @@ def scan_files(root):
             if p.endswith(".md"):
                 out.append(os.path.join(ag, p))
     return out
+
+
+def skill_files(skill_dir):
+    out = [os.path.join(skill_dir, "SKILL.md")]
+    for sub in ("playbooks", "references"):
+        for dirpath, dirnames, files in os.walk(os.path.join(skill_dir, sub)):
+            dirnames.sort()
+            out.extend(os.path.join(dirpath, f) for f in sorted(files) if f.endswith(".md"))
+    return out
+
+
+def calls(lines):
+    fenced = False
+    for n, line in enumerate(lines, 1):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        for text in [line] if fenced else re.findall(r"`([^`]+)`", line):
+            for part in CHAIN.split(text):
+                words = part.split()
+                if len(words) >= 2:
+                    yield n, words[0].strip("\"'").rsplit("/", 1)[-1]
 
 
 def skill_dir_of(root, path):
@@ -213,7 +242,30 @@ class Checker:
                 continue
             self.skill_name(path, n, name, "the %s skill" % name)
 
+    def separate_tools(self):
+        sk = os.path.join(self.root, "skills")
+        r = subprocess.run([sys.executable, SKILLS_TOOL, "tools", "--dir", "skills"],
+                           cwd=self.root, capture_output=True, text=True)
+        self.problems.extend(r.stderr.splitlines())
+        named = {s: set() for s in sorted(self.skills)}
+        for line in r.stdout.splitlines():
+            s, tool = line.split("\t")
+            named[s].add(tool)
+        separate = set().union(*named.values())
+        for s, own in named.items():
+            for path in skill_files(os.path.join(sk, s)):
+                with open(path, encoding="utf-8") as fh:
+                    lines = fh.read().split("\n")
+                for n, tool in calls(lines):
+                    if tool not in separate:
+                        continue
+                    if tool in own:
+                        self.ok()
+                    else:
+                        self.problem(path, n, "`%s` is a separate tool that skills/%s/SKILL.md does not name under `metadata:` as `separate-tools`" % (tool, s))
+
     def run(self):
+        self.separate_tools()
         for path in scan_files(self.root):
             with open(path, encoding="utf-8") as fh:
                 lines = fh.read().split("\n")

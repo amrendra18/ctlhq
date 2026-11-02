@@ -85,7 +85,7 @@ Rows with the same wave run in parallel. Each writable file and shared resource 
 
 ### 5.4. Audit rule
 
-**When.** Hooks from first-commit check every commit and push. After each accepted milestone, before the next feature starts, the main agent runs the `project-audit` skill on the accepted commit.
+**When.** When first-commit set up the project, its hooks check every commit and push. After each accepted milestone, before the next feature starts, the main agent runs the `project-audit` skill on the accepted commit.
 
 **Bar.** 0 high and 0 medium findings. A critical finding counts as high. Low findings are recorded and fixed when cheap; a low finding never keeps the loop running.
 

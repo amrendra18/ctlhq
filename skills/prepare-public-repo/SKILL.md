@@ -1,6 +1,8 @@
 ---
 name: prepare-public-repo
 description: Make a repository ready to be public. Independent reviewers check personal data, secrets, internal language, license, docs for strangers, tracked files, and code; the main agent combines the best fix per item, moves private content to a private place first, and commits locally. Use before making a repository public, or before its first push to a public remote. It never rewrites history and never pushes; /fresh-history-push does that.
+metadata:
+  separate-tools: gitleaks
 ---
 
 # Prepare a public repository
