@@ -26,9 +26,9 @@ expect_grep '^check_contract.py: ' "$(printf '%s\n' "$out" | head -1)" "--help f
 python3 "$chk" --bogus >/dev/null 2>&1; expect_rc 2 $? "unknown argument exits 2"
 python3 "$chk" --root "$tmp/nowhere" >/dev/null 2>&1; expect_rc 2 $? "missing --root folder exits 2"
 
-# 1. Fixture: one tool that answers --help, one that does not, two skills, one playbook, one agent.
+# 1. Fixture: one tool that answers --help, one that does not, three skills, one playbook, one agent.
 fx="$tmp/fx"
-mkdir -p "$fx/bin" "$fx/skills/alpha/references" "$fx/skills/ctlhq-mode/playbooks" "$fx/agents"
+mkdir -p "$fx/bin" "$fx/skills/alpha/references" "$fx/skills/beta" "$fx/skills/ctlhq-mode/playbooks" "$fx/agents"
 cat >"$fx/bin/good" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--help" ]; then
@@ -39,7 +39,8 @@ exit 0
 EOF
 printf '#!/usr/bin/env bash\necho "nohelp: no" >&2\nexit 2\n' >"$fx/bin/nohelp"
 chmod +x "$fx/bin/good" "$fx/bin/nohelp"
-printf '# real\n' >"$fx/skills/alpha/references/real.md"
+printf '# real\n\nDEFECT-12 run `cd x && sidecar run` here.\n' >"$fx/skills/alpha/references/real.md"
+printf -- '---\nname: beta\nmetadata:\n  separate-tools: sidecar\n---\n# beta\n\n```\nsidecar run --fast\n```\n' >"$fx/skills/beta/SKILL.md"
 printf '# ctlhq-mode\n\nUse `playbooks/real.md`.\n' >"$fx/skills/ctlhq-mode/SKILL.md"
 printf '1. Step.\n' >"$fx/skills/ctlhq-mode/playbooks/real.md"
 cat >"$fx/skills/alpha/SKILL.md" <<'EOF'
@@ -51,6 +52,7 @@ name: alpha
 Fine look-alikes: run `bin/good run --json`, read `references/real.md` and `references/<topic>.md`.
 Also `skills/ctlhq-mode/playbooks/real.md`, `/loop`, `/alpha`, the `ctlhq-mode` skill, ctlhq-agent.
 Also the project-local skill, the verification skill, `$HOME/projects/widget/bin/widget`, and /Users/x/tmp/file.
+Also the name `sidecar` alone, and `sidecar.md is a file`.
 
 ```
 bin/good run --json    # a fenced line that is fine
@@ -69,6 +71,7 @@ DEFECT-9 use the `phantom` skill here.
 ```
 good stroll            # DEFECT-10 a fenced line with an unknown subcommand
 ```
+DEFECT-11 run `sidecar run` here.
 EOF
 printf '# ctlhq-agent\n\nRead the `alpha` skill, then call ctlhq-mode.\n' >"$fx/agents/ctlhq-agent.md"
 
@@ -86,12 +89,23 @@ expect_grep "^$f:$(ln DEFECT-7): references path \`references/missing.md\` does 
 expect_grep "^$f:$(ln DEFECT-8): skill \`ghost-skill\` \(named as /ghost-skill\) does not exist" "$out" "control 8: unknown /skill reported"
 expect_grep "^$f:$(ln DEFECT-9): skill \`phantom\` \(named as the phantom skill\) does not exist" "$out" "control 9: unknown 'the X skill' reported"
 expect_grep "^$f:$(ln DEFECT-10): \`good stroll\`: subcommand \`stroll\` is not in \`good --help\`" "$out" "control 10: unknown subcommand on a fenced line reported"
-expect_eq 10 "$(printf '%s\n' "$out" | grep -c '^skills/\|^agents/')" "exactly the 10 planted problems are reported (no false positives on the look-alikes)"
-expect_grep '^10 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "summary line counts 10 problems"
+expect_grep "^$f:$(ln DEFECT-11): \`sidecar\` is a separate tool that skills/alpha/SKILL.md does not name" "$out" "control 11: a separate tool the skill's front matter does not name is reported"
+expect_grep "^skills/alpha/references/real.md:3: \`sidecar\` is a separate tool" "$out" "control 12: a call in a references file after && is reported"
+expect_eq 12 "$(printf '%s\n' "$out" | grep -c '^skills/\|^agents/')" "exactly the 12 planted problems are reported (no false positives on the look-alikes)"
+expect_grep '^12 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "summary line counts 12 problems"
+
+cp "$fx/skills/alpha/SKILL.md" "$tmp/alpha.md"
+printf -- '---\nname: alpha\nmetadata:\n  separate-tools: sidecar\n---\n' >"$fx/skills/alpha/SKILL.md"
+sed '1,3d' "$tmp/alpha.md" >>"$fx/skills/alpha/SKILL.md"
+out="$(python3 "$chk" --root "$fx" 2>&1)"
+expect_nogrep 'sidecar' "$out" "a named separate tool is accepted in SKILL.md and references/"
+expect_grep '^10 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "only the 10 other planted problems remain"
+cp "$tmp/alpha.md" "$fx/skills/alpha/SKILL.md"
 expect_nogrep 'widget|/Users/x|project-local|verification|`loop`|`alpha`|ctlhq-agent|ctlhq-mode|real\.md|<topic>' "$out" "look-alikes are not reported"
 
 # 2. The same fixture with the defect lines removed is clean.
 grep -v 'DEFECT-\|^good stroll' "$fx/skills/alpha/SKILL.md" >"$tmp/clean.md"
+printf '# real\n' >"$fx/skills/alpha/references/real.md"
 # Drop the now-empty trailing fence pair.
 python3 - "$tmp/clean.md" <<'PY'
 import sys
@@ -105,6 +119,15 @@ cp "$tmp/clean.md" "$fx/skills/alpha/SKILL.md"
 out="$(python3 "$chk" --root "$fx" 2>&1)"; rc=$?
 expect_rc 0 "$rc" "clean fixture exits 0"
 expect_grep '^[0-9]+ checks passed$' "$out" "clean fixture prints only 'N checks passed'"
+
+lf="$tmp/lists"
+mkdir -p "$lf/skills/flow" "$lf/skills/block"
+printf -- '---\nname: flow\nmetadata:\n  separate-tools: [sidecar, other]\n---\n# flow\n' >"$lf/skills/flow/SKILL.md"
+printf -- '---\nname: block\nmetadata:\n  separate-tools:\n    - sidecar\n---\n# block\n' >"$lf/skills/block/SKILL.md"
+out="$(python3 "$chk" --root "$lf" 2>&1)"; rc=$?
+expect_rc 1 "$rc" "separate-tools written as a YAML list exits 1"
+expect_grep '^skills/flow/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 13: a list in brackets is reported with file:line"
+expect_grep '^skills/block/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 14: a list on the lines after separate-tools: is reported with file:line"
 
 # 3. This repository: every SKILL.md, playbook, and agent file.
 out="$(python3 "$chk" --root "$root" 2>&1)"; rc=$?

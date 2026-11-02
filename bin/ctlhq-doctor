@@ -7,19 +7,24 @@ Usage:
 One line per check: status, name, detail. Then a summary line.
   required  python3 (3.9 or newer), node (22.18 or newer), bash, git, the ctlhq
             repository root, and every executable in bin/ answering --help with exit 0
-  optional  bun, gh, rg, jq, Google Chrome, first-commit, bin/ on PATH, the models
-            file (~/.ctlhq/models.toml) present and valid
+  optional  bun, gh, rg, jq, Google Chrome, each separate tool, bin/ on PATH, the
+            models file (~/.ctlhq/models.toml) present and valid
 
 Status words: ok; missing; old (present, version below the bar); invalid (present,
-fails its check). A missing tool prints its one-line install command and the ctlhq
-tools that need it. node is needed by ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, and the
+fails its check). A missing tool other than a separate tool prints its one-line install
+command and the ctlhq tools that need it. node is needed by ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, and the
 ctlhq-plan-lint and stand-ins tests (the stand-ins test imports .ts files, which node runs
 from 22.18 on); bun by ctlhq-watch-pr and ctlhq-orch; gh by ctlhq-watch-pr, ctlhq-worktree-audit (PR state),
 and the PR playbooks; rg and jq by ctlhq-worktree-audit; Google Chrome by ctlhq-browser,
 ctlhq-icon-sheet, and their tests. Chrome is looked up where ctlhq-browser looks: the
-environment variable CTLHQ_CHROME, else the macOS app path. first-commit, a separate
-tool this repository does not ship, is needed by /start-project and /run-method only;
-the doctor finds it on PATH and never runs it.
+environment variable CTLHQ_CHROME, else the macOS app path.
+
+A separate tool is one this repository does not ship and a skill names in its front
+matter. The doctor runs `ctlhq-skills tools` on this repository's skills/,
+~/.claude/skills/, ~/.codex/skills/, and ~/.agents/skills/, and prints one row per named
+tool. The row shows its path on PATH, else missing with no install line (and the copy in
+~/.ctlhq/bin when there is one), and the skills that name it. A malformed separate-tools
+value gives an invalid row. The doctor never runs a separate tool.
 
 The models file is checked with `ctlhq-models validate` on a temporary copy, so
 the doctor never writes under ~/.ctlhq. --models PATH (or the environment
@@ -56,7 +61,6 @@ INSTALL = {
     "rg": ("brew install ripgrep", "apt-get install -y ripgrep"),
     "jq": ("brew install jq", "apt-get install -y jq"),
     "Google Chrome": ("brew install --cask google-chrome", "install Google Chrome, then set CTLHQ_CHROME to its binary"),
-    "first-commit": ("install first-commit from https://github.com/amrendra18/first-commit and put it on PATH",) * 2,
 }
 NEEDED_BY = {
     "python3": "every Python tool in bin/ (ctlhq-models, ctlhq-skills, ctlhq-unslop, ctlhq-playbook, ...)",
@@ -68,10 +72,10 @@ NEEDED_BY = {
     "rg": "ctlhq-worktree-audit",
     "jq": "ctlhq-worktree-audit",
     "Google Chrome": "ctlhq-browser, ctlhq-icon-sheet, and their tests",
-    "first-commit": "/start-project and /run-method only",
 }
 REQUIRED_TOOLS = ("python3", "node", "bash", "git")
-OPTIONAL_TOOLS = ("bun", "gh", "rg", "jq", "Google Chrome", "first-commit")
+OPTIONAL_TOOLS = ("bun", "gh", "rg", "jq", "Google Chrome")
+SKILL_FOLDERS = (ROOT / "skills", Path("~/.claude/skills"), Path("~/.codex/skills"), Path("~/.agents/skills"))
 
 
 def run(cmd: list, timeout: int = 30):
@@ -114,7 +118,7 @@ def check_tool(name: str, required: bool) -> dict:
         c["detail"] = f"install: {c['install']}   needed by {c['needed_by']}"
         return c
     c["path"] = path
-    c["version"] = "" if name == "first-commit" else version_of(name, path)
+    c["version"] = version_of(name, path)
     c["status"] = "ok"
     if name in MIN_VERSION:
         least = MIN_VERSION[name]
@@ -127,6 +131,31 @@ def check_tool(name: str, required: bool) -> dict:
             return c
     c["detail"] = f"{c['version'] or 'found'} ({path})   needed by {c['needed_by']}"
     return c
+
+
+def separate_tools() -> tuple:
+    dirs = [a for folder in SKILL_FOLDERS for a in ("--dir", str(folder.expanduser()))]
+    _, out, err = run([sys.executable, str(ROOT / "bin" / "ctlhq-skills"), "tools", *dirs])
+    tools: dict = {}
+    for line in out.splitlines():
+        skill, name = line.split("\t")
+        tools.setdefault(name, set()).add(skill)
+    return tools, err.splitlines()
+
+
+def check_separate_tool(name: str, skills: set) -> dict:
+    path = shutil.which(name)
+    own = Path.home() / ".ctlhq" / "bin" / name
+    where = "not on PATH; a copy is in ~/.ctlhq/bin" if own.is_file() and os.access(own, os.X_OK) else "not on PATH"
+    needed_by = ", ".join(sorted(skills))
+    return {"name": name, "required": False, "status": "ok" if path else "missing", "version": "",
+            "path": path or "", "install": None, "needed_by": needed_by,
+            "detail": f"found ({path})   needed by {needed_by}" if path else f"{where}   needed by {needed_by}"}
+
+
+def check_separate_value(problem: str) -> dict:
+    return {"name": "separate-tools", "required": False, "status": "invalid", "version": "", "path": "",
+            "install": None, "needed_by": "", "detail": problem}
 
 
 def check_root() -> dict:
@@ -239,6 +268,9 @@ def main(argv: list) -> int:
 
     checks = [check_tool(n, True) for n in REQUIRED_TOOLS]
     checks += [check_tool(n, False) for n in OPTIONAL_TOOLS]
+    tools, problems = separate_tools()
+    checks += [check_separate_tool(n, skills) for n, skills in sorted(tools.items())]
+    checks += [check_separate_value(p) for p in problems]
     checks.append(check_root())
     checks.append(check_path())
     checks.append(check_models(models))

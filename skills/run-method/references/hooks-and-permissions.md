@@ -48,7 +48,7 @@ Why: without this list a subagent can put a file in the real login keychain or `
 ]}}
 ```
 
-Written by the bootstrap block (section 3) at repository creation. Rules match the command text as written, so the plain `git add:*` and `git commit -F .local/commit-:*` forms are enough inside a per-repository file; the `-C` forms are for a rule kept at the workspace level. Why: without it, `git add` and `git commit` are blocked in the middle of a build, and a rule added by hand mid-build tends to cover commit only.
+Written by either bootstrap block (section 3) at repository creation. Rules match the command text as written, so the plain `git add:*` and `git commit -F .local/commit-:*` forms are enough inside a per-repository file; the `-C` forms are for a rule kept at the workspace level. Why: without it, `git add` and `git commit` are blocked in the middle of a build, and a rule added by hand mid-build tends to cover commit only.
 
 ### 1.5 Skills to install for parity with Codex
 
@@ -68,9 +68,9 @@ Codex has a `SubagentStop` hook, and it runs when any worker thread stops. A wai
 
 In `~/.codex/config.toml`, one `[sandbox_workspace_write]` block per family with `writable_roots` for the state folder and `.local/` caches, and the SSH agent socket for signing. Why: without them, builds hit repeated sandbox blocks, commit signing fails, and local services the agent asks through cannot be reached from the sandbox. Codex 0.163.0 has a `network.allow_unix_sockets` setting for sockets; the check did not cover where it goes in `config.toml`. When the socket cannot be allowed, the operator runs the signing step.
 
-## 3. The bootstrap block (operator, once per new repository)
+## 3. The bootstrap blocks (operator, once per new repository)
 
-Before handing the block over, the agent writes the literal commit into `REV`: the commit of first-commit's latest tag. In a clone of first-commit, `git -C <first-commit clone> describe --tags --abbrev=0 main` names the tag, and `git -C <first-commit clone> rev-parse '<tag>^{commit}'` gives its commit. first-commit setup creates the Git repository, so the block has no `git init`.
+When `first-commit` is on PATH, the operator runs the first block. Before handing it over, the agent writes the literal commit of first-commit's latest tag into `REV`. In a clone of first-commit, `git -C <first-commit clone> describe --tags --abbrev=0 main` names the tag, and `git -C <first-commit clone> rev-parse '<tag>^{commit}'` gives its commit. first-commit setup creates the Git repository, so this block has no `git init`.
 
 ```sh
 (
@@ -80,6 +80,21 @@ Before handing the block over, the agent writes the literal commit into `REV`: t
   first-commit setup --dry-run --revision "$REV" --transport ssh --trust-self
   first-commit setup --revision "$REV" --transport ssh --trust-self
   first-commit doctor
+  mkdir -p .local/briefs .local/reviews .claude
+  cat > .claude/settings.local.json <<'JSON'
+{"permissions":{"allow":["Bash(git add:*)","Bash(git commit -F .local/commit-:*)"]}}
+JSON
+)
+```
+
+Otherwise the operator runs the `git init` block below, and the reply gives the notice in the skill's section 4. Like first-commit setup, the block adds lines to `.gitignore` that keep `.local/` and `.claude/settings.local.json` out of commits.
+
+```sh
+(
+  set -e
+  cd /path/to/repo
+  git init -b main
+  printf '.local/\n.claude/settings.local.json\n' >> .gitignore
   mkdir -p .local/briefs .local/reviews .claude
   cat > .claude/settings.local.json <<'JSON'
 {"permissions":{"allow":["Bash(git add:*)","Bash(git commit -F .local/commit-:*)"]}}

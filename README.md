@@ -66,10 +66,14 @@ Optional:
 4. `gitleaks`, for a fuller secret scan in `ctlhq-first-push`. It looks in `~/.ctlhq/bin/` first, then on your PATH. Without it, `ctlhq-first-push` checks only its built-in token patterns.
 5. Google Chrome, for `ctlhq-browser`, `ctlhq-icon-sheet`, and their tests.
 6. `skill-creator`, the skill for writing skills, used by `/automate-me`, `/reflect`, and the "Authoring or modifying a skill" playbook. Codex ships it. On Claude Code, install it with `/plugin install skill-creator@claude-plugins-official`.
-7. first-commit, a separate tool, only for `/start-project` and `/run-method`. It creates a new project's Git repository and installs its Git hooks. Get it from `https://github.com/amrendra18/first-commit`.
+7. first-commit, a separate tool that creates a new project's Git repository and installs its Git hooks. Get it from `https://github.com/amrendra18/first-commit`. `/start-project` and `/run-method` use it when it is on PATH. Without it, the operator's setup block runs `git init` instead.
 
-`bin/ctlhq-doctor` checks every tool above except `gitleaks` and `skill-creator`, and prints an install line for each missing one.
+`bin/ctlhq-doctor` checks every tool above except `skill-creator`, and prints an install line for each missing one except a separate tool. It looks for a separate tool on your PATH, because the skills run it by name. A copy only in `~/.ctlhq/bin` shows as missing with a note; `ctlhq-first-push` still finds a `gitleaks` kept there.
 It also checks the PATH line and the models file.
+A skill names each separate tool it runs in its front matter, under `metadata:` as `separate-tools: <name> ...`, with the names separated by spaces.
+The doctor prints one optional row for each tool that this repository's skills or your installed skills name.
+The row shows the tool's path, or `missing`, and the skills that use it. The doctor never runs the tool.
+A missing separate tool never changes the doctor's exit code.
 
 ## Install
 

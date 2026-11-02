@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/ctlhq-skills/run.sh: checks for bin/ctlhq-skills, on the real skills/ tree and on a
 # synthetic repository root (the tool copied into a mktemp folder, which it treats as its root).
-# Covers every command (list, find, path, show and its aliases help and info), every flag
-# (--agents, --json, --full), and exits 0, 1, 2. Read-only for the repository.
+# Covers every command (list, find, path, show and its aliases help and info, tools), every flag
+# (--agents, --json, --full, --dir), and exits 0, 1, 2. Read-only for the repository.
 # Prints "N checks passed" and exits 1 when any check fails.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -27,7 +27,7 @@ nagents=$(ls "$root"/agents/*.md | wc -l | tr -d ' ')
 # 1. --help and -h.
 out="$("$fs" --help 2>&1)"; expect_rc 0 $? "--help exits 0"
 expect_grep '^ctlhq-skills: ' "$(printf '%s\n' "$out" | head -1)" "--help first line is 'ctlhq-skills: ...'"
-for word in find path show --agents --json --full; do
+for word in find path show tools --agents --json --full --dir; do
 	expect_grep "$word" "$out" "--help names $word"
 done
 out2="$("$fs" -h 2>&1)"; expect_eq "$out" "$out2" "-h prints the same help as --help"
@@ -161,6 +161,35 @@ expect_rc 0 "$rc" "a root without skills/ exits 0"
 expect_eq "" "$out" "a root without skills/ lists nothing"
 expect_grep '^no skills folder at ' "$(cat "$tmp/err")" "a root without skills/ is noted on stderr"
 expect_eq "[]" "$("$e/bin/ctlhq-skills" --json 2>/dev/null)" "--json on an empty root prints []"
+
+out="$("$fs" tools 2>&1)"; expect_rc 0 $? "tools on the real tree exits 0"
+expect_grep $'^run-method\tfirst-commit$' "$out" "tools reads this repository's skills/ by default"
+expect_eq "" "$("$t" tools 2>&1)" "tools on a root whose skills name no tool prints nothing"
+d1="$tmp/tools1"; d2="$tmp/tools2"
+mkdir -p "$d1/one" "$d1/two" "$d1/top" "$d2/three"
+printf -- '---\nname: one\nmetadata:\n  short-description: one\n  separate-tools: tool-a tool-b\n---\n' >"$d1/one/SKILL.md"
+printf -- '---\nname: two\nmetadata:\n  other: x\n---\n  separate-tools: not-front-matter\n' >"$d1/two/SKILL.md"
+printf -- '---\nname: top\nseparate-tools: not-under-metadata\n---\n' >"$d1/top/SKILL.md"
+printf -- '---\nname: three\nmetadata:\n  separate-tools: tool-a\n---\n' >"$d2/three/SKILL.md"
+out="$("$fs" tools --dir "$d1" --dir "$d2" --dir "$tmp/nowhere" 2>&1)"; rc=$?
+expect_rc 0 "$rc" "tools with --dir repeated and a missing folder exits 0"
+expect_eq $'one\ttool-a\none\ttool-b\nthree\ttool-a' "$out" "tools prints one skill<TAB>tool line per name, only under metadata: in the front matter"
+b="$tmp/toolsbad"
+mkdir -p "$b/brackets" "$b/comma" "$b/empty" "$b/fine"
+printf -- '---\nname: brackets\nmetadata:\n  separate-tools: [tool-a]\n---\n' >"$b/brackets/SKILL.md"
+printf -- '---\nname: comma\nmetadata:\n  separate-tools: tool-a, tool-b\n---\n' >"$b/comma/SKILL.md"
+printf -- '---\nname: empty\nmetadata:\n  separate-tools:\n    - tool-a\n---\n' >"$b/empty/SKILL.md"
+printf -- '---\nname: fine\nmetadata:\n  separate-tools: tool-c\n---\n' >"$b/fine/SKILL.md"
+out="$("$fs" tools --dir "$b" 2>"$tmp/err")"; rc=$?; err="$(cat "$tmp/err")"
+expect_rc 1 "$rc" "tools with a malformed value exits 1 (known-bad input)"
+expect_eq $'fine\ttool-c' "$out" "tools still prints the well-formed skills"
+for k in brackets comma empty; do
+	expect_grep "^$b/$k/SKILL.md:4: separate-tools must be names separated by spaces$" "$err" "a $k value is a problem line with file:line"
+done
+"$fs" tools extra >/dev/null 2>&1; expect_rc 2 $? "tools with a name exits 2"
+"$fs" tools --dir >/dev/null 2>&1; expect_rc 2 $? "--dir without a folder exits 2"
+"$fs" --dir skills find x >/dev/null 2>&1; expect_rc 2 $? "--dir with another command exits 2"
+"$fs" --json tools >/dev/null 2>&1; expect_rc 2 $? "tools with --json exits 2"
 
 # 10. Positive controls: planted defects in a copy of the tool must break the checks above.
 m="$tmp/mutant"; mkdir -p "$m/bin"; cp -R "$r/skills" "$r/agents" "$m/" 2>/dev/null

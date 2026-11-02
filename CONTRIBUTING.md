@@ -62,6 +62,7 @@ To see the result of a skill change the way a user does, run `bin/ctlhq-catalog 
 ## What a new skill needs
 
 1. A folder `skills/<name>/` with a `SKILL.md`. Its front matter has `name` (equal to the folder name) and `description`. The description says what the skill does and when to use it. `ctlhq-catalog` and `ctlhq-skills show` print it.
+   A skill that runs a separate tool, one this repository does not ship, names it under `metadata:` as `separate-tools: <name> ...` (names separated by spaces), and each step that runs it says what to do when it is not on PATH. `tests/skill-contract/run.sh` fails when a skill calls a tool that any skill lists there, and the calling skill does not list it.
 2. A `## Tool` section in `SKILL.md` when the skill has a `bin/` folder. Each file in `bin/` is executable and answers `--help` with exit 0 and a first line `<name>: `. Link each one into the top-level `bin/`, for example `ln -s ../skills/<name>/bin/ctlhq-<tool> bin/ctlhq-<tool>`. Every name in the top-level `bin/` starts with `ctlhq-`; `bin/ctlhq-check` fails on any other name.
 3. A test in `tests/<name>/run.sh`, or a reason row in `tests/coverage/reasons.tsv`. `bin/ctlhq-coverage` lists what each test covers.
 4. Only when the skill must not go to both Claude Code and Codex, a row in `docs/install.tsv` (the skill name, a tab, and the hosts from `claude`, `codex`, `agents`). This repository has no such file; `ctlhq-install --help` describes it.
