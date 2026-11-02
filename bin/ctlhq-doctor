@@ -63,7 +63,7 @@ INSTALL = {
     "Google Chrome": ("brew install --cask google-chrome", "install Google Chrome, then set CTLHQ_CHROME to its binary"),
 }
 NEEDED_BY = {
-    "python3": "every Python tool in bin/ (ctlhq-models, ctlhq-skills, ctlhq-unslop, ctlhq-playbook, ...)",
+    "python3": "every Python tool in bin/ (ctlhq-models, ctlhq-skills, ctlhq-unslop, ctlhq-playbook, ...) and ctlhq-worktree-audit",
     "bash": "the bin/ wrappers (ctlhq-plan-lint, ctlhq-worktree-audit, ctlhq-watch-pr, ctlhq-orch) and tests/*/run.sh",
     "git": "ctlhq-worktree-audit, ctlhq-no-comments --diff, every playbook that commits",
     "node": "ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, the ctlhq-plan-lint and stand-ins tests",

@@ -175,7 +175,7 @@ Suggested, never applied for you:
 Read by tools:
 
 1. `ctlhq-transcripts` reads your local agent transcripts in `~/.claude/projects` and `~/.codex/sessions`. The skills `reflect`, `show-me-your-work`, `automate-me`, and `run-method`, and the Session pickup and Eval playbooks, call it. By default it reads only the current workspace's transcripts. The `recall` skill reads the same folders directly. The tool makes no network calls, but the text it prints goes into the agent's context, like any file the agent reads.
-2. `ctlhq-worktree-audit` searches the Claude Code transcripts of the audited repository and of each worktree (`~/.claude/projects/<folder>/`), and every Codex session on the machine (`~/.codex/sessions/`), for each worktree's path. It prints only the date of the newest match.
+2. `ctlhq-worktree-audit` searches the Claude Code transcripts of the audited repository and of each worktree (`~/.claude/projects/<folder>/`), and every Codex session on the machine (`~/.codex/sessions/`), for each worktree's path. It prints only the date of the newest match. It also reads `~/.ctlhq/worktree-lease.toml` and, when that file exists, runs the command it names once, for at most 30 seconds, to learn which worktrees a lease manager still lists.
 3. The Stop hook, once you add it, reads the current session's transcript and the project's `PLAN.md` and `BLOCKED.md`. It needs them to decide its two warnings. It also writes one small marker file per warning sent, under `ctlhq-reply-lint/sent/` in your temporary folder, so each warning goes out once.
 
 Network use:
