@@ -1,3 +1,13 @@
+## General principles
+
+- Security and privacy come first in every choice.
+- Work as if it will be public. Private and local work meets the public
+  standard from the first commit, so nothing has to be removed before it goes
+  public. Tracked files read as finished work for any reader.
+- A first-time user can set up and use the project from the README alone,
+  with sensible defaults. The README says what an install changes on the
+  machine.
+
 ## Communication
 
 - Use simple, everyday English in everything written for the user.
