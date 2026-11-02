@@ -108,8 +108,8 @@ whether to use Single file mode.
 - Do not include comparison products, inspirations, or research sources in the
   generated documents unless the user requests them or attribution is legally
   required.
-- Do not leave placeholder markers. Record a material unresolved decision in a
-  short `Open decisions` section with its impact.
+- Do not leave placeholder markers. Record a material unresolved decision, with
+  its impact, in `PLAN.md` section 9, never in a tracked document.
 - Scale detail to the project. A small utility needs fewer requirements and
   milestones than a distributed system.
 - Do not call a foundation implementation-ready when entry, feedback,

@@ -10,14 +10,11 @@ Blocks, in this order:
      (`git status --porcelain` lines, untracked files included).
   2. Gate: every .local/gate/*.exit (written by ctlhq-run-gate): name, exit code, and the age of
      the end timestamp in .local/gate/<name>.meta (the file's age when .meta is missing).
-  3. Open decisions: the section of README.md whose heading (any level) contains "open
-     decisions" or "open items", any case. It prints each table row or top-level list
-     entry of that section (20 at most), numbered in section order, then "needs you": the
-     rows the operator owns, marked [needs you]. A row is the operator's when its owner
-     text holds the word "operator" or "you", any case. The owner text is the cell under a
-     header that contains "owner", or, without that column, the words after "owner:" up
-     to the first comma, semicolon, bracket, or sentence end. The tool does not know the
-     operator's name, so a row owned by a name alone is not marked.
+  3. Open questions: PLAN.md section 9 (a "## 9" heading that holds the words "open
+     questions", any case, outside code fences; the PLAN template names it "Open questions
+     for the operator"). It prints each
+     top-level list entry of that section (20 at most), numbered in section order. Each
+     entry names its owner in its own text, and the tool prints that text as written.
   4. BLOCKED.md: present or absent; when present, its first 8 lines.
   5. PLAN.md: the last 3 non-empty lines of section 10 (the approvals ledger), when the
      file exists.
@@ -90,12 +87,9 @@ from pathlib import Path
 
 USAGE = "usage: ctlhq-status [--repo DIR] [--since TIME|REV] [--next] [--json]"
 HEADING2 = re.compile(r"^##\s+\S")
-HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-DECISIONS_TITLE = re.compile(r"\bopen\s+(?:decisions|items)\b", re.IGNORECASE)
-OWNER_TEXT = re.compile(r"\bowner\s*:\s*(.*?)(?:[,;(]|\.(?:\s|$)|$)", re.IGNORECASE)
-OPERATOR_OWNER = re.compile(r"\b(?:operator|you)\b", re.IGNORECASE)
 FENCE = re.compile(r"^\s*(```|~~~)")
 MAX_DECISION_ROWS = 20
+SECTION9 = re.compile(r"^##\s+9\b.*\bopen questions\b", re.IGNORECASE)
 SECTION10 = re.compile(r"^##\s+10\b")
 TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 SECTION6 = re.compile(r"^##\s+6\b")
@@ -211,74 +205,18 @@ def gate_block(root: Path, now: datetime.datetime) -> list[dict]:
     return rows
 
 
-def decisions_section(lines: list[str]) -> tuple[str | None, list[str]]:
-    """The heading and body of the first "open decisions" or "open items" section, outside code fences."""
-    fenced = False
-    for i, line in enumerate(lines):
-        if FENCE.match(line):
-            fenced = not fenced
-            continue
-        m = None if fenced else HEADING.match(line)
-        if not m or not DECISIONS_TITLE.search(m.group(2)):
-            continue
-        level = len(m.group(1))
-        body: list[str] = []
-        inner_fence = False
-        for raw in lines[i + 1:]:
-            if FENCE.match(raw):
-                inner_fence = not inner_fence
-            elif not inner_fence:
-                h = HEADING.match(raw)
-                if h and len(h.group(1)) <= level:
-                    break
-            body.append(raw)
-        return line.strip(), body
-    return None, []
-
-
-def owner_needs_you(owner: str) -> bool:
-    return bool(OPERATOR_OWNER.search(owner or ""))
-
-
 def decision_rows(body: list[str]) -> list[dict]:
     rows: list[dict] = []
     i = 0
     while i < len(body):
         line = body[i]
-        if TABLE_ROW.match(line) and i + 1 < len(body) and SEPARATOR.match(body[i + 1]):
-            header = [c.lower() for c in cells(line)]
-            owner_idx = next((k for k, c in enumerate(header) if "owner" in c), None)
-            num_idx = next((k for k, c in enumerate(header) if c in ("#", "no", "no.", "number", "n")), None)
-            item_idx = next((k for k, c in enumerate(header) if "item" in c or "decision" in c), None)
-            if item_idx is None:
-                item_idx = next((k for k in range(len(header)) if k not in (num_idx, owner_idx)), 0)
-            j = i + 2
-            while j < len(body) and TABLE_ROW.match(body[j]):
-                row = cells(body[j])
-                item = row[item_idx] if len(row) > item_idx else " | ".join(row)
-                if owner_idx is not None:
-                    owner = row[owner_idx] if len(row) > owner_idx else ""
-                else:
-                    found = [OWNER_TEXT.search(c) for c in row]
-                    owner = next((m.group(1).strip() for m in found if m), "")
-                rows.append({"n": len(rows) + 1, "item": item, "owner": owner or None,
-                             "needs_you": owner_needs_you(owner)})
-                j += 1
-            i = j
-            continue
-        m = LIST_ENTRY.match(line)
-        if m and not line.startswith((" ", "\t")):
+        if LIST_ENTRY.match(line) and not line.startswith((" ", "\t")):
             text = [line.strip()]
             j = i + 1
             while j < len(body) and body[j].strip() and body[j].startswith((" ", "\t")):
                 text.append(body[j].strip())
                 j += 1
-            joined = " ".join(text)
-            item = re.sub(r"^(?:[-*]|\d+[.)])\s+", "", joined)
-            om = OWNER_TEXT.search(item)
-            owner = om.group(1).strip() if om else ""
-            rows.append({"n": len(rows) + 1, "item": item, "owner": owner or None,
-                         "needs_you": owner_needs_you(owner)})
+            rows.append({"n": len(rows) + 1, "item": re.sub(r"^(?:[-*]|\d+[.)])\s+", "", " ".join(text))})
             i = j
             continue
         i += 1
@@ -286,18 +224,21 @@ def decision_rows(body: list[str]) -> list[dict]:
 
 
 def decisions_block(root: Path) -> dict:
-    path = root / "README.md"
-    info: dict = {"readme": path.is_file(), "heading": None, "rows": [], "more": 0, "needs_you": []}
-    if not info["readme"]:
+    path = root / "PLAN.md"
+    info: dict = {"plan": path.is_file(), "heading": None, "rows": [], "more": 0}
+    if not info["plan"]:
         return info
-    heading, body = decisions_section(read_lines(path))
-    info["heading"] = heading
-    if heading is None:
-        return info
-    rows = decision_rows(body)
+    lines: list[str] = []
+    fenced = False
+    for line in read_lines(path):
+        if FENCE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            lines.append(line)
+    info["heading"] = next((line.strip() for line in lines if SECTION9.match(line)), None)
+    rows = decision_rows(section(lines, SECTION9))
     info["rows"] = rows[:MAX_DECISION_ROWS]
     info["more"] = max(0, len(rows) - MAX_DECISION_ROWS)
-    info["needs_you"] = [r for r in rows if r["needs_you"]]
     return info
 
 
@@ -810,23 +751,17 @@ def print_text(facts: dict) -> None:
     else:
         print("   no gate runs (.local/gate/ has no .exit file)")
     dec = facts["decisions"]
-    print("3. Open decisions (README.md)")
-    if not dec["readme"]:
-        print("   README.md absent")
+    print("3. Open questions (PLAN.md section 9)")
+    if not dec["plan"]:
+        print("   PLAN.md absent")
     elif dec["heading"] is None:
-        print("   no open decisions section (no heading names \"open decisions\" or \"open items\")")
+        print("   no open-questions section 9 in PLAN.md")
     else:
-        print(f"   {dec['heading']}: {len(dec['rows']) + dec['more']} rows")
+        print(f"   {dec['heading']}: {len(dec['rows']) + dec['more']} open")
         for row in dec["rows"]:
-            owner = f" (owner: {row['owner']})" if row["owner"] and "owner" not in row["item"].lower() else ""
-            mark = " [needs you]" if row["needs_you"] else ""
-            print(f"   {row['n']}. {row['item']}{owner}{mark}")
+            print(f"   {row['n']}. {row['item']}")
         if dec["more"]:
             print(f"   ... {dec['more']} more rows")
-        if dec["needs_you"]:
-            print(f"   needs you ({len(dec['needs_you'])}): " + ", ".join(f"row {r['n']}" for r in dec["needs_you"]))
-        else:
-            print("   needs you: none in this section (no owner text names the operator or you)")
     blk = facts["blocked"]
     print("4. BLOCKED.md")
     if not blk["present"]:
