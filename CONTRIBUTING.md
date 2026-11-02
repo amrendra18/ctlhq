@@ -26,7 +26,7 @@ tests/stand-ins/     fakes for tests: Claude Code, GitHub CLI, pre-commit, and a
 3. Google Chrome, for the ctlhq-browser and ctlhq-icon-sheet tests.
 4. `bun`, only for the TypeScript unit tests and type check of `ctlhq-orch` and `ctlhq-watch-pr`. The gate runs them only when bun is installed, and prints a skipped line otherwise.
 
-There is no CI (continuous integration) yet. Nothing runs these checks for you when you push or open a pull request, so run them yourself first.
+CI (continuous integration) runs on every push to GitHub. The workflow `.github/workflows/gate.yml` runs on a macOS runner. It runs the repository check, the comment check `bin/ctlhq-no-comments --diff origin/main...HEAD --strict`, and the gate. The comment check fails on any comment the branch adds in a file with a known extension; it does not read the extensionless tools in `bin/`. GitHub shows the result as a check on the commit and on its pull request. CI reports a failure only after the push, so run the checks yourself first.
 
 ## Checks before a change
 
