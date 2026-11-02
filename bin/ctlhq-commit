@@ -4,7 +4,7 @@
 Usage:
   ctlhq-commit [--gate NAME] [--subject TEXT] [--why TEXT] [--changes TEXT]
                 [--test-plan TEXT] [--risks TEXT] [--message-file FILE]
-                [--co-author LINE] [--allow-dirty] -- <path> [path...]
+                [--co-author LINE] [--review FILE] [--allow-dirty] -- <path> [path...]
 
 Agents commit only through this tool, which adds the co-author trailer.
 The trailer names the model that made the commit, and only the agent knows its model.
@@ -19,6 +19,11 @@ Steps, in order:
      than 0, or no tree line refuses (exit 3) with what, why:, and fix: lines; the fix is
      to rerun the gate. Step 6 compares the tree ID with this tree. Without --gate the
      tool prints "gate: not checked".
+     With --review FILE (read from the current folder, like --message-file), it then
+     refuses (exit 3, with what, why:, and fix: lines) unless FILE exists, is a regular
+     readable file, and holds more than white space, and prints "review: <path>",
+     relative to the repository. The commit-review skill's rule "a commit without a
+     saved review file is not allowed" is enforced this way.
   3. Builds the message: --subject on the first line, a blank line, then the four sections
      "Why:", "Changes:", "Test Plan:", "Risks:", each heading alone on its own line with
      the flag's text below it. All five flags are required, or --message-file FILE is
@@ -90,20 +95,22 @@ Steps, in order:
      exits 1. Keys: hash, subject, branch, committed_at (UTC), paths, message_file,
      co_author, signature, tree ("clean", "dirty", "named paths not committed", or
      "changed by a hook"), dirty_paths, hook_changed (the paths a hook changed), gate
-     (null without --gate, else name, exit, and meta: the .meta line), and exit (this
-     run's exit code). .local/ is ignored by git, so the receipt needs no
-     receipt commit: PLAN.md cites the hash in the next real commit. When the receipt
-     cannot be written, stderr says "receipt: not written (<error>)" and the run goes on;
-     the receipt never changes the exit code.
+     (null without --gate, else name, exit, and meta: the .meta line), review (null
+     without --review, else the review file's path, relative to the repository when
+     inside it), and exit (this run's exit code). .local/ is ignored by git, so the
+     receipt needs no receipt commit: PLAN.md cites the hash in the next real commit.
+     When the receipt cannot be written, stderr says "receipt: not written (<error>)"
+     and the run goes on; the receipt never changes the exit code.
 
 Exit codes: 0 success; 1 git refused (no work tree, a named path missing, add or commit
 failed), a hook changed the commit, a named path is not committed afterwards, or the
 tree is dirty afterwards without --allow-dirty (in the last three cases the commit exists
 and its hash is printed); 2 usage; 3 gate not green, it ran on a different tree, the
 index would commit content the gate did not test or that differs from the files on
-disk, the index holds staged changes outside the named paths, or a file is staged as
-deleted but still on disk and not ignored; 5 no valid co-author line (4 is retired).
-An interrupt ends the run as Python does: 130 for Ctrl-C, 143 for SIGTERM.
+disk, the index holds staged changes outside the named paths, a file is staged as
+deleted but still on disk and not ignored, or the --review file is missing, not a
+regular file, unreadable, or empty; 5 no valid co-author line (4 is retired). An
+interrupt ends the run as Python does: 130 for Ctrl-C, 143 for SIGTERM.
 
 .local/ must be ignored by git, or the message file itself dirties the tree.
 
@@ -134,7 +141,7 @@ RUN_GATE = Path(__file__).resolve().parent / "ctlhq-run-gate"
 USAGE = (
     "usage: ctlhq-commit [--gate NAME] [--subject TEXT] [--why TEXT] [--changes TEXT]\n"
     "                     [--test-plan TEXT] [--risks TEXT] [--message-file FILE]\n"
-    "                     [--co-author LINE] [--allow-dirty] -- <path> [path...]"
+    "                     [--co-author LINE] [--review FILE] [--allow-dirty] -- <path> [path...]"
 )
 SIG_CODES = {
     "G": "good signature",
@@ -208,6 +215,18 @@ def git(args: list[str], stdin: str | None = None) -> subprocess.CompletedProces
 def lit(args: list[str]) -> subprocess.CompletedProcess:
     """git with every pathspec read as a plain path, so a named 'src/*.py' or ':/' matches only that name."""
     return git(["--literal-pathspecs"] + args)
+
+
+def review_problem(path: Path) -> str | None:
+    if not path.exists():
+        return "does not exist"
+    if not path.is_file():
+        return "is not a regular file"
+    try:
+        text = path.read_bytes()
+    except OSError as e:
+        return f"cannot be read ({e.strerror or e})"
+    return None if text.strip() else "is empty"
 
 
 def gate_tree(gate: str, root: Path) -> tuple[str | None, str | None]:
@@ -378,9 +397,10 @@ def main(argv: list[str]) -> int:
     subject = why = changes = test_plan = risks = None
     message_file: str | None = None
     co_author: str | None = None
+    review: Path | None = None
     allow_dirty = False
     paths: list[str] | None = None
-    valued = {"--gate", "--subject", "--why", "--changes", "--test-plan", "--risks", "--message-file", "--co-author"}
+    valued = {"--gate", "--subject", "--why", "--changes", "--test-plan", "--risks", "--message-file", "--co-author", "--review"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -410,6 +430,10 @@ def main(argv: list[str]) -> int:
                 risks = val
             elif a == "--co-author":
                 co_author = val
+            elif a == "--review":
+                if not val:
+                    return usage("--review needs a file")
+                review = Path(os.path.realpath(val))
             else:
                 message_file = val
             i += 2
@@ -493,6 +517,18 @@ def main(argv: list[str]) -> int:
         if tested is None:
             return refuse_gate(gate, why_none, meta_line)
         gate_record = {"name": gate, "exit": 0, "meta": meta_line}
+    if review is not None:
+        problem = review_problem(review)
+        if problem:
+            print(f"ctlhq-commit: review file {review} {problem}; refusing to commit", file=sys.stderr)
+            print("why: a commit needs a saved review (the commit-review skill, section 5), and only the saved file shows the review happened.", file=sys.stderr)
+            print("fix: save the reviewer's report to that file, or pass the path of the saved report, then run ctlhq-commit again.", file=sys.stderr)
+            return 3
+        try:
+            review_shown = review.relative_to(root).as_posix()
+        except ValueError:
+            review_shown = str(review)
+        print(f"review: {review_shown}")
 
     # 3. message file
     commit_dir = root / ".local" / "commit"
@@ -649,6 +685,7 @@ def main(argv: list[str]) -> int:
         "dirty_paths": named_dirty or dirty,
         "hook_changed": hooked,
         "gate": gate_record,
+        "review": review_shown if review is not None else None,
         "exit": 1 if hooked or named_dirty or (dirty and not allow_dirty) else 0,
     }
     try:

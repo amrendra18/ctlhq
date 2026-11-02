@@ -47,4 +47,4 @@ check. No defect without a reproduction. "I did not check" is a valid line.
 
 1. Save the report to `.local/reviews/<milestone-or-commit>.md`.
 2. Every "fix first" defect goes into the builder's fix list with the reviewer's reproduction. A fix reopens the review for the files it changed.
-3. A commit without a saved review file is not allowed in projects that adopt this skill.
+3. A commit without a saved review file is not allowed in projects that adopt this skill. `ctlhq-commit --review .local/reviews/<milestone-or-commit>.md` enforces it. The tool then refuses the commit when that file is missing or empty.

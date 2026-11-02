@@ -38,7 +38,7 @@ When the models file is missing and it matters, ask whether the user wants to pi
 2. Run [`/ctlhq-setup`](../ctlhq-setup/SKILL.md). It asks for a reasoning budget, maps a model to each role, and writes the models file (`ctlhq-models show` prints every role with its current value and default, `ctlhq-models validate` checks it). The models file applies to new chats.
 3. Start a real task with `/ctlhq-mode`, a goal, and a check that can pass or fail.
 
-Installing changes nothing until the user invokes a skill. Only `/ctlhq-setup` loads from the user's words. The [README](../../README.md) has the details. Offer to word their first prompt with them, per [`references/prompting.md`](references/prompting.md).
+Installing changes nothing until a skill loads. Some skills, such as `/ctlhq-setup`, `/start-project`, and `/run-method`, load from the user's words. `ctlhq-skills --json` marks them `"invocable": true`. Offer to word their first prompt with them, per [`references/prompting.md`](references/prompting.md).
 
 If cost is the worry, say where the tokens go and how to spend fewer. ctlhq spends extra tokens on subagents and review panels. Rerun `/ctlhq-setup` and pick a smaller budget or cheaper models. A role set to `auto` or `inherit-parent` runs on the chat's model, which saves tokens when the chat runs on a cheaper model. A shorter panel list runs fewer subagents, one for each entry. Save `/ctlhq-mode` for work that needs rigor.
 
@@ -137,7 +137,7 @@ Principles are one-rule skills that `/ctlhq-mode` reads and cites in its replies
 | 2 | A question got treated as the next step of the last task | Say "new task", or say the turn doesn't need the mode. |
 | 3 | A new model choice had no effect | The models file from `/ctlhq-setup` applies to new chats. Start one. |
 | 4 | Runs cost more than expected | See the cost paragraph under Get set up. |
-| 5 | A skill didn't load on its own | Only `/ctlhq-setup` loads from the user's words. The others load when the user types them or when `/ctlhq-mode` runs them, and it doesn't run every skill. |
+| 5 | A skill didn't load on its own | Only the skills that `ctlhq-skills --json` marks `"invocable": true` load from the user's words. The others load when the user types them or when `/ctlhq-mode` runs them, and it doesn't run every skill. |
 | 6 | Parallel agents overwrote each other | Give each agent its own git worktree (in Claude Code, `isolation: "worktree"`). |
 | 7 | An overnight run moved but finished nothing | `/loop` needs a check that can pass or fail, not a duration. See the [autonomous run](../ctlhq-mode/playbooks/autonomous-run.md) playbook. |
 | 8 | The reply claims success from a green build | Ask for the real command, flow, stored value, or profile. That's the prove-it-works principle. |
