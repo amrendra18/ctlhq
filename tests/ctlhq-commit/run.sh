@@ -534,6 +534,18 @@ printf 'a3\n' > a.txt; "$fc" "${four[@]}" -- a.txt >/dev/null 2>&1
 expect_eq "None" "$(review_of "$(git rev-parse HEAD)")" "R3: without --review the receipt's review is null"
 expect_grep '\[--review FILE\]' "$("$fc" --help)" "R4: --help lists --review"
 
+fresh tz; printf 'a2\n' > a.txt
+TZ=Asia/Kolkata "$fc" "${four[@]}" -- a.txt >/dev/null 2>&1; expect_rc 0 $? "T1: a commit in Asia/Kolkata exits 0"
+expect_eq "+0000 +0000" "$(git log -1 --format='%ad %cd' --date=format:%z)" "T1: without --tz both dates record UTC"
+printf 'a3\n' > a.txt
+TZ=Asia/Kolkata "$fc" --tz local "${four[@]}" -- a.txt >/dev/null 2>&1; expect_rc 0 $? "T2: a commit with --tz local exits 0"
+expect_eq "+0530 +0530" "$(git log -1 --format='%ad %cd' --date=format:%z)" "T2: --tz local keeps the machine's zone in both dates"
+printf 'a4\n' > a.txt; h="$(git rev-parse HEAD)"
+err="$("$fc" --tz Europe/Berlin "${four[@]}" -- a.txt 2>&1)"; expect_rc 2 $? "T3: --tz Europe/Berlin exits 2"
+expect_grep '^usage: ctlhq-commit ' "$err" "T3: the refusal prints the usage line"
+expect_eq "$h" "$(git rev-parse HEAD)" "T3: no commit after the --tz refusal"
+expect_grep '\[--tz local\]' "$("$fc" --help)" "T4: --help lists --tz local"
+
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then echo "$fail checks failed"; exit 1; fi
 exit 0
