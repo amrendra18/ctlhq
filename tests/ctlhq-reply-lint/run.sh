@@ -115,6 +115,22 @@ printf 'It is done.\n\nNext step: none from you.\n' >"$tmp/warn.md"
 printf 'Fixed in 4b22be9 (exit 0).\n\nNext step: none from you.\n' >"$tmp/ev.md"
 out="$("$rl" "$tmp/ev.md" 2>&1)"
 expect_eq "0 failures, 0 warnings" "$out" "a hash or exit code on the line satisfies claim-evidence"
+status() { printf '%s\n\nNext step: none from you.\n' "$1" | "$rl" 2>&1; }
+out="$(status 'Status: fixed.')"; expect_rc 1 "$?" "a status-line claim with no evidence fails"
+expect_grep "^1: claim-evidence: fail: 'fixed' " "$out" "claim-evidence names 'fixed' as a failure"
+out="$(status '1. Status: done.')"; expect_rc 1 "$?" "a status line after a list marker fails the same way"
+for s in 'Status: tested (tests/x/run.sh exit 0).' 'Status: tested (tests/x/run.sh).' 'Status: committed 4b22be9.' '**Status.** tested, the gate exited 0.'; do
+	expect_eq "0 failures, 0 warnings" "$(status "$s")" "status line with an exit code, hash, or test name: $s"
+done
+for s in 'Status: implemented. Nothing is committed.' 'Status: proposed, not tested.'; do
+	out="$(status "$s")"; expect_rc 0 "$?" "a negated claim word on the status line is no claim: $s"
+done
+out="$(status 'Status: fixed, not yet committed.')"; expect_rc 1 "$?" "a negation after the claim word leaves the claim"
+out="$(status 'Status: no failures, committed.')"; expect_rc 1 "$?" "a negation stops at a comma"
+for s in 'The plan says what done means.' 'Reviewer B tested the parser and found 2 bugs.' \
+	'Ask the operator whether the draft is ready.' 'The main agent marks the milestone done in PLAN.md section 7.'; do
+	out="$(status "$s")"; expect_rc 0 "$?" "a claim word off the status line does not fail: $s"
+done
 printf 'The lock-wait defect (D34) is open.\n\nNext step: none from you.\n' >"$tmp/gl.md"
 out="$("$rl" "$tmp/gl.md" 2>&1)"
 expect_eq "0 failures, 0 warnings" "$out" "a label inside a parenthesis counts as glossed"
@@ -146,19 +162,19 @@ expect_grep 'limit 600, table or list present' "$out" "message names the structu
 out="$(printf '1. a\n2. b\n\n%s Next step: none.' "$w500" | "$rl" --max-words-structured 450 2>&1)"; expect_rc 1 "$?" "--max-words-structured lowers the second limit"
 
 # operator-command: a next step for the operator that names an action needs a code block.
-out="$(printf 'Status: tested.\n\nNext step: you run the symlink check in a fresh session.' | "$rl" 2>&1)"; expect_rc 1 "$?" "operator step without a command fails"
+out="$(printf 'Status: implemented.\n\nNext step: you run the symlink check in a fresh session.' | "$rl" 2>&1)"; expect_rc 1 "$?" "operator step without a command fails"
 expect_grep 'operator-command' "$out" "operator-command named"
-out="$(printf 'Status: tested.\n\n```\nclaude -p hi\n```\n\nNext step: you run the command above.' | "$rl" 2>&1)"; expect_rc 0 "$?" "operator step with a code block passes"
-out="$(printf 'Status: tested.\n\nNext step: none from you. Main agent runs the tests.' | "$rl" 2>&1)"; expect_rc 0 "$?" "main-agent step needs no code block"
+out="$(printf 'Status: implemented.\n\n```\nclaude -p hi\n```\n\nNext step: you run the command above.' | "$rl" 2>&1)"; expect_rc 0 "$?" "operator step with a code block passes"
+out="$(printf 'Status: implemented.\n\nNext step: none from you. Main agent runs the tests.' | "$rl" 2>&1)"; expect_rc 0 "$?" "main-agent step needs no code block"
 
 # 8. Wave 3 rules: double-meaning, step-actor, vague-noun.
-printf 'Status: tested.\n\nThe gate passed and the build qualifies.\n\nSteps:\n\n1. Run the import test.\n2. Open the report.\n\nThe other thing is open.\n\nNext step: none from you.\n' >"$tmp/w3.md"
+printf 'Status: implemented.\n\nThe gate passed and the build qualifies.\n\nSteps:\n\n1. Run the import test.\n2. Open the report.\n\nThe other thing is open.\n\nNext step: none from you.\n' >"$tmp/w3.md"
 out="$("$rl" "$tmp/w3.md" 2>&1)"; expect_rc 0 "$?" "double-meaning and step-actor warn, never block"
 expect_grep "^3: double-meaning: warning: 'passed' " "$out" "double-meaning names 'passed' on line 3"
 expect_eq 2 "$(count ': step-actor: warning: ' "$out")" "two steps with no actor"
 expect_grep "^10: vague-noun: warning: 'thing' " "$out" "vague-noun is a warning on line 10"
 expect_eq "0 failures, 4 warnings" "$(printf '%s\n' "$out" | tail -1)" "wave 3 summary counts"
-printf 'Status: tested.\n\nYou run these steps:\n\n1. Run the import test.\n2. The main agent opens the report.\n\nNext step: you run the command above.\n\n```\nbin/test\n```\n' >"$tmp/actor.md"
+printf 'Status: implemented.\n\nYou run these steps:\n\n1. Run the import test.\n2. The main agent opens the report.\n\nNext step: you run the command above.\n\n```\nbin/test\n```\n' >"$tmp/actor.md"
 out="$("$rl" "$tmp/actor.md" 2>&1)"; expect_rc 0 "$?" "a lead-in line naming the actor satisfies step-actor"
 printf 'The `pass` field stays.\n\nNext step: none from you.\n' >"$tmp/tick.md"
 out="$("$rl" "$tmp/tick.md" 2>&1)"; expect_eq "0 failures, 0 warnings" "$out" "a backticked word is not a double-meaning label"
@@ -186,7 +202,7 @@ expect_grep 'approval-budget' "$("$rl" --help)" "--help documents --approval"
 hj() { python3 -I -c 'import json,sys; print(json.dumps({"hook_event_name":"Stop","session_id":"s1","last_assistant_message": sys.argv[1]}))' "$1" | "$rl" --hook-json; }
 out="$(hj 'Done. no next')"; expect_rc 0 "$?" "--hook-json exits 0 on a failing reply"
 expect_grep '"decision": "block"' "$out" "--hook-json blocks a failing reply"
-out="$(hj 'Status: tested. Next step: none from you.')"; expect_eq '{"continue": true}' "$out" "--hook-json continues on a clean reply"
+out="$(hj 'Status: implemented. Next step: none from you.')"; expect_eq '{"continue": true}' "$out" "--hook-json continues on a clean reply"
 out="$(printf '{"stop_hook_active": true, "last_assistant_message": "x"}' | "$rl" --hook-json)"; expect_eq '{"continue": true}' "$out" "--hook-json continues when the stop hook is already active"
 # vague-pronoun: a block that opens with It, They, or This/That plus a verb warns; a named noun does not.
 printf 'It builds the skill.\n\nThis skill builds a folder.\n\n1. They run fast.\n\n| # | note |\n|---|---|\n| 1 | That is wrong |\n\nNext step: none from you.\n' >"$tmp/pron.md"

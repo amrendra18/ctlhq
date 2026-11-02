@@ -41,6 +41,11 @@ Failures (exit 1), each with the rule it encodes from home/AGENTS.md:
                  while neither the item nor the line before the list names who acts (you,
                  operator, I, we, main agent, builder, reviewer, agent). "Name who acts." A warning: a numbered
                  record of past steps needs no actor.
+  claim-evidence "fixed", "done", "succeeds", "tested", or "committed" on the status line (a line
+                 that opens with "Status:" or "Status.", after any list marker) with no exit code,
+                 commit hash, or test name on the line. Elsewhere a warning. A word after not, no,
+                 nothing, never, or none in its own clause is no claim. 'Never write "fixed",
+                 "done", or "succeeds" without the state and the evidence.'
 
 Warnings (printed, exit unaffected):
   sentence-length  a sentence over 25 words. "At most 20 words for an instruction, 25 for an explanation."
@@ -50,8 +55,6 @@ Warnings (printed, exit unaffected):
   vague-pronoun    a paragraph, list item, or table cell that opens with It or They, or with
                    This, That, These, or Those followed by a verb ("This builds"). "Name the
                    thing when words such as 'it' or 'this' could be unclear."
-  claim-evidence   "fixed", "done", or "succeeds" with no hash, exit code, or test name on the line.
-                   'Never write "fixed", "done", or "succeeds" without the state and the evidence.'
   chatbot-phrase   unslop rule 20; sycophantic-tone: unslop rule 22.
   vague-noun       a noun that names no exact item: thing, things, stuff, something, the
                    issue, the problem, the other one, some files. "Name the thing when words
@@ -148,11 +151,13 @@ UNSLOP_RULES = {
 BLOCK_START = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 VAGUE_PRONOUN = re.compile(r"^(?:It|They)\b|^(?:This|That|These|Those)\s+(?:is|are|was|were|does|do|did|has|have|means|makes|runs|builds|covers|keeps|holds|shows|gives|works|needs|lets|adds|says|will|can|would|should|stays|goes|comes|took|takes|fails|failed|passes|checks|reads|writes)\b")
 STATUS_WORDS = re.compile(r"\b(?:proposed|implemented|tested|committed|gate|installed)\b|Status:", re.IGNORECASE)
-CLAIM = re.compile(r"\b(?:fixed|done|succeeds)\b", re.IGNORECASE)
+CLAIM = re.compile(r"\b(?:fixed|done|succeeds|tested|committed)\b", re.IGNORECASE)
+NEGATED = re.compile(r"\b(?:not|no|nothing|never|none)\b[^.!?,;]*$", re.IGNORECASE)
+STATUS_LINE = re.compile(r"^\W*Status\W*[:.]", re.IGNORECASE)
 EVIDENCE = re.compile(
-    r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"  # a commit hash
-    r"|\bexit(?: code)?:? ?\d+"  # an exit code
-    r"|\btests?/\S+|\b\S+\.sh\b|\btest_\w+|\b\w+_test\b|\b\d+ checks? passed",  # a test name or result
+    r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"
+    r"|\bexit(?:s|ed)?(?: code| status)?:? ?\d+"
+    r"|\btests?/\S+|\b\S+\.sh\b|\btest_\w+|\b\w+_test\b|\b\d+ checks? passed",
     re.IGNORECASE,
 )
 LABEL = re.compile(r"\b(?:[A-Z]{1,2}\d{1,2}|\d[A-Z])\b")
@@ -426,9 +431,10 @@ def lint(text: str, max_words: int, need_next: bool, allow: set[str], max_struct
                          "no status line (proposed, implemented, tested, committed, gate, installed, or 'Status:')"))
 
     for i, (ln, r) in enumerate(zip(lines, raw), 1):
-        m = CLAIM.search(ln)
+        m = next((c for c in CLAIM.finditer(ln) if not NEGATED.search(ln, 0, c.start())), None)
         if m and not EVIDENCE.search(r):
-            findings.append((i, "claim-evidence", "warning",
+            severity = "fail" if STATUS_LINE.match(BLOCK_START.sub("", ln)) else "warning"
+            findings.append((i, "claim-evidence", severity,
                              f"'{m.group(0)}' with no hash, exit code, or test name on the line"))
 
     for i, ln in enumerate(lines, 1):
