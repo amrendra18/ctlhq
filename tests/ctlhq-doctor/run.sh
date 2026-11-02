@@ -133,6 +133,40 @@ expect_rc 0 "$rc" "a malformed separate-tools value never changes the exit code"
 expect_grep '^invalid +separate-tools +.*delta/SKILL\.md:5: separate-tools must be names separated by spaces$' "$out" "a malformed separate-tools value gives an invalid row"
 if [ -e "$tmp/separate-tool-ran" ]; then bad "the doctor never runs a separate tool"; else ok; fi
 
+# 10. The branch row: ok on the default branch, warn on another or a detached HEAD, main when origin/HEAD is unset.
+fx="$tmp/checkout"
+mkdir -p "$fx/bin" "$fx/skills/ctlhq-mode"
+cp "$doctor" "$fx/bin/ctlhq-doctor"
+touch "$fx/skills/ctlhq-mode/SKILL.md"
+g() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$fx" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false "$@"; }
+g init -q
+g symbolic-ref HEAD refs/heads/main
+g add -A
+g commit -qm fixture
+g update-ref refs/remotes/origin/main HEAD
+g symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+short="$(g rev-parse --short HEAD)"
+fd() { out="$("$fx/bin/ctlhq-doctor" --no-tools --models "$tmp/none.toml" 2>&1)"; rc=$?; }
+fd
+expect_rc 0 "$rc" "on the default branch the doctor exits 0"
+expect_grep '^ok +branch +main at '"$short"'$' "$out" "on main the branch row is ok"
+g switch -qc feature
+fd
+expect_rc 0 "$rc" "on another branch the doctor exits 0"
+expect_grep '^warn +branch +feature at '"$short"', not main; ' "$out" "on another branch the branch row warns"
+g switch -q --detach main
+fd
+expect_rc 0 "$rc" "on a detached HEAD the doctor exits 0"
+expect_grep '^warn +branch +a detached HEAD at '"$short"', not main; ' "$out" "on a detached HEAD the branch row warns"
+g switch -q main
+g symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feature
+fd
+expect_grep '^warn +branch +main at '"$short"', not feature; ' "$out" "the default branch is the one origin/HEAD names"
+g symbolic-ref --delete refs/remotes/origin/HEAD
+fd
+expect_rc 0 "$rc" "with origin/HEAD unset the doctor exits 0"
+expect_grep '^ok +branch +main at '"$short"'$' "$out" "with origin/HEAD unset the default branch is main"
+
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then
 	echo "$fail checks failed"

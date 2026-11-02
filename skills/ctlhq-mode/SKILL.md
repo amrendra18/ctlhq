@@ -31,7 +31,7 @@ ctlhq-models get <role>                     # the model for a role: the models f
 ctlhq-skills path <name>                    # the absolute SKILL.md path of a skill. Also find <word> and show <name>.
 ctlhq-principles [<name>]                   # the principles index, or one principle's body in full.
 ctlhq-preflight [--repo DIR]                # each permission, tool, and service a run needs, ready or missing, with the fix line. Run it before the first milestone.
-ctlhq-doctor                                # what this machine has and what ctlhq's tools need: python3, bash, git, node, bun, gh, rg, jq, Google Chrome, each separate tool a skill names in its front matter, PATH, the models file, every bin/ --help.
+ctlhq-doctor                                # what this machine has and what ctlhq's tools need: python3, bash, git, node, bun, gh, rg, jq, Google Chrome, each separate tool a skill names in its front matter, the checkout's branch, PATH, the models file, every bin/ --help.
 ctlhq-status --next [--repo DIR]            # the next step from PLAN.md's milestone table, or "none" with the reason. Without --next, the whole status with a cost line.
 ```
 

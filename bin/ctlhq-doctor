@@ -7,17 +7,21 @@ Usage:
 One line per check: status, name, detail. Then a summary line.
   required  python3 (3.9 or newer), node (22.18 or newer), bash, git, the ctlhq
             repository root, and every executable in bin/ answering --help with exit 0
-  optional  bun, gh, rg, jq, Google Chrome, each separate tool, bin/ on PATH, the
-            models file (~/.ctlhq/models.toml) present and valid
+  optional  bun, gh, rg, jq, Google Chrome, each separate tool, the checkout's branch,
+            bin/ on PATH, the models file (~/.ctlhq/models.toml) present and valid
 
 Status words: ok; missing; old (present, version below the bar); invalid (present,
-fails its check). A missing tool other than a separate tool prints its one-line install
-command and the ctlhq tools that need it. node is needed by ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, and the
+fails its check); warn (the branch row only, off the default branch). A missing tool
+other than a separate tool prints its one-line install command and the ctlhq tools that
+need it. node is needed by ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, and the
 ctlhq-plan-lint and stand-ins tests (the stand-ins test imports .ts files, which node runs
 from 22.18 on); bun by ctlhq-watch-pr and ctlhq-orch; gh by ctlhq-watch-pr, ctlhq-worktree-audit (PR state),
 and the PR playbooks; rg and jq by ctlhq-worktree-audit; Google Chrome by ctlhq-browser,
 ctlhq-icon-sheet, and their tests. Chrome is looked up where ctlhq-browser looks: the
 environment variable CTLHQ_CHROME, else the macOS app path.
+
+The branch row prints the checkout's branch and short hash. It warns on a detached HEAD
+or a branch other than the default, which is the one origin/HEAD names, else main.
 
 A separate tool is one this repository does not ship and a skill names in its front
 matter. The doctor runs `ctlhq-skills tools` on this repository's skills/,
@@ -165,6 +169,27 @@ def check_root() -> dict:
             "detail": str(ROOT) if ok else f"{ROOT} has no skills/ctlhq-mode/SKILL.md or bin/; run the tool from a ctlhq checkout"}
 
 
+def check_branch() -> dict:
+    git = ["git", "-C", str(ROOT)]
+    c = {"name": "branch", "required": False, "status": "ok", "version": "", "path": str(ROOT),
+         "install": None, "needed_by": "every session that runs this checkout's skills and bin/ tools", "detail": ""}
+    rc, out, err = run([*git, "rev-parse", "--short", "HEAD"])
+    if rc != 0:
+        c["status"] = "missing"
+        c["detail"] = err.strip().split("\n")[0]
+        return c
+    short = out.strip()
+    branch = run([*git, "branch", "--show-current"])[1].strip()
+    rc, out, _ = run([*git, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+    default = out.strip().split("/", 1)[-1] if rc == 0 else "main"
+    if branch == default:
+        c["detail"] = f"{branch} at {short}"
+        return c
+    c["status"] = "warn"
+    c["detail"] = f"{branch or 'a detached HEAD'} at {short}, not {default}; sessions run this checkout's skills and tools"
+    return c
+
+
 def check_path() -> dict:
     bin_dir = ROOT / "bin"
     real = os.path.realpath(bin_dir)
@@ -272,6 +297,7 @@ def main(argv: list) -> int:
     checks += [check_separate_tool(n, skills) for n, skills in sorted(tools.items())]
     checks += [check_separate_value(p) for p in problems]
     checks.append(check_root())
+    checks.append(check_branch())
     checks.append(check_path())
     checks.append(check_models(models))
     tools: list = []
