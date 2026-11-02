@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   ChecksUnavailable,
   WatcherQueryError,
@@ -461,19 +462,50 @@ describe("context and stack discovery", () => {
       {
         number: parsePrNumber(41),
         headRefName: "base-feature",
+        isCrossRepository: false,
         baseRefName: "main",
       },
       {
         number: context.number,
         headRefName: "feature",
+        isCrossRepository: false,
         baseRefName: "base-feature",
       },
       {
         number: parsePrNumber(43),
         headRefName: "upstack",
+        isCrossRepository: false,
         baseRefName: "feature",
       },
     ]);
     expect(ordered.map((item) => Number(item.number))).toEqual([41, 42, 43]);
+  });
+
+  it("does not use a fork's same-named head as a stack parent", () => {
+    const ordered = orderStack(context, [
+      { number: parsePrNumber(41), headRefName: "base-feature", baseRefName: "main", isCrossRepository: true },
+      { number: context.number, headRefName: "feature", baseRefName: "base-feature", isCrossRepository: false },
+    ]);
+    expect(ordered.map((item) => Number(item.number))).toEqual([42]);
+  });
+
+  it("does not attach upstream branch children to a fork head", () => {
+    const ordered = orderStack(context, [
+      { number: context.number, headRefName: "feature", baseRefName: "main", isCrossRepository: true },
+      { number: parsePrNumber(43), headRefName: "upstack", baseRefName: "feature", isCrossRepository: false },
+    ]);
+    expect(ordered.map((item) => Number(item.number))).toEqual([42]);
+  });
+
+  it("terminates when an unrelated fork opens main against main", () => {
+    const program = `import { orderStack } from ${JSON.stringify(import.meta.dir + "/github.ts")};
+      console.log(JSON.stringify(orderStack(${JSON.stringify(context)}, [
+        { number: 41, headRefName: "main", baseRefName: "main", isCrossRepository: true },
+        { number: 42, headRefName: "feature", baseRefName: "main", isCrossRepository: false }
+      ])));`;
+    const child = spawnSync(process.execPath, ["-e", program], { encoding: "utf8", timeout: 2000 });
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(JSON.parse(child.stdout).map((item: { number: number }) => item.number)).toEqual([42]);
   });
 });

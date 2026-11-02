@@ -377,6 +377,7 @@ prec "a conflicting PR 5" g_wp_ready pr-view-5.json '"mergeable":"MERGEABLE"' '"
 prec "a one-page rollup" g_wp_failing graphql-PrCheckRollup-pr-6.json '"hasNextPage":true' '"hasNextPage":false'
 prec "a resolved thread" g_wp_threads graphql-ReviewThreads-pr-7.json '"isResolved":false' '"isResolved":true'
 prec "PR 7 off the stack" g_wp_stack pr-list-open.json '"baseRefName":"feature-b"' '"baseRefName":"main"'
+prec "PR 5 from a fork" g_wp_stack pr-list-open.json '"Add widgets","isCrossRepository":false' '"Add widgets","isCrossRepository":true'
 # Planted defects in the fake gh.
 pw() { # label group old new
 	local d; d="$(newdir)"; plant "$fgh" "$d/gh" "$3" "$4"; control "$1" "$2" "$d" "$grec"
