@@ -71,7 +71,7 @@ tests/privacy/run.sh --root <worktree>   # file:line per hit; ignored files are 
    4. Delete their branches with `git -C <project> branch -D <branch>`.
    5. `git -C <project> rev-parse HEAD` must print the readiness commit, and `git -C <project> worktree list` must show the same worktrees as the list taken at Confirm.
    6. The merge deleted from `<project>` each root record that the readiness commit stopped tracking, such as `PLAN.md`. Copy each one back from the private place.
-   7. In `<project>`, run the precondition block in section 0 of `/fresh-history-push`'s [verification commands](../fresh-history-push/references/verify.md). Its gate line is the main-folder run of `ctlhq-run-gate`. The tree is ready only when every line prints exit 0. Otherwise list the failing lines.
+   7. In `<project>`, run the precondition block in section 0 of `/fresh-history-push`'s [verification commands](../fresh-history-push/references/verify.md). Its gate line is the main-folder run of `ctlhq-run-gate`. When plan block line 8 names former names, also run `ctlhq-rename-check <former names>` in `<project>`. A place where an old name must stay goes in an allow file the operator approves (`--allow`). The tree is ready only when every line prints exit 0 and `ctlhq-rename-check` exits 0. Otherwise list the failing lines.
    8. End by suggesting `/fresh-history-push`, which the operator types when they want one fresh commit pushed. That skill still waits for the operator's own words before it pushes.
 9. **Report.** Give the findings summary in the format below.
 
@@ -86,7 +86,7 @@ tests/privacy/run.sh --root <worktree>   # file:line per hit; ignored files are 
 
 ## Reply
 
-1. A one-sentence verdict that says whether the tree is ready for a fresh-history push. It says "ready" only when every line of the precondition block in step 8.7 printed exit 0. Otherwise it lists the failing lines.
+1. A one-sentence verdict that says whether the tree is ready for a fresh-history push. It says "ready" only when every line of the precondition block in step 8.7 printed exit 0, and `ctlhq-rename-check <former names>` exited 0 when plan block line 8 named any. Otherwise it lists the failing lines.
 2. A table with a leading # column and one row per checklist item. Each row says what changed, gives file:line examples, and names what is still open.
 3. Where moved content went, and the content audit's LOST count.
 4. The gate exit line, the fresh review's verdict, and "`main` is at <readiness commit hash>" (or why there is none).

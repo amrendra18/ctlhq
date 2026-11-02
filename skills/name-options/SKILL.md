@@ -35,7 +35,7 @@ Exit 0 every name is free, 1 any name collides, 2 usage, 3 a registry could not 
 | 1 | folder | rename the folder; update any absolute paths in scripts and settings |
 | 2 | remote | rename the hosted repository and run `git remote set-url origin <new url>`, after the operator approves |
 | 3 | docs | README, PLAN.md, AGENTS.md, catalogs, help text, and the package manifest name |
-| 4 | old name | `rg -i '<old name>'` across the repository and the operator's setup files; every hit fixed or listed with a reason |
+| 4 | old name | `ctlhq-rename-check '<old name>'` in the repository exits 0, with every kept hit in an `--allow` file with its reason; `rg -i '<old name>'` in the operator's setup files, which sit outside the repository |
 | 5 | links | symlinks, installed skills, and shell aliases that point at the old path |
 
-Reply contract: the table, the recommendation, and the question "Which number?". After a rename: the checklist rows and the `rg` count for the old name.
+Reply contract: the table, the recommendation, and the question "Which number?". After a rename: the checklist rows and the summary line of `ctlhq-rename-check` for the old name.
