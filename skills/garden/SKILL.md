@@ -14,7 +14,7 @@ A repository grows documents, plans, and caches that every later session pays to
 
 ## Steps
 
-1. Set the scope and the keep-list. README.md, AGENTS.md, CLAUDE.md, and LICENSE are never cut. CLAUDE.md may include AGENTS.md instead of repeating it. PLAN.md, BLOCKED.md, and the README's "Open decisions" section hold pending work only. Finished plan content folds into README.md (shipped behaviour) or is deleted. Everything under `.local/` is disposable unless PLAN.md or the README names it.
+1. Set the scope and the keep-list. README.md, AGENTS.md, CLAUDE.md, and LICENSE are never cut. CLAUDE.md may include AGENTS.md instead of repeating it. PLAN.md and BLOCKED.md hold pending work only. Open items live in PLAN.md section 9 ("Open questions for the operator"), never in README.md. Finished plan content folds into README.md (shipped behaviour) or is deleted. Everything under `.local/` is disposable unless PLAN.md or the README names it.
 2. Read the deferred list first. The "Deferred by operator" list in PLAN.md or README.md is read, never reopened. A finding that touches a deferred item goes into the table as "keep, deferred" and nothing more.
 3. Measure before you cut. Run `bin/ctlhq-doc-diet words` and record the total as the before count (the token cost). Then run `bin/ctlhq-doc-diet` for the full report.
 4. Decide each document finding: fold, delete, or keep with a reason. Each section of the report prints a `why:` and a `fix:` line for its rows. A row is a candidate, never a verdict. Read the file before you propose an action. Keep it when a person or a tool reads it, and say who.

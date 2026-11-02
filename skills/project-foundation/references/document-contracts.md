@@ -21,11 +21,11 @@ report word counts before and after.
 
 | # | Document | Role | Lifetime | Cut rule |
 | --- | --- | --- | --- | --- |
-| 1 | `README.md` | Shipped behavior: what it is, how to install and use it. Its "Open decisions" section holds open items with owners, updated in the same commit as the change that opens or closes one. In Single file mode, also the product, principles, and plan | Permanent | Never cut. Finished plan content folds in here. A closed item leaves "Open decisions" |
+| 1 | `README.md` | Shipped behavior: what it is, how to install and use it. In Single file mode, also the product, principles, and plan. It holds no open items | Permanent | Never cut. Finished plan content folds in here |
 | 2 | `AGENTS.md` | Instructions for agents working in the repository | Permanent | Exempt from token cuts; keep it short by routing detail to its owner |
 | 3 | `CLAUDE.md` | One line, `@AGENTS.md`, so Claude Code reads the same rules | Permanent | Never repeats `AGENTS.md` |
 | 4 | `PRD.md`, `ENGINEERING_PRINCIPLES.md`, `ENGINEERING_PLAN.md` | As in the table above | Four-document mode only | One owner per fact; link instead of repeating |
-| 5 | `PLAN.md` | Pending work for a build run (the run-method skill) | Until the run is accepted | Pending items only. Fold finished content into `README.md`, then delete it |
+| 5 | `PLAN.md` | Pending work for a build run (the run-method skill). Decisions go in section 8, and open items with owners in section 9 ("Open questions for the operator"). It stays untracked | Until the run is accepted and section 9 is empty | Pending items only. Fold finished content into `README.md`. Delete it only when section 9 is empty |
 | 6 | `BLOCKED.md` | Each blocker with its exact command and owner | While a blocker exists | Delete the entry when it clears |
 | 7 | `LICENSE` | The license text | Permanent | Never cut |
 
@@ -41,7 +41,7 @@ For a personal project, write two files:
    when it carries real information: what it is and who uses it; journeys
    (trigger, action, feedback, result, recovery); scope and non-goals;
    requirements and success checks; principles; plan (what actually runs,
-   milestones with completion checks); open decisions.
+   milestones with completion checks). Open decisions go in `PLAN.md` section 9.
 2. `AGENTS.md` under the same contract as in four-document mode. It points to
    the `README.md` sections in place of the three other documents.
 
@@ -102,10 +102,11 @@ information, while covering these contracts:
 - A passing test suite alone is insufficient when the product also requires a
   user workflow or operational outcome.
 
-### Release boundary and open decisions
+### Release boundary
 
 - State what satisfying the PRD proves and what it does not prove.
-- Record only unresolved decisions that can still change scope or acceptance.
+- Record each unresolved decision that can still change scope or acceptance in
+  `PLAN.md` section 9, never in the PRD.
 - Do not hide missing information inside assumptions.
 
 ## ENGINEERING_PRINCIPLES.md

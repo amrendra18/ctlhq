@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tests/ctlhq-status/run.sh: checks for bin/ctlhq-status against a scratch git repository
-# with a README.md "Open decisions" section, BLOCKED.md, PLAN.md, and .local/gate/ files, plus
+# with a PLAN.md section 9 of open questions, a README.md "Open decisions" section the tool must
+# not read, BLOCKED.md, and .local/gate/ files, plus
 # a decoy NEXT.md that the tool must ignore (the positive control for the NEXT.md retirement). Prints "N checks passed" and
 # exits 1 when any check fails. Writes only to a temp folder.
 set -u
@@ -77,9 +78,15 @@ MD
 cat > "$repo/PLAN.md" <<'MD'
 # Plan
 
-## 9. Risks
+## 9. Open questions for the operator
 
-None.
+1. Ship the import page on Friday? Owner: operator. Recommendation: yes.
+2. Keep the old CSV flag? Owner: operator. Recommendation: no.
+   It changes the import page only.
+
+```md
+3. A fenced example, not a question.
+```
 
 ## 10. Approvals
 
@@ -111,21 +118,15 @@ mkdir -p "$tmp/plain"
 # 2. Text output: seven numbered blocks in order.
 out="$(cd "$repo/sub" && "$fs" 2>&1)"; rc=$?
 expect_rc 0 "$rc" "status from a subfolder exits 0"
-expect_eq "1. Repository 2. Gate 3. Open decisions (README.md) 4. BLOCKED.md 5. PLAN.md section 10 6. Agents 7. Now" "$(printf '%s\n' "$out" | grep -E '^[0-9]\. ' | tr '\n' ' ' | sed 's/ $//')" "seven blocks in order"
+expect_eq "1. Repository 2. Gate 3. Open questions (PLAN.md section 9) 4. BLOCKED.md 5. PLAN.md section 10 6. Agents 7. Now" "$(printf '%s\n' "$out" | grep -E '^[0-9]\. ' | tr '\n' ' ' | sed 's/ $//')" "seven blocks in order"
 expect_grep '^   branch: main$' "$out" "branch is main"
 expect_grep '^   HEAD: [0-9a-f]{7,} Seed the plan$' "$out" "HEAD hash and subject"
 expect_grep '^   committed: [0-9]+ seconds? ago' "$out" "commit age"
 expect_grep '^   dirty files: 1$' "$out" "dirty count is 1 (BLOCKED.md untracked)"
 expect_grep '^   gate  exit 0  [0-9]+ (days?|hours?|minutes?|seconds?) ago$' "$out" "gate row from .meta"
 expect_grep '^   lint  exit 2  .* \(file age, no \.meta\)$' "$out" "lint row falls back to file age"
-expect_grep '^   ## Open decisions: 5 rows$' "$out" "the README section heading and row count"
-expect_grep '^   1\. Approve the schema change \(owner: operator\) \[needs you\]$' "$out" "operator table row marked"
-expect_grep '^   2\. Fix the flaky import test \(owner: builder\)$' "$out" "builder table row listed, not marked"
-expect_grep '^   3\. Sign the release \(owner: Operator and main agent\) \[needs you\]$' "$out" "mixed-owner row marked"
-expect_grep '^   4\. Pick the release name\. Owner: you, by Friday\. \[needs you\]$' "$out" "list entry with 'Owner: you' marked"
-expect_grep '^   5\. Write the changelog\. Owner: Jun Park, who emails you the list\.$' "$out" "a named owner is not marked, even with 'you' later"
-expect_grep '^   needs you \(3\): row 1, row 3, row 4$' "$out" "three rows need the operator"
-expect_nogrep 'fenced example|Outside the section' "$out" "fenced and later-section entries are not rows"
+expect_eq "$(printf '   ## 9. Open questions for the operator: 2 open\n   1. Ship the import page on Friday? Owner: operator. Recommendation: yes.\n   2. Keep the old CSV flag? Owner: operator. Recommendation: no. It changes the import page only.')" "$(printf '%s\n' "$out" | sed -n '/^3\. /,/^4\. /p' | sed '1d;$d')" "block 3 lists the 2 open questions of PLAN.md section 9, owner text as written"
+expect_nogrep 'Approve the schema change|Pick the release name|fenced example|Outside the section' "$out" "README rows, fenced entries and later-section entries are not open questions"
 expect_nogrep 'NEXT-only|Old state line|NEXT\.md' "$out" "positive control: NEXT.md is no longer read"
 expect_grep '^   last stop: 1\. git commit: the sandbox denies \.git writes\. Owner: operator\. \(BLOCKED\.md, last entry\)$' "$out" "positive control: last stop from BLOCKED.md, not the NEXT.md stop line"
 expect_grep '^   present \(first 3 lines\)$' "$out" "BLOCKED.md present"
@@ -141,12 +142,12 @@ d = json.load(sys.stdin)
 print(" ".join(sorted(d)))
 print(d["repository"]["branch"], d["repository"]["subject"], d["repository"]["dirty_files"])
 print(",".join("%s=%s" % (g["name"], g["exit"]) for g in d["gate"]))
-print(len(d["decisions"]["rows"]), len(d["decisions"]["needs_you"]), d["decisions"]["heading"])
+print(len(d["decisions"]["rows"]), d["decisions"]["heading"])
 print(d["blocked"]["present"], len(d["blocked"]["first_lines"]))
 print(d["plan"]["last_lines"][-1])
 print(d["agents"]["note"])
 ' 2>&1)"
-expect_eq "$(printf 'agents blocked decisions gate now plan repository\nmain Seed the plan 1\ngate=0,lint=2\n5 3 ## Open decisions\nTrue 3\n4. 2026-10-16 09:30 scope D\nno agent store')" "$facts" "--json facts match the text blocks"
+expect_eq "$(printf 'agents blocked decisions gate now plan repository\nmain Seed the plan 1\ngate=0,lint=2\n2 ## 9. Open questions for the operator\nTrue 3\n4. 2026-10-16 09:30 scope D\nno agent store')" "$facts" "--json facts match the text blocks"
 
 # 4. Missing files and a ctlhq-orch store without bun.
 rm -f "$repo/BLOCKED.md"
@@ -164,25 +165,24 @@ before2="$(printf '%s' "$before" | sed '$d')"
 after2="$(printf '%s' "$after" | sed '$d')"
 expect_eq "$before2" "$after2" "ctlhq-status writes no file"
 
-# 5b. README.md without the section, then no README.md at all.
+# 5b. Block 3 reads only PLAN.md section 9.
 r3="$tmp/r3"
 mkdir -p "$r3"
 git -C "$r3" init -q
-printf '# Plain\n\n## Open questions\n\n- Not a decisions heading. Owner: operator\n' > "$r3/README.md"
+b3() { printf '%s\n' "$1" | sed -n '/^3\. /,/^4\. /p' | sed '1d;$d' | sed 's/^ *//'; }
+printf '# Plain\n\n## Open decisions\n\n- Approve the host. Owner: operator\n' > "$r3/README.md"
 cp "$repo/NEXT.md" "$r3/NEXT.md"
-out="$("$fs" --repo "$r3")"; expect_rc 0 $? "a README without the section exits 0"
-expect_eq "no open decisions section (no heading names \"open decisions\" or \"open items\")" "$(printf '%s\n' "$out" | sed -n '/^3\. /{n;p;}' | sed 's/^ *//')" "README without the section"
+out="$("$fs" --repo "$r3")"; expect_rc 0 $? "no PLAN.md exits 0"
+expect_eq "PLAN.md absent" "$(b3 "$out")" "a README open decisions section and no PLAN.md: no question rows"
+expect_eq "False 0" "$("$fs" --repo "$r3" --json | python3 -c 'import json,sys; d=json.load(sys.stdin)["decisions"]; print(d["plan"], len(d["rows"]))')" "--json: no PLAN.md, 0 question rows"
 expect_nogrep 'NEXT-only' "$out" "positive control: no fallback to NEXT.md"
-printf '# Plain\n\n### OPEN ITEMS\n\n1. Choose a host. Owner: the operator.\n2. Fix the build. Owner: agent.\n' > "$r3/README.md"
-out="$("$fs" --repo "$r3")"
-expect_grep '^   ### OPEN ITEMS: 2 rows$' "$out" "an 'open items' heading at level 3, any case"
-expect_grep '^   needs you \(1\): row 1$' "$out" "numbered list owner text"
-json="$("$fs" --repo "$r3" --json)"
-expect_eq "Choose a host. Owner: the operator.|the operator|True" "$(printf '%s' "$json" | python3 -c 'import json,sys; r=json.load(sys.stdin)["decisions"]["rows"][0]; print(r["item"], r["owner"], r["needs_you"], sep="|")')" "--json decision row fields"
-rm -f "$r3/README.md"
-out="$("$fs" --repo "$r3")"
-expect_eq "README.md absent" "$(printf '%s\n' "$out" | sed -n '/^3\. /{n;p;}' | sed 's/^ *//')" "README.md absent"
-expect_eq "False None" "$("$fs" --repo "$r3" --json | python3 -c 'import json,sys; d=json.load(sys.stdin)["decisions"]; print(d["readme"], d["heading"])')" "--json README absent"
+printf '# Plan\n\n## 9. Open questions for the operator\n\nNone.\n' > "$r3/PLAN.md"
+expect_eq "## 9. Open questions for the operator: 0 open" "$(b3 "$("$fs" --repo "$r3")")" "a section 9 that says None has 0 open questions"
+printf '# Plan\n\n## 8. Decisions\n\n1. One.\n' > "$r3/PLAN.md"
+expect_eq "no open-questions section 9 in PLAN.md" "$(b3 "$("$fs" --repo "$r3")")" "PLAN.md without section 9"
+printf '# Plan\n\n## 9. Subagents\n\n1. One.\n' > "$r3/PLAN.md"
+expect_eq "no open-questions section 9 in PLAN.md" "$(b3 "$("$fs" --repo "$r3")")" "a section 9 on another topic is not read as open questions"
+rm -f "$r3/PLAN.md" "$r3/README.md"
 
 # 6. Block 7 (Now) with no transcript, no milestone table, no stop line.
 out="$("$fs" --repo "$repo")"

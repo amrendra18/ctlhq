@@ -28,7 +28,7 @@ Same steps in Codex and Claude Code. Templates live in `references/`. Tools name
 1. When `PLAN.md` does not exist yet, copy `references/PLAN-template.md` to `PLAN.md`. Fill every section. Milestone 0 is the harness plus one real user journey driven on the real surface. Each "Done when" cell names the verification command and its exit codes. `ctlhq-plan-lint PLAN.md` exits 0.
 2. Copy `references/PROMPT-template.md` when another agent, or a later session, will run the build.
 3. Check that `AGENTS.md` holds invariants with named tests (a numbered "Invariants" section, each rule ending with "Test:" and the test that enforces it); add the missing ones.
-4. Ask one question that names the plan by path: "Is `PLAN.md` the goal state? A yes also approves committing it. yes or no." Never retype the scope in the question; a retyped scope drops steps. On the yes, the main agent commits `PLAN.md` alone with `ctlhq-commit` and records the ledger row in section 10, citing that commit hash. Later approval questions cite `PLAN.md` at its last commit.
+4. Ask one question that names the plan by path: "Is `PLAN.md` (sha256 `<first 12 characters>`) the goal state? yes or no." Never retype the scope in the question; a retyped scope drops steps. `PLAN.md` is never tracked in the project; `.gitignore` lists it. On the yes, the main agent records the ledger row in section 10, citing the plan's sha256 (`shasum -a 256 PLAN.md`). Later approval questions cite `PLAN.md` by its current sha256.
 
 ## 4. Bootstrap once (operator)
 
@@ -41,7 +41,7 @@ Hand the operator one pasted block with only the one-time setup that needs the o
 3. The main agent merges the builders' diffs into one integration worktree, resolves conflicts, and runs the full gate on the merged tree. Nothing changes the integration worktree while its checks run. Any later change needs a new check of the updated tree.
 4. Review yourself: the script from outside the repository, the code read, one number recomputed, the five questions answered. In a project with a harness (`scripts/verify`), also run it. A milestone is done only with a harness run whose evidence folder (`.local/verify/<UTC time>/`) and exit code the reply names.
 5. Spawn a fresh reviewer (`commit-review` skill) on the merged diff. Save its report under `.local/reviews/`.
-6. Fix list and re-review. Each review pass inside a round runs the fast gate; the full gate runs once, on the final tree, before the commit sequence. Record the hash in `PLAN.md` section 7. When the milestone opens or closes an open item, update the README's "Open decisions" section in the same commit.
+6. Fix list and re-review. Each review pass inside a round runs the fast gate; the full gate runs once, on the final tree, before the commit sequence. Record the hash in `PLAN.md` section 7. When the milestone opens or closes an open item, update `PLAN.md` section 9 ("Open questions for the operator") in the same work block.
 7. After the round, run `ctlhq-worktree-audit --no-fetch -b <integration branch>` and remove each builder worktree in bucket `safe` with an empty DIRTY column (`git worktree remove <path>`).
 8. Continue to the next milestone without waiting. Stop only for a refusal you cannot work around; write `BLOCKED.md` and keep working on the rest.
 
@@ -49,12 +49,12 @@ Hand the operator one pasted block with only the one-time setup that needs the o
 
 1. Give the operator `scripts/hand-journey` (`references/hand-journey-template.sh`): each step prints "want" next to "got".
 2. Report: status line, numbers against bars, the hand journey, the last harness run's evidence folder where the project has `scripts/verify`, what is not done. The report is not acceptance.
-3. Record the operator's own words and the date in `PLAN.md` section 10 as a ledger row, with the plan's path, its hash, and the exact scope accepted. Cite that row in `PLAN.md` section 3. An acceptance covers only its row's scope; anything else stays open.
+3. Record the operator's own words and the date in `PLAN.md` section 10 as a ledger row, with the plan's path, its sha256, and the exact scope accepted. Cite that row in `PLAN.md` section 3. An acceptance covers only its row's scope; anything else stays open.
 4. After each accepted milestone, before the next feature starts, run the `project-audit` skill on the accepted commit, under the plan's "Audit rule" (its "Fix kind" line: a fix that adds behaviour opens a milestone).
 
 ## 7. Hand off or end
 
-1. Before the last reply of any work block, check that the README's "Open decisions" section lists every open item with its owner, `PLAN.md` section 7 holds the state and the session id, and `BLOCKED.md` holds every blocker. The next command goes only in the reply's "Next step" line.
+1. Before the last reply of any work block, check that `PLAN.md` section 9 lists every open item with its owner, `PLAN.md` section 7 holds the state and the session id, and `BLOCKED.md` holds every blocker. The next command goes only in the reply's "Next step" line.
 2. For another agent: `PLAN.md`, `PROMPT.md`, `AGENTS.md`, the launch sentence, and where it stops (`REPORT.md`).
 3. When a reply names a file you wrote, give its absolute path and a gist of at most three lines: what it holds and what the operator does with it. An HTML deliverable gets a clickable `file:///` link to its absolute path.
 4. Last line: "Next step: <who> <action>".

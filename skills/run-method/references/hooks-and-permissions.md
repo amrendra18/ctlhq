@@ -14,7 +14,7 @@ Claude Code facts were checked against its docs (hooks, permissions, settings, s
 ]
 ```
 
-Why: after a context reset an agent re-answers old questions and can reuse a stale approval. Printing `BLOCKED.md` on resume and compact puts the blockers back first; the agent then reads the README's "Open decisions" section and `PLAN.md` status, as the rule in ctlhq's `home/AGENTS.md` asks (the shared rules file; `ctlhq-install --agents-md` installs it as `~/.codex/AGENTS.md`). (From the Claude Code docs: matchers are `startup`, `resume`, `clear`, `compact`, `fork`; an entry with no matcher runs on all five.)
+Why: after a context reset an agent re-answers old questions and can reuse a stale approval. Printing `BLOCKED.md` on resume and compact puts the blockers back first; the agent then reads `PLAN.md` status and section 9 (the open questions for the operator), as the rule in ctlhq's `home/AGENTS.md` asks (the shared rules file; `ctlhq-install --agents-md` installs it as `~/.codex/AGENTS.md`). (From the Claude Code docs: matchers are `startup`, `resume`, `clear`, `compact`, `fork`; an entry with no matcher runs on all five.)
 
 ### 1.2 Stop hook: reply shape (advisory, exit 2 once)
 
@@ -80,6 +80,7 @@ When `first-commit` is on PATH, the operator runs the first block. Before handin
   first-commit setup --dry-run --revision "$REV" --transport ssh --trust-self
   first-commit setup --revision "$REV" --transport ssh --trust-self
   first-commit doctor
+  grep -qsxF '/PLAN.md' .gitignore || printf '/PLAN.md\n' >> .gitignore
   mkdir -p .local/briefs .local/reviews .claude
   cat > .claude/settings.local.json <<'JSON'
 {"permissions":{"allow":["Bash(git add:*)","Bash(git commit -F .local/commit-:*)"]}}
@@ -87,7 +88,7 @@ JSON
 )
 ```
 
-Otherwise the operator runs the `git init` block below, and the reply gives the notice in the skill's section 4. Like first-commit setup, the block adds lines to `.gitignore` that keep `.local/` and `.claude/settings.local.json` out of commits.
+Otherwise the operator runs the `git init` block below, and the reply gives the notice in the skill's section 4. Like first-commit setup, the block adds lines to `.gitignore` that keep `.local/` and `.claude/settings.local.json` out of commits. Each block adds `/PLAN.md` only when `.gitignore` lacks it, so the plan stays untracked and a second run adds no copy.
 
 ```sh
 (
@@ -95,6 +96,7 @@ Otherwise the operator runs the `git init` block below, and the reply gives the 
   cd /path/to/repo
   git init -b main
   printf '.local/\n.claude/settings.local.json\n' >> .gitignore
+  grep -qsxF '/PLAN.md' .gitignore || printf '/PLAN.md\n' >> .gitignore
   mkdir -p .local/briefs .local/reviews .claude
   cat > .claude/settings.local.json <<'JSON'
 {"permissions":{"allow":["Bash(git add:*)","Bash(git commit -F .local/commit-:*)"]}}

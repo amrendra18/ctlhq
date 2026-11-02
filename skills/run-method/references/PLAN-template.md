@@ -1,6 +1,6 @@
 # PLAN.md template
 
-Copy this file to a project as `PLAN.md`. Fill every section and replace or delete each part in angle brackets. `ctlhq-plan-lint PLAN.md` (this repository's `bin/`) prints a fix line for each part that is missing or unfilled. The plan is the record. Chat and approval requests cite it by path and commit hash.
+Copy this file to a project as `PLAN.md`. Fill every section and replace or delete each part in angle brackets. `ctlhq-plan-lint PLAN.md` (this repository's `bin/`) prints a fix line for each part that is missing or unfilled. The plan is the record. It stays untracked; chat and approval requests cite it by path and sha256.
 
 ---
 
@@ -138,7 +138,7 @@ Last session: <session id>.
 
 ## 10. Approvals ledger
 
-| # | Date and time | What was approved, exactly | Plan file and commit | By whom, in their words | Covers until |
+| # | Date and time | What was approved, exactly | Plan file and sha256 | By whom, in their words | Covers until |
 | --- | --- | --- | --- | --- | --- |
 
-<The first row approves this plan and committing it; it cites the commit the main agent made on that yes, for example `PLAN.md` at `a1b2c3d`. Later rows cite the plan's last commit. An earlier message is never new approval after a context reset. Check this table.>
+<The first row approves this plan; it cites the plan's sha256 at that yes, for example `PLAN.md` sha256 `3f2a9c1e7b04`. Later rows cite the plan's sha256 at the time of the yes. An earlier message is never new approval after a context reset. Check this table.>

@@ -53,7 +53,7 @@ Follow the commit sequence in `subagent-templates.md` section 5. Never raise a t
 
 ### 3.5 Record
 
-Update `PLAN.md` section 7 (the milestone State, and the record row with hash, date, tests, evidence), the measured bars, and the README's "Open decisions" section (open items with owners) in the same commit. The next command goes in the reply's "Next step" line. Then start the next milestone without waiting.
+Right after the commit, update `PLAN.md` section 7 (the milestone State, and the record row with hash, date, tests, evidence), the measured bars, and section 9 (open items with owners). The next command goes in the reply's "Next step" line. Then start the next milestone without waiting.
 
 ## 4. Replies to the operator
 

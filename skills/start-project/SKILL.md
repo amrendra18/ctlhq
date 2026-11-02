@@ -47,14 +47,14 @@ Skip this step when the operator named the folder.
 ## 6. Approve and hand over
 
 1. The reply gives the `PLAN.md` path, one "not touched" line, the open questions from section 9 as numbered yes-or-no questions, and then `run-method` section 3 step 4's approval question.
-2. On the yes, record the section 10 row with "commit pending repository setup", and give the operator `run-method` section 4's block.
-3. When the operator reports the setup done, commit `PLAN.md` alone with `ctlhq-commit`, fill the hash into the ledger row, and continue with `run-method` section 5, milestone 0.
+2. On the yes, record the section 10 row with the plan's sha256, and give the operator `run-method` section 4's block.
+3. When the operator reports the setup done, check that `git check-ignore -q PLAN.md` exits 0, so the plan stays untracked, and continue with `run-method` section 5, milestone 0.
 
 ## Bookkeeping files
 
 The project's bookkeeping files are fixed, and no others are created:
 
-1. `README.md` (with "Open decisions"), `AGENTS.md`, `PLAN.md` (plan, milestones, decisions in section 8, approvals ledger in section 10), `BLOCKED.md`.
+1. `README.md`, `AGENTS.md`, `PLAN.md` (plan, milestones, decisions in section 8, open questions for the operator in section 9, approvals ledger in section 10), `BLOCKED.md`.
 2. `mock/index.html` for a product with a screen, kept as the design reference. The harness never drives it.
 3. `scripts/verify`, `verify/features/`, `scripts/hand-journey`, and first-commit's config files, when first-commit set up the project.
 4. `PROMPT.md`, `REPORT.md`, and `GOAL.md` only for a hand-off or an unattended run.

@@ -52,8 +52,8 @@ re-ask or a correction.
   In a project with a validation harness (`scripts/verify`), "done" also needs a
   harness run: name its evidence folder and say which features it proved.
   `ctlhq-status` (in ctlhq's `bin/` folder, added to PATH by install step 4 in
-  ctlhq's README) prints the repository state, gate results, the README's open
-  decisions, and BLOCKED.md in one view; use it for status.
+  ctlhq's README) prints the repository state, gate results, the open questions
+  in `PLAN.md` section 9, and BLOCKED.md in one view; use it for status.
 - End with the next action and who takes it, covering every open item. "I fix
   2 of 7" must say what happens to the other 5. If nothing is needed from the
   user, say "Next step: none from you."
@@ -165,8 +165,7 @@ stall, a re-ask, or an unsafe step.
   form. Before calling it done, `ctlhq-rename-check OLD_NAME...` must exit 0.
   Code kept for the old form needs an allow file the operator approved. Every
   other kept hit goes in the same allow file with its reason.
-- After a context reset or a resume, read the README's "Open decisions" and
-  `PLAN.md` status first.
+- After a context reset or a resume, read `PLAN.md` status and section 9 first.
   An earlier operator message is never new approval; check the approvals in
   `PLAN.md` section 10.
   Answer only the newest unanswered operator message.
@@ -187,8 +186,10 @@ stall, a re-ask, or an unsafe step.
 - When the operator must run something, paste the exact block. Never point to a
   file section.
 - Before stating the state of a process, agent or window, check it.
-- Keep open items with owners in the README's "Open decisions" section. Update
-  it in the same commit as the change that opens or closes an item.
+- Keep open items with owners in `PLAN.md` section 9 ("Open questions for the
+  operator"), never in a tracked file. `PLAN.md` stays untracked (listed in
+  `.gitignore`). Update it in the same work block as the change that opens or
+  closes an item.
 - End every work block with "Next step: <who> <action>".
 
 ### Decisions and approval
@@ -199,7 +200,7 @@ stall, a re-ask, or an unsafe step.
 - Routine choices: state the default and proceed unless vetoed. Ask only when
   the answer changes cost, scope, names, or risk.
 - Record each approval in `PLAN.md` section 10 with its exact scope and time.
-- An approval request points to `PLAN.md` by path and commit hash. The yes covers
+- An approval request points to `PLAN.md` by path and sha256. The yes covers
   every step in that file. Never retype the scope in the question.
 
 ## Make instructions easy to follow

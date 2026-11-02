@@ -18,8 +18,8 @@ gaps before editing for brevity.
 - Security, privacy, recovery, compatibility, performance, accessibility, and
   operations are addressed where they affect the product.
 - Success criteria state evidence, boundaries, and thresholds where relevant.
-- Open decisions are material, have stated impact, and are not disguised
-  assumptions.
+- Open decisions live in `PLAN.md` section 9, are material, have stated impact,
+  and are not disguised assumptions.
 
 ## Traceability
 
