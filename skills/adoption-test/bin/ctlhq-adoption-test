@@ -6,6 +6,7 @@ Usage:
   ctlhq-adoption-test log <friction.tsv> <file> <line> <severity> <what happened...>
   ctlhq-adoption-test tier [--list] <friction.tsv>
   ctlhq-adoption-test checkout <repo> <dest>
+  ctlhq-adoption-test clean-home <home> <dir> <command> [arg...]
 
 commands  prints the documented commands in README order, one per line, as
           n<TAB>README line<TAB>command. Every non-blank, non-comment line of a fenced
@@ -34,12 +35,26 @@ checkout  makes a fresh copy of <repo> in <dest> and prints the absolute path of
           uncommitted files stay behind); any other folder is copied. <dest> must not
           exist or must be an empty folder; anything else is refused with exit 2. Exit 1
           when the clone or copy fails.
+clean-home
+          runs <command> in <dir> the way a newcomer's machine would: HOME is <home>, a
+          new folder (created when missing, so pass the same <home> to every command of
+          one journey), PATH keeps only the entries outside the real HOME, and the only
+          other variables are TERM, LANG, SHELL, and TMPDIR, each when set and not naming
+          a path under the real HOME. The author's own tools, settings, folders, and
+          session values such as USER and SSH_AUTH_SOCK are absent. It prints one line
+          on stderr first:
+            clean-home: HOME=<home>; dropped N PATH entries and M variables; kept NAMES
+          naming the variables only, never their values. <home> must not be the real HOME
+          or a folder under it. Exit: the command's own exit code; 126 when the command is
+          not executable; 127 when the command is not on the clean PATH; 128 plus the
+          signal number when a signal killed it; 2 on a usage error, before anything runs.
 
 Encodes home/AGENTS.md: "Say exactly what is complete before calling work done."
 """
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import shutil
 import subprocess
@@ -263,6 +278,58 @@ def cmd_checkout(args: list) -> int:
     return 0
 
 
+def under(value: str, homes: tuple) -> bool:
+    return any(value == h or value.startswith(h + "/") for h in homes)
+
+
+def cmd_clean_home(args: list) -> int:
+    if len(args) < 3:
+        return usage("clean-home takes <home> <dir> <command> [arg...]")
+    real = os.environ.get("HOME", "").rstrip("/")
+    if not real:
+        return usage("HOME is not set, so there is no real HOME to leave out")
+    homes = (real, os.path.realpath(real))
+    home = Path(os.path.abspath(args[0]))
+    work = Path(args[1])
+    if under(str(home), homes) or under(os.path.realpath(home), homes):
+        return usage(f"refusing a home that is the real HOME or under it: {home}")
+    if home.exists() and not home.is_dir():
+        return usage(f"not a folder: {home}")
+    if not work.is_dir():
+        return usage(f"no such folder: {work}")
+    home.mkdir(parents=True, exist_ok=True)
+    kept, gone = [], 0
+    for part in os.environ.get("PATH", "").split(":"):
+        if not part or part.startswith("~") or under(part, homes) or under(os.path.realpath(part), homes):
+            gone += 1
+        else:
+            kept.append(part)
+    env, dropped = {}, 0
+    for key, value in os.environ.items():
+        if key in ("HOME", "PATH"):
+            continue
+        if key in ("TERM", "LANG", "SHELL", "TMPDIR") and not any(p.startswith("~") or under(p, homes) for p in value.split(":") if p):
+            env[key] = value
+        else:
+            dropped += 1
+    env.update(HOME=os.path.realpath(home), PATH=":".join(kept))
+    print(f"clean-home: HOME={env['HOME']}; dropped {gone} PATH entries and {dropped} variables; kept {', '.join(sorted(env))}", file=sys.stderr)
+    cmd = args[2]
+    exe = cmd if "/" in cmd else shutil.which(cmd, path=env["PATH"])
+    if exe is None:
+        print(f"ctlhq-adoption-test: command not found in the clean PATH: {cmd}", file=sys.stderr)
+        return 127
+    try:
+        rc = subprocess.run([exe, *args[3:]], cwd=work, env=env).returncode
+    except FileNotFoundError:
+        print(f"ctlhq-adoption-test: command not found: {cmd}", file=sys.stderr)
+        return 127
+    except PermissionError:
+        print(f"ctlhq-adoption-test: command not executable: {cmd}", file=sys.stderr)
+        return 126
+    return 128 - rc if rc < 0 else rc
+
+
 def main(argv: list) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         if not argv:
@@ -278,6 +345,8 @@ def main(argv: list) -> int:
         return cmd_tier(rest)
     if cmd == "checkout":
         return cmd_checkout(rest)
+    if cmd == "clean-home":
+        return cmd_clean_home(rest)
     return usage(f"unknown command {cmd!r}")
 
 
