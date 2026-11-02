@@ -159,6 +159,11 @@ stall, a re-ask, or an unsafe step.
   `--co-author` or `CTLHQ_CO_AUTHOR`. The trailer names the model and uses
   its maker's address, `noreply@anthropic.com` for Claude or
   `noreply@openai.com` for Codex.
+- Carry a rename, removal, or policy change to every place it applies. That
+  means file names, contents, configs, comments, and code kept for the old
+  form. Before calling it done, `ctlhq-rename-check OLD_NAME...` must exit 0.
+  Code kept for the old form needs an allow file the operator approved. Every
+  other kept hit goes in the same allow file with its reason.
 - After a context reset or a resume, read the README's "Open decisions" and
   `PLAN.md` status first.
   An earlier operator message is never new approval; check the approvals in
