@@ -348,6 +348,26 @@ expect_grep '"decision": "block".*repeat-reply' "$out" "--hook-json reads the pr
 out="$(hook_in "$tmp/again.md" "" t6 "$cxp" | "$rl" --hook-json)"; expect_eq '{"continue": true}' "$out" "--hook-json second stop on the Codex transcript goes through"
 expect_grep 'Turn warnings' "$("$rl" --help)" "--help documents the turn warnings"
 
+cat >"$tmp/mistake-proof.md" <<'MD'
+You corrected the commit message rule twice, so the lesson belongs in a check.
+
+Status: proposed, nothing changed yet.
+
+1. The first correction was a long dash in the commit message.
+2. The second correction was the same long dash one commit later.
+
+The `/mistake-proof` skill turns a repeated correction into a lint, a type, or a test. Only you can start it.
+
+```
+/mistake-proof
+```
+
+Next step: you paste the command above, or you tell me to skip it.
+MD
+out="$("$rl" "$tmp/mistake-proof.md" 2>&1)"; rc=$?
+expect_rc 0 "$rc" "the /mistake-proof offer with its code block exits 0"
+expect_eq "0 failures, 0 warnings" "$out" "the /mistake-proof offer has no findings"
+
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then
 	echo "$fail checks failed"

@@ -1,13 +1,13 @@
 ---
 name: goal-brief
-description: Write a GOAL.md for a goal or unattended run. It holds the goal, a completion rule, a checklist and a pre-flight audit of external systems, context sources and exit checks, each mapped to a CLI command or skill or marked missing. Use when the operator asks for a goal brief, a GOAL.md, or a pre-flight audit before a goal, loop or overnight run.
+description: Write a GOAL.md for a goal or unattended run. It holds the goal, a completion rule, a checklist and a pre-flight audit of external systems, context sources, exit checks and the run's trigger, each mapped to a CLI command or skill, marked not needed, or marked missing. Use when the operator asks for a goal brief, a GOAL.md, or a pre-flight audit before a goal, loop or overnight run.
 ---
 
 # Goal brief
 
 Same steps in Codex and Claude Code. The template is `references/GOAL-template.md`, next to this file. Every GOAL.md this skill writes has the template's headings in the template's order, in both harnesses.
 
-The pre-flight audit answers one question before the run starts: what does the agent need so that it never has to stop and ask to be unblocked? It lists every external system, every context source and every exit check, and maps each one to a command or skill. Anything not wired is marked missing.
+The pre-flight audit answers one question before the run starts: what does the agent need so that it never has to stop and ask to be unblocked? It lists every external system, every context source, every exit check and the trigger that starts the run, and maps each one to a command or skill, or marks it not needed. Anything not wired is marked missing.
 
 ## 1. Inputs
 
@@ -41,12 +41,14 @@ The pre-flight audit answers one question before the run starts: what does the a
 1. External systems: everything outside the repository the run touches, such as package registries, remote Git hosts, browsers, devices, deploy targets, other local services and the operator. If there is none, write one row with System `None found` and Mapped to `not needed`.
 2. Context sources: every document, folder or note store the agent must know, each reachable by one command or skill. Include the operator's notes outside the repository when they matter.
 3. Exit checks: every check that proves a checklist item, with the items it proves. Every `REQ` and `TEST` item appears in at least one exit check row.
-4. The "Mapped to" cell holds exactly one of these:
+4. Trigger: one row for how the run starts (the operator, a schedule, or an event). For an event, name the filter an event must match before the run spends anything.
+5. The "Mapped to" cell holds exactly one of these:
    1. a CLI command in backticks, such as `npm test`. It counts only when `command -v` finds the tool and the repository defines or documents the command.
    2. `skill: <name>`. It counts only when that skill folder exists in this harness's skills folder (`~/.claude/skills` or `~/.codex/skills`).
-   3. `missing: <what would wire it>`.
-5. Number rows E1, E2 for external systems, C1, C2 for context sources and X1, X2 for exit checks.
-6. The first line under "Pre-flight audit" is "Ready for an unattended run: yes." only when no row says missing. Otherwise write "Ready for an unattended run: no. Missing: " and the row numbers.
+   3. `not needed`, for a system or trigger that needs no wiring, such as a run the operator starts.
+   4. `missing: <what would wire it>`.
+6. Number rows E1, E2 for external systems, C1, C2 for context sources, X1, X2 for exit checks and T1 for the trigger.
+7. The first line under "Pre-flight audit" is "Ready for an unattended run: yes." only when no row says missing. Otherwise write "Ready for an unattended run: no. Missing: " and the row numbers.
 
 ## 6. Fill and write the file
 
