@@ -258,7 +258,7 @@ To change ctlhq itself, read [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Credits
 
-ctlhq's coding principles and some of its skills are adapted from [pstack](https://github.com/cursor/plugins/tree/main/pstack) 0.15.25 by Lauren Tan ([poteto](https://github.com/poteto)), MIT license. Thanks to pstack for the idea behind them: "if you want to go fast, go deep first." pstack's copyright notice is kept in [LICENSE](./LICENSE).
+ctlhq's coding principles and some of its skills are adapted from [pstack](https://github.com/cursor/plugins/tree/main/pstack) 0.15.36 by Lauren Tan ([poteto](https://github.com/poteto)), MIT license. Thanks to pstack for the idea behind them: "if you want to go fast, go deep first." pstack's copyright notice is kept in [LICENSE](./LICENSE).
 
 ## License
 
