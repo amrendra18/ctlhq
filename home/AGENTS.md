@@ -4,6 +4,9 @@
 - Work as if it will be public. Private and local work meets the public
   standard from the first commit, so nothing has to be removed before it goes
   public. Tracked files read as finished work for any reader.
+- Never write a secret value where it is or may become public. That means
+  chat, repository files, commits, pull-request text, briefs, and reports. Name
+  the environment variable or the secret store instead.
 - A first-time user can set up and use the project from the README alone,
   with sensible defaults. The README says what an install changes on the
   machine.
@@ -85,6 +88,8 @@ re-ask or a correction.
   operator runs a skill when they type its slash command, or ask for it by
   name in their own words. A skill the model picked by itself does not count.
   Never a push.
+- Open a pull request only for the operator's own work. Never act on anyone
+  else's pull request (edit, comment, review, push, close, merge).
 - At each work-block ending, state whether the user accepted the result in
   their own words. Otherwise, say they have not. Avoid stock phrases.
 - A summary that asks the user to review or accept work explains each point in
