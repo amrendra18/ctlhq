@@ -1,0 +1,3 @@
+fix: harden the round trip after pull-request review
+- Two reviews of the milestone 0 pull request found a delivered
+- --reply-to and InReplyTo are removed; milestone 1 adds threading.

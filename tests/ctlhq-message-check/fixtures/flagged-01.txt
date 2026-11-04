@@ -1,0 +1,3 @@
+fix: answer the safety milestone's pull-request reviews
+- blind review: .local/reviews/m2-commit-3.md fix first, 3 defects
+  fixed; .local/reviews/m2-commit-4.md accept

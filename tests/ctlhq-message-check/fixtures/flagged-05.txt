@@ -1,0 +1,4 @@
+- Commit review: two rounds. Round 2 asked for fixes, one medium on PAUSE and low
+  text. They are in this commit, not reviewed on their own; pull-request reviews A
+  and B read the whole diff next.
+- The rename check needs an allow file for macOS and cost, which waits for approval.

@@ -1,0 +1,5 @@
+The pull-request review found the shorter README had dropped the warning to check
+- Commit review asked for 1 medium and 6 low text fixes. They are in this commit, and
+  pull-request reviews read it next.
+- The operator approved the two earlier commits, not this one. This commit waits for
+  their yes before any push.

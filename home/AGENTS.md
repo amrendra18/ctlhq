@@ -3,7 +3,8 @@
 - Security and privacy come first in every choice.
 - Work as if it will be public. Private and local work meets the public
   standard from the first commit, so nothing has to be removed before it goes
-  public. Tracked files read as finished work for any reader.
+  public. Tracked files, commit messages and pull-request text read as finished
+  work for any reader.
 - Never write a secret value where it is or may become public. That means
   chat, repository files, commits, pull-request text, briefs, and reports. Name
   the environment variable or the secret store instead.

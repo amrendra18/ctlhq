@@ -10,4 +10,4 @@ Every review answers each question, citing file and line. A question that does n
 6. **Nothing duplicated.** Where does the change solve a problem the repository already solves, or solve one problem two ways?
 7. **No added comments.** Which added comment could a name, type, assertion, or test replace?
 8. **Deterministic logic in tools.** Which rule in skill or doc text could a script check or do instead?
-9. **Neutral text.** Which tracked text would mean nothing to an outside reader, or reveals internal notes, status, dates of internal runs, or private names?
+9. **Neutral text.** Which tracked text, commit message or pull-request text would mean nothing to an outside reader, or reveals internal notes, status, dates of internal runs, or private names? A finding in a commit message or in pull-request text is "fix first", because the text outlives the commit. It cannot become a known limit.

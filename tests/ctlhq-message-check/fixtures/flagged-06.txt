@@ -1,0 +1,3 @@
+The audit of the accepted milestone 4 and the newcomer test left low gaps: no
+- Commit review accepted with 4 low defects. Its text fixes are in this commit, and
+  the one kept test trade-off is recorded in the plan.

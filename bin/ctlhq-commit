@@ -27,8 +27,13 @@ Steps, in order:
   3. Builds the message: --subject on the first line, a blank line, then the four sections
      "Why:", "Changes:", "Test Plan:", "Risks:", each heading alone on its own line with
      the flag's text below it. All five flags are required, or --message-file FILE is
-     taken verbatim instead (it excludes the five flags). The message is written to
-     .local/commit/<UTC timestamp>.txt at the top of the work tree.
+     taken verbatim instead (it excludes the five flags). With the trailer of step 4 added,
+     the message goes to the sibling tool ctlhq-message-check, found next to this tool. A finding
+     refuses (exit 6, with what, why:, and fix: lines) before anything is staged or written. So
+     does a check that exits anything else but 0, exits 1 with no finding, or cannot start: the
+     line says the check did not run. No flag turns this off; `ctlhq-message-check --help` lists
+     the ways out. The message is then written to .local/commit/<UTC timestamp>.txt at the top of
+     the work tree.
   4. Co-author trailer. A message that already has a Co-Authored-By line keeps it, and
      nothing is added. Otherwise one line is appended, taken from the first of:
        a. --co-author "Co-Authored-By: Name <email>"
@@ -112,7 +117,7 @@ green, it ran on a different tree, the index would commit content the gate did n
 or that differs from the files on disk, the index holds staged changes outside the named
 paths, a file is staged as deleted but still on disk and not ignored, or the --review
 file is missing, not a regular file, unreadable, or empty; 5 no valid co-author line (4
-is retired). An interrupt ends the run as Python does: 130 for Ctrl-C, 143 for SIGTERM.
+is retired); 6 the message check found internal notes in the message, or did not run. An interrupt ends the run as Python does: 130 for Ctrl-C, 143 for SIGTERM.
 
 .local/ must be ignored by git, or the message file itself dirties the tree.
 
@@ -140,6 +145,7 @@ KEEP_SHARED = ["-c", "splitIndex.sharedIndexExpire=never"]
 MARKS_FIX = ("stage the files as they are on disk (a file marked assume-unchanged or skip-worktree keeps its old staged "
              "copy; `git update-index --no-assume-unchanged --no-skip-worktree <path>` clears both marks), ")
 RUN_GATE = Path(__file__).resolve().parent / "ctlhq-run-gate"
+MESSAGE_CHECK = Path(__file__).resolve().parent / "ctlhq-message-check"
 USAGE = (
     "usage: ctlhq-commit [--gate NAME] [--subject TEXT] [--why TEXT] [--changes TEXT]\n"
     "                     [--test-plan TEXT] [--risks TEXT] [--message-file FILE] [--tz local]\n"
@@ -348,6 +354,27 @@ class Index:
             print(f"ctlhq-commit: the index still holds the named paths staged; restoring it failed: {e}", file=sys.stderr)
 
 
+def message_refused(message: str, root: Path) -> bool:
+    try:
+        r = subprocess.run([str(MESSAGE_CHECK), "--root", str(root)], input=message, capture_output=True,
+                           encoding="utf-8", errors="surrogateescape")
+        code, out, err = r.returncode, r.stdout, r.stderr.strip()
+    except OSError as e:
+        code, out, err = None, "", str(e)
+    if code == 0:
+        return False
+    if code == 1 and out.strip():
+        print("ctlhq-commit: the message holds internal notes; refusing to commit", file=sys.stderr)
+        print("why: a commit message outlives the commit, and a reader has only the repository.", file=sys.stderr)
+        sys.stderr.write(out)
+        return True
+    print(f"ctlhq-commit: the message check did not run (exit {code}): {err or 'it printed no reason'}; refusing to commit", file=sys.stderr)
+    print("why: a message nobody checked could carry internal notes into history.", file=sys.stderr)
+    print("fix: clear the cause above: repair a broken word list, or ctlhq-message-check next to this tool. "
+          "`ctlhq-message-check --help` lists the ways out.", file=sys.stderr)
+    return True
+
+
 def rerun_line(gate: str, meta_line: str) -> str:
     fields = meta_line.split("\t")
     command = fields[3] if len(fields) >= 4 else "<check command>"
@@ -538,6 +565,8 @@ def main(argv: list[str]) -> int:
         print(f"review: {review_shown}")
 
     # 3. message file
+    if message_refused(message, root):
+        return 6
     commit_dir = root / ".local" / "commit"
     commit_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")

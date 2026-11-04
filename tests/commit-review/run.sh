@@ -51,5 +51,15 @@ for f in "$root/skills/plan-review/SKILL.md" "$root/skills/pr-review/SKILL.md" "
 	if [ -n "$top" ] && [ "$top" -le "$count" ]; then ok; else bad "$f names question $top of $count"; fi
 done
 
+# 4. Reviewers read the text that outlives the commit.
+inputs="$(awk '/^## 1\. /{on=1; next} /^## /{on=0} on' "$skill")"
+expect_grep 'message file' "$inputs" "section 1 names the message file as an input"
+expect_grep 'before the review' "$inputs" "section 1 says the message file exists before the review"
+q9="$(grep -E '^9\. ' "$questions")"
+expect_grep 'commit message' "$q9" "question 9 names the commit message"
+expect_grep 'pull-request text' "$q9" "question 9 names pull-request text"
+expect_grep 'fix first' "$q9" "question 9 makes such a finding fix first"
+expect_grep 'known limit' "$q9" "question 9 says the finding cannot become a known limit"
+
 echo "$pass checks passed"
 [ "$fail" -eq 0 ] || { echo "$fail checks failed"; exit 1; }

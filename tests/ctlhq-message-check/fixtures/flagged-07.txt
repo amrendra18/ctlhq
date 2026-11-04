@@ -1,0 +1,4 @@
+A second newcomer test and the pull-request reviews found text that was false or
+- Commit review: rounds 6 and 7. Round 7 asked for 4 low text or record fixes and
+  found nothing higher. They are in this commit and were not reviewed on their own;
+  pull-request reviews A and B read the whole diff next.

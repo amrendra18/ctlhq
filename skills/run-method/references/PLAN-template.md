@@ -34,7 +34,7 @@ Does not own: <what belongs to other tools or is out of scope for good>.
 Complete when three sign-offs hold on the same commit:
 
 1. **The builder's evidence.** `./scripts/check full` exits 0, `scripts/verify full` exits 0, and every test named in a "Done when" cell exists and passes. The main agent reruns them.
-2. **The main agent's review.** Five questions answered in writing, in the commit message under `Test Plan:`: completeness (every "Done when" cell met), correctness (hand journey on real data), quality (code read, named files), scale (ten-times corpus inside the bars), reliability (kill, concurrency, no-network proofs).
+2. **The main agent's review.** Five questions answered in writing in the review file, passed with `ctlhq-commit --review`: completeness (every "Done when" cell met), correctness (hand journey on real data), quality (code read, named files), scale (ten-times corpus inside the bars), reliability (kill, concurrency, no-network proofs).
 3. **The operator's hand journey.** The operator runs `scripts/hand-journey` (steps below) and accepts in their own words. Nothing else counts as acceptance.
 
 Accepted by operator on <date>: "<their words>", ledger row <n>. <blank until it happens>

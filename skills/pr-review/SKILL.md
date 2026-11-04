@@ -5,7 +5,7 @@ description: Review a pull request with two fresh reviewers, one on the whole di
 
 # PR review
 
-Both reviewers are set up per the **commit-review** skill. Its section 1 says what a reviewer receives and never receives, and its section 2 picks the model. The diff is the whole pull request, `git diff <base>...<head>`.
+Both reviewers are set up per the **commit-review** skill. Its section 1 says what a reviewer receives and never receives, and its section 2 picks the model. The diff is the whole pull request, `git diff <base>...<head>`. Both reviewers also receive the pull-request title and body.
 
 ## 1. Steps
 

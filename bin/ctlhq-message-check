@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""ctlhq-message-check: find internal notes in a commit message, pull-request text, or branch name.
+
+Usage:
+  ctlhq-message-check [--root DIR] [FILE]
+  ctlhq-message-check --history [--new-only] [--root DIR]
+  ctlhq-message-check --new-only [--root DIR]
+  ctlhq-message-check --branch NAME [--root DIR]
+
+A commit message and pull-request text outlive the commit, and a reader has only the
+repository. Review rounds, approvals, milestone labels and .local/ paths mean nothing to that
+reader, so they belong in the review file, the receipt, or PLAN.md.
+
+Modes:
+  FILE, or standard input   prints "line N: rule: text" per finding, then one "fix:" line
+                            that says where each note belongs.
+  --history                 checks every commit message reachable from HEAD, the local branches
+                            and the tags, merge commits included. Prints one line per flagged
+                            commit, "HASH: line N: rule; line N: rule", then "flagged: N of M".
+  --new-only                the same, for commits no remote-tracking ref reaches.
+  --branch NAME             applies the branch rule and the word lists to one name, and prints
+                            "branch: NAME" and one "fix:" line when either matches.
+
+Rules search the whole message. White space with at most one line break matches a space in a
+rule, so a note that wraps is found and a blank line ends it. A finding reports the line where
+it starts.
+  path        a path under .local/ for reviews, briefs, verify, plans, msg, commit, or pr-
+  approval    the operator approved, accepted, prefers, reviewed or reviews; waits for approval
+  review      audit round, round 2, reviews A and B, commit review, commit-review: accept, blind
+              review, pull-request review, PR review
+  label       milestone 2, M2 (a capital M, so a lowercase m2 stays clean)
+  branch      a branch name that starts with m2- or milestone-2-, or ends with -m2 or -milestone-2
+  extra-word  a word from ~/.ctlhq/message-words.txt or .local/message-words.txt (in a linked
+              worktree, also the main worktree's). One word or phrase per line, matched in any
+              case. A word ends at anything but a letter, so zebrafinch finds zebrafinch_worker
+              and zebrafinch2, and zebrafinches or ZebrafinchApp each need their own list line.
+              Empty lines are skipped, and # at the start of a line or after a space starts a
+              comment. A list or a folder above it that exists and cannot be read, a dangling
+              link included, exits 2. The output prints each listed word as stars, so the agent
+              can see where it is and reword.
+
+--root DIR is the repository to read (default: the current folder).
+
+Exit 0 clean, 1 findings, 2 usage or any failure to run.
+
+When the check itself is wrong, no flag turns it off. Take these ways out, in this order:
+  1. A false flag on one message: reword it.
+  2. A bug in the check: fix the check in that checkout. That checkout's bin/ctlhq-commit runs
+     its own check, so it checks the commit that holds the fix. The usual gate and review apply.
+  3. When step 2 cannot work: stop, write BLOCKED.md, write the message to a file, and give the
+     operator this block. Deny rules bind agents only, so the operator's own commands still run.
+       cd REPO
+       git add PATHS
+       git commit -F MESSAGE_FILE
+       git push REMOTE BRANCH
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import unicodedata
+from pathlib import Path
+from typing import NamedTuple
+
+RULES = [
+    ("path", [r"\.local/(reviews|briefs|verify|plans|msg|commit|pr-)"]),
+    ("approval", [r"(?i)operator (approved|accepted|prefers|reviewed|reviews)",
+                  r"(?i)waits? for (their|the operator|approval)",
+                  r"(?i)operator.s (yes|approval)"]),
+    ("review", [r"(?i)audit round", r"(?i)\brounds? [0-9]", r"(?i)reviews? A and B", r"(?i)commit reviews?",
+                r"(?i)commit-review:? (accept|fix first|reject)", r"(?i)blind(-| )review", r"(?i)pull(-| )request reviews?", r"(?i)\bPR reviews?"]),
+    ("label", [r"(?i:milestone(-| )[0-9])", r"\bM[0-9]+\b"]),
+]
+GAP = r"(?=\s)[^\S\n]*\n?[^\S\n]*"
+COMPILED = [(name, [re.compile(p.replace(" ", GAP)) for p in patterns]) for name, patterns in RULES]
+BRANCH_LABEL = r"(m[0-9]+|milestone-?[0-9]+)"
+BRANCH_RE = re.compile(rf"(?i)^{BRANCH_LABEL}(-|$)|[-/]{BRANCH_LABEL}$")
+EXTRA = "extra-word"
+RANK = {name: rank for rank, name in enumerate([EXTRA] + [name for name, _ in RULES])}
+HOMES = {
+    "path": "a reader cannot open a .local/ path, so leave it out",
+    "approval": "approvals go in PLAN.md section 10",
+    "review": "review reports and answers go in .local/reviews/COMMIT.md, named with ctlhq-commit --review",
+    "label": "milestones, tests and evidence folders go in PLAN.md section 7",
+    EXTRA: "a listed word stays out of the message",
+}
+USER_LIST = Path(".ctlhq") / "message-words.txt"
+PROJECT_LIST = Path(".local") / "message-words.txt"
+
+
+class CannotRun(Exception):
+    pass
+
+
+class Starred(NamedTuple):
+    text: str
+    word_starts: list[int]
+
+
+class Finding(NamedTuple):
+    line: int
+    rule: str
+    starred_line: str
+
+
+def nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
+
+
+def git(root: Path, args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(root)] + args, capture_output=True)
+
+
+def main_worktree(root: Path) -> Path | None:
+    common = git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if common.returncode != 0:
+        return None
+    path = Path(common.stdout.decode().strip())
+    return path.parent if path.name == ".git" else None
+
+
+def project_folders(root: Path) -> list[Path]:
+    top = git(root, ["rev-parse", "--show-toplevel"])
+    if top.returncode != 0:
+        return []
+    folders = [Path(top.stdout.decode().strip())]
+    main = main_worktree(root)
+    if main is not None and main not in folders:
+        folders.append(main)
+    return folders
+
+
+def list_exists_or_raise(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        for parent in path.parents:
+            if os.path.lexists(parent) and not parent.is_dir():
+                raise CannotRun(f"the word list {path} cannot be read: {parent} is not a folder") from None
+        return False
+    except OSError as e:
+        raise CannotRun(f"the word list {path} cannot be read: {type(e).__name__}") from e
+    return True
+
+
+def read_words(root: Path) -> list[re.Pattern]:
+    words: list[re.Pattern] = []
+    for path in [Path.home() / USER_LIST] + [f / PROJECT_LIST for f in project_folders(root)]:
+        if not list_exists_or_raise(path):
+            continue
+        try:
+            text = path.read_bytes().decode("utf-8-sig")
+        except (OSError, UnicodeDecodeError) as e:
+            raise CannotRun(f"the word list {path} cannot be read as UTF-8 text: {type(e).__name__}") from e
+        for line in text.splitlines():
+            word = nfc(line.split(" #")[0].strip())
+            if word and not word.startswith("#"):
+                words.append(re.compile(r"(?<![^\W\d_])" + GAP.join(map(re.escape, word.split())) + r"(?![^\W\d_])", re.I))
+    return words
+
+
+def star_words(text: str, words: list[re.Pattern]) -> Starred:
+    chars = list(text)
+    starts = []
+    for word in words:
+        for match in word.finditer(text):
+            starts.append(match.start())
+            for i in range(*match.span()):
+                if chars[i] != "\n":
+                    chars[i] = "*"
+    return Starred("".join(chars), starts)
+
+
+def printable(text: str) -> str:
+    return "".join(c if c.isprintable() else "?" for c in text.strip())
+
+
+def findings(message: str, words: list[re.Pattern]) -> list[Finding]:
+    message = nfc(message)
+    starred = star_words(message, words)
+    line_of = lambda position: message.count("\n", 0, position) + 1
+    found = {(line_of(start), EXTRA) for start in starred.word_starts}
+    for rule, patterns in COMPILED:
+        for pattern in patterns:
+            found.update((line_of(m.start()), rule) for m in pattern.finditer(message))
+    lines = starred.text.split("\n")
+    return [Finding(number, rule, printable(lines[number - 1]))
+            for number, rule in sorted(found, key=lambda hit: (hit[0], RANK[hit[1]]))]
+
+
+def fix_line(rules: set[str]) -> str:
+    homes = "; ".join(home for rule, home in HOMES.items() if rule in rules)
+    return f"fix: reword it for a reader who has only the repository: {homes}. If the check itself is wrong, see ctlhq-message-check --help."
+
+
+def check_text(message: str, words: list[re.Pattern]) -> int:
+    found = findings(message, words)
+    for finding in found:
+        print(f"line {finding.line}: {finding.rule}: {finding.starred_line}")
+    if not found:
+        return 0
+    print(fix_line({finding.rule for finding in found}))
+    return 1
+
+
+def check_history(root: Path, new_only: bool, words: list[re.Pattern]) -> int:
+    revs = ["HEAD", "--branches", "--tags"] + (["--not", "--remotes"] if new_only else [])
+    r = git(root, ["-c", "log.showSignature=false", "log", "-z", "--format=%H%n%B"] + revs + ["--"])
+    if r.returncode != 0:
+        raise CannotRun(f"git log failed in {root} (exit {r.returncode}): {r.stderr.decode(errors='replace').strip()}")
+    commits = [c for c in r.stdout.decode("utf-8", "replace").split("\0") if c.strip()]
+    flagged = 0
+    for commit in commits:
+        sha, _, message = commit.lstrip("\n").partition("\n")
+        found = findings(message, words)
+        if found:
+            flagged += 1
+            print(f"{sha[:12]}: " + "; ".join(f"line {finding.line}: {finding.rule}" for finding in found))
+    print(f"flagged: {flagged} of {len(commits)}")
+    return 1 if flagged else 0
+
+
+def check_branch(name: str, words: list[re.Pattern]) -> int:
+    starred = star_words(nfc(name), words)
+    if not starred.word_starts and not BRANCH_RE.search(name):
+        return 0
+    print(f"branch: {printable(starred.text)}")
+    print("fix: rename the branch for what it changes. GitHub copies the name into the merge commit, milestones go in "
+          "PLAN.md section 7, and a listed word stays out of the name.")
+    return 1
+
+
+def run(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="ctlhq-message-check", add_help=False, allow_abbrev=False)
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument("--history", action="store_true")
+    parser.add_argument("--new-only", action="store_true")
+    parser.add_argument("--branch")
+    parser.add_argument("--root", default=".")
+    parser.add_argument("file", nargs="?")
+    args = parser.parse_args(argv)
+    if args.help:
+        print(__doc__.strip())
+        return 0
+    history = args.history or args.new_only
+    if args.branch is not None and (history or args.file):
+        parser.error("--branch takes no FILE, --history or --new-only")
+    if history and args.file:
+        parser.error("--history and --new-only take no FILE")
+    root = Path(args.root)
+    if not root.is_dir():
+        raise CannotRun(f"--root {args.root}: no such folder")
+    words = read_words(root)
+    if args.branch is not None:
+        return check_branch(args.branch, words)
+    if history:
+        return check_history(root, args.new_only, words)
+    raw = Path(args.file).read_bytes() if args.file else sys.stdin.buffer.read()
+    return check_text(raw.decode("utf-8", "replace"), words)
+
+
+def main(argv: list[str]) -> int:
+    sys.stdout.reconfigure(errors="backslashreplace")
+    try:
+        return run(argv)
+    except Exception as e:
+        print(f"ctlhq-message-check: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

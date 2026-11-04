@@ -159,6 +159,7 @@ Written by other tools, only when you run them:
 | 3 | `.git/hooks/pre-push` in one repository | a hook that runs `ctlhq-first-push` before each push; an existing hook is kept as `pre-push.before-first-push` and still runs first | `ctlhq-first-push hook install` |
 | 4 | `.local/catalog/` in your clone | the catalog of skills, agents, and tools | `ctlhq-catalog build` or `ctlhq-catalog open` |
 | 5 | `skills/ctlhq-mode/scripts/node_modules/` in your clone | the packages of `ctlhq-watch-pr` | `bun install`, on its first run |
+| 6 | `~/.ctlhq/message-words.txt`, and `.local/message-words.txt` in one repository | words such as private project names that `ctlhq-message-check` refuses. `ctlhq-commit` runs that check on every commit message | you, by hand |
 
 Suggested, never applied for you:
 
@@ -212,7 +213,7 @@ So these commands can remove a VM of yours that has a recipe's name, such as `ub
    2. the Stop hook entry in `~/.claude/settings.json`, and the one in `~/.codex/hooks.json` if you added it;
    3. a pre-push hook from `ctlhq-first-push hook install`. In that repository, delete `.git/hooks/pre-push`, then rename `.git/hooks/pre-push.before-first-push` back to `pre-push` if it exists;
    4. `~/.ctlhq-backups/`, after you restore what you want from it (the uninstall does not move backed-up files back);
-   5. `~/.ctlhq/`, which holds the models file, the layers file, the push settings, and `bin/gitleaks` if you put it there;
+   5. `~/.ctlhq/`, which holds the models file, the layers file, the push settings, the message word list, and `bin/gitleaks` if you put it there;
    6. the folders `~/.claude/skills`, `~/.claude/agents`, and `~/.codex/skills`, if the install created them and they are now empty;
    7. the clone itself.
 

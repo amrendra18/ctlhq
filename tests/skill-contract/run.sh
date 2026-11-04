@@ -150,6 +150,18 @@ fi
 
 expect_grep 'throwaway home folder, with no push, no write to the real home folder, and no call to a paid or external service' "$(grep '^> Break this change' "$root/skills/interrogate/SKILL.md")" "the /interrogate adversary brief limits what its runs may touch"
 
+# 4. No skill asks for a review answer in a commit message, and the reviewers read the text.
+asks='commit message under|(review|verdict|answer)[^.]* (in|to|into) the commit message'
+expect_eq 2 "$(printf 'Add the review paragraph to the commit message under Test Plan.\nFive answers, in the commit message under Test Plan.\nReview answers stay out of the commit message.\n' | grep -Ec "$asks")" "control: the pattern catches both old sentences and not a sentence that keeps them out"
+templates="$root/skills/run-method/references/subagent-templates.md"
+expect_grep 'ctlhq-commit --gate gate --review \.local/reviews/<commit>\.md --message-file' "$(cat "$templates")" "the commit sequence commits through ctlhq-commit with the review file"
+expect_nogrep 'git commit -F' "$(cat "$templates")" "the commit sequence holds no raw git commit"
+expect_grep 'below the reviewer' "$(cat "$templates")" "the five answers go below the reviewer's report, so the report stays"
+expect_grep 'Co-Authored-By' "$(cat "$templates")" "the commit sequence names the co-author line"
+hits="$(grep -rEn "$asks" "$root/skills")"
+expect_eq "" "$hits" "no file under skills/ asks for a review answer in a commit message"
+expect_grep 'pull-request (title and body|text)' "$(sed -n '/^# PR review/,/^## 1\. /p' "$root/skills/pr-review/SKILL.md")" "skills/pr-review/SKILL.md names the pull-request text as an input"
+
 if [ "$fail" -gt 0 ]; then
 	echo "$fail checks failed, $pass checks passed"
 	exit 1
