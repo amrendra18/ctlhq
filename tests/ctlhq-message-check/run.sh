@@ -136,6 +136,11 @@ wrapped review 'Round\302\2402 found it.\n'
 wrapped review 'Commit\r\nreview accept\r\n'
 wrapped review 'Commit \n  review accept\n'
 wrapped label 'milestone\n  2 decides\n'
+wrapped review '> commit\n> review accept\n'
+wrapped review 'commit\n- review accept\n'
+wrapped review 'commit\n* review accept\n'
+wrapped review 'commit\n+ review accept\n'
+wrapped approval '> The operator\n>   approved it.\n'
 out="$(printf 'plain\nThis waits for\n  their yes.\nplain\nCommit review: ok\n' | "$mc")"
 expect_eq "line 2: approval: This waits for" "$(printf '%s\n' "$out" | sed -n 1p)" "a wrapped note reports its first line"
 expect_eq "line 5: review: Commit review: ok" "$(printf '%s\n' "$out" | sed -n 2p)" "a later finding keeps its line number"
@@ -194,6 +199,32 @@ expect_grep "^${tagged:0:12}: line 1: review$" "$out" "--history reads a commit 
 newrepo clean; commit "$tmp/clean" "one clean commit"
 out="$("$mc" --history --root "$tmp/clean")"; expect_rc 0 $? "--history with no flagged commit exits 0"
 expect_eq "flagged: 0 of 1" "$out" "--history prints the count alone"
+
+newrepo rev
+git init -q --bare "$tmp/rev.git"
+git -C "$tmp/rev" remote add origin "$tmp/rev.git"
+commit "$tmp/rev" "already pushed: commit review"
+git -C "$tmp/rev" push -q origin main
+git -C "$tmp/rev" switch -q -c scratch
+commit "$tmp/rev" "scratch: commit review"
+git -C "$tmp/rev" switch -q main
+commit "$tmp/rev" "clean work"
+out="$("$mc" --new-only --rev main --root "$tmp/rev")"; expect_rc 0 $? "--rev main skips a flagged commit on another local branch"
+expect_eq "flagged: 0 of 1" "$out" "--rev counts only what it reaches"
+out="$("$mc" --new-only --rev scratch --root "$tmp/rev")"; expect_rc 1 $? "--rev flags a new commit it reaches"
+expect_eq "flagged: 1 of 1" "$(printf '%s\n' "$out" | tail -1)" "--rev scratch counts one commit"
+git init -q --bare "$tmp/rev2.git"
+git -C "$tmp/rev" remote add second "$tmp/rev2.git"
+out="$("$mc" --new-only --rev main --remote second --root "$tmp/rev")"; expect_rc 1 $? "--remote counts only that remote's refs as held"
+expect_eq "flagged: 1 of 2" "$(printf '%s\n' "$out" | tail -1)" "--remote second reads what origin holds as new"
+out="$("$mc" --new-only --rev main --remote origin --root "$tmp/rev")"; expect_rc 0 $? "--remote origin skips what origin holds"
+expect_eq "flagged: 0 of 1" "$out" "--remote origin counts the one new commit"
+"$mc" --remote origin --root "$tmp/rev" </dev/null >/dev/null 2>&1; expect_rc 2 $? "--remote without --new-only exits 2"
+"$mc" --new-only --remote='*' --root "$tmp/rev" >/dev/null 2>&1; expect_rc 2 $? "a --remote value that is not a name exits 2"
+"$mc" --rev main --root "$tmp/rev" </dev/null >/dev/null 2>&1; expect_rc 2 $? "--rev without --new-only exits 2"
+"$mc" --new-only --rev=--all --root "$tmp/rev" >/dev/null 2>&1; expect_rc 2 $? "a --rev value that starts with a dash exits 2"
+"$mc" --new-only --rev nosuch --root "$tmp/rev" >/dev/null 2>&1; expect_rc 2 $? "a --rev value that names nothing exits 2"
+"$mc" --new-only --rev main --branch x --root "$tmp/rev" >/dev/null 2>&1; expect_rc 2 $? "--rev with --branch exits 2"
 
 newrepo n
 git init -q --bare "$tmp/n.git"

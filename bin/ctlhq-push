@@ -27,13 +27,22 @@ Steps, in order:
        ssh://git@github.com[:22|:443]/OWNER/<repo>[.git]
        ssh://git@ssh.github.com:443/OWNER/<repo>[.git]
        https://github.com/OWNER/<repo>[.git]
-  3. Runs `git push [-u] <remote> <refspec...>` in DIR, with stdin closed. The environment
+  3. Runs the sibling tool ctlhq-message-check, found next to this tool, on the commits and branch
+     names the push sends: `--new-only --remote <remote> --rev` for each refspec's source, then
+     `--branch` for each branch name the remote would get. Only this remote's remote-tracking refs
+     count as held. A finding refuses (exit 6) and prints the commit, line and rule, or the branch,
+     and the steps that fix that case. So does a source that names no commit, such as a wildcard,
+     and a check that exits anything else but 0, exits 1 with no finding, or cannot start: the
+     line says the check did not run. No flag turns this off; `ctlhq-message-check --help` lists
+     the ways out. Tag names, tag messages and other ref names are not read.
+  4. Runs `git push [-u] <remote> <refspec...>` in DIR, with stdin closed. The environment
      passes through, so GIT_SSH_COMMAND works, and the repository's pre-push hooks run.
      Prints "pushing: <remote> <refspecs> -> <address> (owner OWNER from <settings file>)"
      first and "pushed" or "push failed (exit N)" last.
 
 Exit codes: 0 pushed; 1 git push failed; 2 usage or refused option; 3 address not allowed,
-or github_owner unset or unreadable; 4 not a Git work tree, or the remote is unknown.
+or github_owner unset or unreadable; 4 not a Git work tree, or the remote is unknown; 6 the
+message check refused the push, or did not run.
 """
 from __future__ import annotations
 
@@ -46,6 +55,12 @@ from pathlib import Path
 REPO = r"[A-Za-z0-9._-]+?(?:\.git)?"
 OWNER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
 REMOTE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+MESSAGE_CHECK = Path(__file__).resolve().parent / "ctlhq-message-check"
+WAYS_OUT = "`ctlhq-message-check --help` lists the ways out."
+
+
+class CheckDidNotRun(Exception):
+    pass
 
 
 def shown(path: Path) -> str:
@@ -108,6 +123,150 @@ def git(folder: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def check_findings(folder: Path, *arguments: str) -> str:
+    """What the check printed when it found something, or "" when it found nothing."""
+    try:
+        result = subprocess.run(
+            (str(MESSAGE_CHECK), "--root", str(folder), *arguments),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as error:
+        raise CheckDidNotRun(f"(exit None): {error}") from error
+    if result.returncode == 0:
+        return ""
+    if result.returncode == 1 and result.stdout.strip():
+        return result.stdout.rstrip()
+    raise CheckDidNotRun(f"(exit {result.returncode}): {result.stderr.strip() or 'it printed no reason'}")
+
+
+def branch_name(folder: Path, source: str, target: str) -> str | None:
+    """The branch this refspec names on the remote. None for a tag, another ref, or no name Git can find."""
+    full = git(folder, "rev-parse", "--symbolic-full-name", source).stdout.strip()
+    if target and not target.startswith("refs/") and full.startswith("refs/tags/"):
+        return None
+    name = target or full
+    if name.startswith("refs/") and not name.startswith("refs/heads/"):
+        return None
+    return name.removeprefix("refs/heads/") or None
+
+
+def rev_list(folder: Path, *arguments: str) -> list[str]:
+    return git(folder, "rev-list", *arguments).stdout.split()
+
+
+def commit_of(folder: Path, rev: str) -> str:
+    return git(folder, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").stdout.strip()
+
+
+def operator_step(reason: str) -> str:
+    return (
+        f"the history must be rewritten by the operator, because {reason}. Write BLOCKED.md, and give the operator "
+        "the git commands to rewrite it and push."
+    )
+
+
+def rewrite_step(folder: Path, remote: str, source: str, branch: str | None, findings: str) -> str:
+    """The rewrite that leaves a push this remote takes, or a plain hand-off when no rewrite here can."""
+    flagged = set(re.findall(r"(?m)^([0-9a-f]{12}): ", findings))
+    commit = commit_of(folder, source)
+    held = f"--remotes={remote}"
+    new = rev_list(folder, "--reverse", "--topo-order", commit, "--not", held)
+    oldest = next((sha for sha in new if sha[:12] in flagged), None)
+    if oldest is None:
+        return operator_step("the check named no commit in this push")
+    new_to_all_remotes = rev_list(folder, commit, "--not", "--remotes")
+    if any(sha[:12] in flagged and sha not in new_to_all_remotes for sha in new):
+        return operator_step("another remote holds a flagged commit, and a rewrite here would break pushes there")
+    full = git(folder, "rev-parse", "--symbolic-full-name", source).stdout.strip()
+    current = git(folder, "rev-parse", "--symbolic-full-name", "HEAD").stdout.strip()
+    if full in (current, "HEAD"):
+        switch = ""
+    elif full.startswith("refs/heads/"):
+        name = full.removeprefix("refs/heads/")
+        switch = "switch to this source branch, then " if check_findings(folder, "--branch", name) else f"git switch {name}, then "
+    else:
+        return operator_step("this source is not a local branch")
+    tip = commit_of(folder, f"refs/remotes/{remote}/{branch}") if branch else ""
+    if tip and git(folder, "merge-base", "--is-ancestor", tip, commit).returncode != 0:
+        return operator_step(f"{remote}'s branch holds commits this one lacks")
+    if rev_list(folder, "--merges", commit, "--not", held):
+        boundary = [line[1:] for line in rev_list(folder, "--boundary", commit, "--not", held) if line.startswith("-")]
+        base = tip or (boundary[0] if len(boundary) == 1 else "")
+        if not base:
+            return operator_step("these commits hold a merge, and no one commit sits under them")
+    else:
+        base = commit_of(folder, f"{oldest}^")
+        if not base and full == "HEAD":
+            return operator_step("a first commit on a detached HEAD has no branch to clear")
+        if not base and git(folder, "rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+            return operator_step("this shallow clone hides the parent of the flagged commit")
+    rewrite = f"git reset --soft {base}" if base else "git update-ref -d HEAD"
+    return (
+        f"{switch}run {rewrite}, commit again through ctlhq-commit, and push again. "
+        "If a permission check refuses that command, write BLOCKED.md."
+    )
+
+
+def refuse_commits(folder: Path, remote: str, source: str, branch: str | None, findings: str) -> None:
+    print(
+        "ctlhq-push: a new commit holds internal notes; nothing was pushed.\n"
+        "why: a commit message outlives the commit, and a reader has only the repository.\n"
+        f"{findings}\n"
+        f"fix: 1. Run git fetch {remote} '+refs/heads/*:refs/remotes/{remote}/*', then push again. "
+        f"The check skips what {remote} already holds.\n"
+        f"fix: 2. If the push is still refused, {rewrite_step(folder, remote, source, branch, findings)}\n"
+        f"fix: A false flag: {WAYS_OUT}",
+        file=sys.stderr,
+    )
+
+
+def refuse_branch(folder: Path, remote: str, branch: str, findings: str) -> None:
+    print(
+        "ctlhq-push: a branch name holds an internal note; nothing was pushed.\n"
+        f"why: GitHub copies the name into the merge commit.\n{findings}",
+        file=sys.stderr,
+    )
+    if commit_of(folder, f"refs/remotes/{remote}/{branch}"):
+        print(f"fix: {remote} already holds this name. Pushing a new name leaves the old branch there, and deleting it stays with the operator.", file=sys.stderr)
+
+
+def refused_by_message_check(folder: Path, remote: str, refspecs: list[str]) -> bool:
+    parts = [refspec.partition(":") for refspec in refspecs]
+    for source, _, _ in parts:
+        if not commit_of(folder, source):
+            print(
+                f"ctlhq-push: the message check did not run: source {source!r} names no commit; nothing was pushed.\n"
+                "fix: push a plain branch or tag name.",
+                file=sys.stderr,
+            )
+            return True
+    refused = False
+    try:
+        for source, _, target in parts:
+            branch = branch_name(folder, source, target)
+            findings = check_findings(folder, "--new-only", "--remote", remote, "--rev", commit_of(folder, source))
+            if findings:
+                refused = True
+                refuse_commits(folder, remote, source, branch, findings)
+            findings = check_findings(folder, "--branch", branch) if branch else ""
+            if findings:
+                refused = True
+                refuse_branch(folder, remote, branch, findings)
+    except CheckDidNotRun as error:
+        print(
+            f"ctlhq-push: the message check did not run {error}; nothing was pushed.\n"
+            "why: a commit nobody checked could carry internal notes to the remote.\n"
+            f"fix: clear the cause above: repair a broken word list, or ctlhq-message-check next to this tool. {WAYS_OUT}",
+            file=sys.stderr,
+        )
+        return True
+    return refused
+
+
 def main(arguments: list[str]) -> int:
     if arguments[:1] in (["-h"], ["--help"]):
         print(__doc__)
@@ -150,6 +309,8 @@ def main(arguments: list[str]) -> int:
     refused = [address for address in addresses if not any(p.fullmatch(address) for p in patterns)]
     if refused:
         return fail(3, f"push address {refused[0]} is not a github.com/{owner} repository.", f"push only to a remote whose address is github.com/{owner}/<repo>; other pushes stay with the operator.")
+    if refused_by_message_check(folder, remote, refspecs):
+        return 6
     command = ["git", "-C", str(folder), "push", *(["-u"] if upstream else []), remote, *refspecs]
     print(f"pushing: {remote} {' '.join(refspecs)} -> {', '.join(addresses)} (owner {owner} from {settings})", flush=True)
     result = subprocess.run(command, stdin=subprocess.DEVNULL, check=False)
