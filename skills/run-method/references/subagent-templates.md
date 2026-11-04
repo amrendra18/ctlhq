@@ -76,14 +76,13 @@ Re-review after every fix round. Do not accept a report that says "fixed" withou
 
 ## 5. The commit sequence (run by whoever commits, in this order)
 
-1. Add the review paragraph to the commit message under `Test Plan:` (the five answers, one line each).
-2. Run the gate: `./scripts/check full`. Read its exit code directly. Never pipe it through `tail` or `grep`.
-3. `git add <each path by name>`.
-4. `git status --short` shows only the intended `A` and `M` lines.
-5. `git commit -F .local/commit-<n>.txt`.
-6. Verify: signature (`git log --show-signature -1`), clean tree, `--version` prints the new stamp, the data folder is absent.
-7. If a hook rejects the commit, or the harness denies a step: write the exact command and the reason to `BLOCKED.md`, report, stop that step. Keep working on anything that does not depend on it.
-8. Record the hash, date, tests and lines in `PLAN.md` section 7 and in memory. Only then report "committed <hash>".
+1. Add the five review answers, one line each, below the reviewer's report in `.local/reviews/<commit>.md`. They stay out of the commit message.
+2. Run the gate: `ctlhq-run-gate -- ./scripts/check full`. Read its exit line directly. Never pipe it through `tail` or `grep`.
+3. `git status --short` shows only the intended paths.
+4. `ctlhq-commit --gate gate --review .local/reviews/<commit>.md --message-file .local/commit-<n>.txt -- <each path by name>`. The message file ends with your model's Co-Authored-By line, or `--co-author` gives it.
+5. Verify: signature (`git log --show-signature -1`), clean tree, `--version` prints the new stamp, the data folder is absent.
+6. If a hook rejects the commit, or the harness denies a step: write the exact command and the reason to `BLOCKED.md`, report, stop that step. Keep working on anything that does not depend on it.
+7. Record the hash, date, tests and lines in `PLAN.md` section 7 and in memory. Only then report "committed <hash>".
 
 ## 6. The reproduction receipt (defect work)
 

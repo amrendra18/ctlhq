@@ -1,0 +1,22 @@
+# Test inputs for ctlhq-message-check, with the rules each one must give ("-" means none).
+# Each flagged input keeps only the lines of a real message that carry a note.
+# In flagged-11, a neutral word replaces one role name.
+flagged-01.txt	path,review
+flagged-02.txt	approval,review
+flagged-03.txt	approval,review
+flagged-04.txt	approval,review
+flagged-05.txt	approval,review
+flagged-06.txt	label,review
+flagged-07.txt	review
+flagged-08.txt	review
+flagged-09.txt	review
+flagged-10.txt	label,review
+flagged-11.txt	review
+flagged-12.txt	label,review
+flagged-13.txt	label
+flagged-14.txt	review
+flagged-15.txt	review
+bad-example.txt	approval,label,path,review
+clean-good-example.txt	-
+clean-the-operator-runs.txt	-
+clean-three-rounds.txt	-

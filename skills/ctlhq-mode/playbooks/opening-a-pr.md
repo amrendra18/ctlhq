@@ -17,9 +17,9 @@ Invoked at the end of every other playbook.
 - `## Scope`: always. 1 to 3 short items on what it covers and what it deliberately leaves out (a follow-up, a known gap). No symbols, paths, or file-by-file essay.
 - `## Tradeoffs`: only rejected alternatives a reviewer would otherwise ask about. Skip when there was no real choice.
 - `## Blast Radius`: 1 to 2 sentences on who or what it touches and why that is safe or risky. If main is red, state the cost of leaving it red.
-- `## Verification`: 1 to 3 bullets, each a real run path and its outcome. Perf: one primary number with its unit, `before → after`, and a link to the best-of-n or swarm directory for the rest. No sample-size methodology, swarm recitals, or metric tables.
+- `## Verification`: 1 to 3 bullets, each a real run path and its outcome. Perf: one primary number with its unit, `before → after`, and a link to the rest only when a stranger can open it. No sample-size methodology, swarm recitals, or metric tables. A review verdict is not verification.
 
-After the sections, attach videos or screenshots when they prove a claim. Full SHAs, swarm or best-of-n lane recitals, lever-correction essays, file-by-file checklists, and "CLEAN" verdicts go in a linked artifact, not the body.
+After the sections, attach videos or screenshots when they prove a claim. Leave out full SHAs, swarm or best-of-n lane recitals, lever-correction essays, file-by-file checklists, and "CLEAN" verdicts. Link an artifact only when a stranger can open it.
 
 **Forge.** Use GitHub CLI (`gh`) for create, edit, view, watch, and merge. Do not require Graphite (`gt`).
 

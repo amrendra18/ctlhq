@@ -1,0 +1,15 @@
+fix(send): tell a busy log from a missed command rule
+
+Why:
+A send that found the log busy told the worker it had missed the
+command rule, so the worker looked in the wrong place.
+
+Changes:
+- send: a busy log gets its own line.
+
+Test Plan:
+- ./scripts/check full: exit 0.
+- TestLimitsSendNothingWhileTheLogIsBusy fails when the branch goes away.
+
+Risks:
+- None known.

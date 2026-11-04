@@ -1,0 +1,2 @@
+- Commit review 1 asked for one medium and four low text fixes. They are in this
+  commit, not reviewed on their own; pull-request reviews A and B read the diff next.

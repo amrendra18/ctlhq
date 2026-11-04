@@ -1,0 +1,3 @@
+pointed at chmod. Audit round 4 and the milestone 3 reviews listed the rest.
+- Commit review: three rounds; the last accepted with 0 medium and 4 low, and
+  its low text fixes are in this commit.

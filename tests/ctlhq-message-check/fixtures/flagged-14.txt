@@ -1,0 +1,2 @@
+- Commit review, three rounds by fresh Claude agents: two "fix first",
+  then accept; the commit-msg hook passed with the co-author line

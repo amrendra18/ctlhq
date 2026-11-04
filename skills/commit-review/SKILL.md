@@ -13,6 +13,7 @@ Independent means a fresh context that did not write the code. Self-review, or a
 2. The milestone block from `PLAN.md` (Outcome, Done when, Not in this milestone) and `AGENTS.md`.
 3. The governing rules file lines that define shapes and exit codes.
 4. The repository path, read-only. A throwaway state folder for runs.
+5. The commit's message file. The main agent writes it before the review, and commits with `ctlhq-commit --message-file`.
 
 Do not give the reviewer the builder's report, the main agent's suspicions, or the fix history.
 

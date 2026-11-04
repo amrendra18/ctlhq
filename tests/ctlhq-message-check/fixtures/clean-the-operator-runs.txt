@@ -1,0 +1,4 @@
+docs: say what the operator runs before a push
+
+Why:
+A reader could not tell who runs the install, or where its .local/ folder lives.

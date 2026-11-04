@@ -1,0 +1,14 @@
+fix: answer the milestone 2 pull-request reviews
+
+Why:
+The operator approved this after round 2.
+
+Changes:
+- LICENSE: the same as the owner's other projects.
+
+Test Plan:
+- blind review: .local/reviews/commit-3.md fix first, then accept.
+- Pull-request reviews A and B read it next.
+
+Risks:
+- This commit waits for their yes before any push.
