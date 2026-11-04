@@ -12,17 +12,16 @@ Bundled skills live at `../<name>/SKILL.md` from this file, so put this file's a
 
 ## Tools
 
-Four wrappers and the `ctlhq-playbook` tool live in `bin/` next to this file. The ctlhq repository's top-level `bin/` holds a symlink to each, so each also runs by name when that folder is on PATH. Every one answers `--help` with its usage and exits 0.
+Three wrappers and the `ctlhq-playbook` tool live in `bin/` next to this file. The ctlhq repository's top-level `bin/` holds a symlink to each, so each also runs by name when that folder is on PATH. Every one answers `--help` with its usage and exits 0.
 
 ```
 bin/ctlhq-plan-lint <plan.md>                  # lint a multi-phase plan. Runs scripts/check-plan.mjs with node.
 bin/ctlhq-worktree-audit [-b <ref>] [--no-fetch] [--recent-days <n>] [repo-path]   # worktree prune audit; never deletes. Fetches the origin base unless --no-fetch. Runs scripts/worktree-audit.sh with bash.
 bin/ctlhq-watch-pr [options]                   # GitHub PR and stack watcher. Runs scripts/watch-pr/watch-pr with bun.
-bin/ctlhq-orch [--store <dir>] [--json] [--force] <command>   # orchestrate store bookkeeping. Runs scripts/orch/orch.ts with bun.
 bin/ctlhq-playbook steps <title>               # a playbook's numbered steps, verbatim, for the todolist. ctlhq-playbook path <title> prints its file; ctlhq-playbook list prints every playbook.
 ```
 
-`ctlhq-watch-pr` and `ctlhq-orch` need `bun`, and `ctlhq-watch-pr` also needs `gh`. Without `bun`, they print the install line to stderr and exit 127, and `--help` still answers. `ctlhq-watch-pr` exits 0 on READY, STATUS, or COMPLETE, 2 on merge conflicts, 3 on review threads, 4 on failing checks, 5 on timeout, 6 on a merge gate, 7 when the status query failed, 64 on a usage error; its `--help` lists them. `ctlhq-plan-lint` fails on a colon inside a sentence, that is, a colon followed by a space and more text on the same line (`scripts/check-plan.mjs:112-113`). A colon that ends a line, such as before a list, is allowed. A project `PLAN.md` skips this check. `unslop` rule 14 flags every mid-sentence colon, including one before an inline list, and leaves that case to you.
+`ctlhq-watch-pr` needs `bun` and `gh`. Without `bun`, it prints the install line to stderr and exits 127, and `--help` still answers. `ctlhq-watch-pr` exits 0 on READY, STATUS, or COMPLETE, 2 on merge conflicts, 3 on review threads, 4 on failing checks, 5 on timeout, 6 on a merge gate, 7 when the status query failed, 64 on a usage error; its `--help` lists them. `ctlhq-plan-lint` fails on a colon inside a sentence, that is, a colon followed by a space and more text on the same line (`scripts/check-plan.mjs:112-113`). A colon that ends a line, such as before a list, is allowed. A project `PLAN.md` skips this check. `unslop` rule 14 flags every mid-sentence colon, including one before an inline list, and leaves that case to you.
 
 The ctlhq repository's top-level `bin/` also holds the tools the steps below depend on. Each answers `--help` with `name: one line` and exits 0.
 

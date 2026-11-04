@@ -18,10 +18,9 @@ expect_grep() { if printf '%s\n' "$2" | grep -Eq -- "$1"; then ok; else bad "$3 
 expect_nogrep() { if printf '%s\n' "$2" | grep -Eq -- "$1"; then bad "$3 (a line matches: $1)"; else ok; fi; }
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
-unset ORCH_STORE
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctlhq-status-test.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
-export HOME="$tmp/home"  # block 7 reads transcripts under HOME; keep the real ones out
+export HOME="$tmp/home"
 mkdir -p "$HOME"
 repo="$tmp/repo"
 mkdir -p "$repo/.local/gate" "$repo/sub"
@@ -106,7 +105,6 @@ printf '2026-10-16T10:00:00Z\t2026-10-16T10:00:05Z\t0\tmake test\n' > "$repo/.lo
 printf '2\n' > "$repo/.local/gate/lint.exit"
 before="$(cd "$repo" && find . -path ./.git -prune -o -type f -print | sort; cat .local/gate/* README.md NEXT.md BLOCKED.md PLAN.md | cksum)"
 
-# 1. --help and usage.
 out="$("$fs" --help 2>&1)"; expect_rc 0 $? "--help exits 0"
 expect_grep '^ctlhq-status: ' "$(printf '%s\n' "$out" | head -1)" "--help first line is 'ctlhq-status: ...'"
 expect_grep 'Before stating the state of a process' "$out" "--help quotes the AGENTS.md rule"
@@ -115,10 +113,9 @@ expect_grep 'Before stating the state of a process' "$out" "--help quotes the AG
 mkdir -p "$tmp/plain"
 "$fs" --repo "$tmp/plain" >/dev/null 2>&1; expect_rc 1 $? "a plain folder exits 1"
 
-# 2. Text output: seven numbered blocks in order.
 out="$(cd "$repo/sub" && "$fs" 2>&1)"; rc=$?
 expect_rc 0 "$rc" "status from a subfolder exits 0"
-expect_eq "1. Repository 2. Gate 3. Open questions (PLAN.md section 9) 4. BLOCKED.md 5. PLAN.md section 10 6. Agents 7. Now" "$(printf '%s\n' "$out" | grep -E '^[0-9]\. ' | tr '\n' ' ' | sed 's/ $//')" "seven blocks in order"
+expect_eq "1. Repository 2. Gate 3. Open questions (PLAN.md section 9) 4. BLOCKED.md 5. PLAN.md section 10 6. Now" "$(printf '%s\n' "$out" | grep -E '^[0-9]\. ' | tr '\n' ' ' | sed 's/ $//')" "six blocks in order"
 expect_grep '^   branch: main$' "$out" "branch is main"
 expect_grep '^   HEAD: [0-9a-f]{7,} Seed the plan$' "$out" "HEAD hash and subject"
 expect_grep '^   committed: [0-9]+ seconds? ago' "$out" "commit age"
@@ -132,9 +129,7 @@ expect_grep '^   last stop: 1\. git commit: the sandbox denies \.git writes\. Ow
 expect_grep '^   present \(first 3 lines\)$' "$out" "BLOCKED.md present"
 expect_grep 'sandbox denies .git writes' "$out" "BLOCKED.md first lines shown"
 expect_eq "$(printf '   2. 2026-10-15 11:00 scope B\n   3. 2026-10-16 09:00 scope C\n   4. 2026-10-16 09:30 scope D')" "$(printf '%s\n' "$out" | sed -n '/^5\. /,/^6\. /p' | grep '^   [0-9]')" "PLAN.md section 10 last 3 lines"
-expect_grep '^   no agent store$' "$out" "no agent store"
 
-# 3. --json parses and holds the same facts.
 json="$("$fs" --repo "$repo" --json)"; expect_rc 0 $? "--json exits 0"
 facts="$(printf '%s' "$json" | python3 -c '
 import json, sys
@@ -145,27 +140,20 @@ print(",".join("%s=%s" % (g["name"], g["exit"]) for g in d["gate"]))
 print(len(d["decisions"]["rows"]), d["decisions"]["heading"])
 print(d["blocked"]["present"], len(d["blocked"]["first_lines"]))
 print(d["plan"]["last_lines"][-1])
-print(d["agents"]["note"])
 ' 2>&1)"
-expect_eq "$(printf 'agents blocked decisions gate now plan repository\nmain Seed the plan 1\ngate=0,lint=2\n2 ## 9. Open questions for the operator\nTrue 3\n4. 2026-10-16 09:30 scope D\nno agent store')" "$facts" "--json facts match the text blocks"
+expect_eq "$(printf 'blocked decisions gate now plan repository\nmain Seed the plan 1\ngate=0,lint=2\n2 ## 9. Open questions for the operator\nTrue 3\n4. 2026-10-16 09:30 scope D')" "$facts" "--json facts match the text blocks"
 
-# 4. Missing files and a ctlhq-orch store without bun.
 rm -f "$repo/BLOCKED.md"
-mkdir -p "$repo/.local/orch"
-out="$(PATH=/usr/bin:/bin "$fs" --repo "$repo")"
+out="$("$fs" --repo "$repo")"
 expect_grep '^4\. BLOCKED\.md$' "$out" "block 4 still printed"
 expect_eq "absent" "$(printf '%s\n' "$out" | sed -n '/^4\. /{n;p;}' | sed 's/^ *//')" "BLOCKED.md absent"
-if PATH=/usr/bin:/bin command -v bun >/dev/null 2>&1; then ok; else expect_grep '^   ctlhq-orch store present, bun missing$' "$out" "ctlhq-orch store without bun"; fi
-rmdir "$repo/.local/orch"
 printf '1. git commit blocked\n' > "$repo/BLOCKED.md"
 
-# 5. Nothing written.
 after="$(cd "$repo" && find . -path ./.git -prune -o -type f -print | sort; cat .local/gate/* README.md NEXT.md BLOCKED.md PLAN.md | cksum)"
 before2="$(printf '%s' "$before" | sed '$d')"
 after2="$(printf '%s' "$after" | sed '$d')"
 expect_eq "$before2" "$after2" "ctlhq-status writes no file"
 
-# 5b. Block 3 reads only PLAN.md section 9.
 r3="$tmp/r3"
 mkdir -p "$r3"
 git -C "$r3" init -q
@@ -184,14 +172,12 @@ printf '# Plan\n\n## 9. Subagents\n\n1. One.\n' > "$r3/PLAN.md"
 expect_eq "no open-questions section 9 in PLAN.md" "$(b3 "$("$fs" --repo "$r3")")" "a section 9 on another topic is not read as open questions"
 rm -f "$r3/PLAN.md" "$r3/README.md"
 
-# 6. Block 7 (Now) with no transcript, no milestone table, no stop line.
 out="$("$fs" --repo "$repo")"
 expect_grep '^   since your last message: unknown \(no Claude Code or Codex session for this workspace; pass --since TIME\)$' "$out" "since is unknown without a transcript"
 expect_grep '^   current item: unknown \(no milestone table in PLAN.md section 7\)$' "$out" "no milestone table"
 expect_grep '^   lanes: 0 worktrees, 0 processes naming this repository$' "$out" "no lanes"
 expect_grep '^   last stop: 1\. git commit blocked \(BLOCKED.md, last entry\)$' "$out" "stop reason from BLOCKED.md"
 
-# 7. Block 7 on a second repository: milestones, a worktree, --since, a stop line.
 r2="$tmp/r2"
 mkdir -p "$r2/.local/gate"
 git -C "$r2" init -q -b main 2>/dev/null || { git -C "$r2" init -q; git -C "$r2" symbolic-ref HEAD refs/heads/main; }
@@ -258,7 +244,6 @@ expect_grep '^   last stop: gate gate exited 3 [0-9]+ seconds? ago \(\.local/gat
 json="$("$fs" --repo "$r2" --json)"
 expect_eq "M1 M2 1 1" "$(printf '%s' "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin)["now"]; m=d["milestones"]; print(m["current"]["milestone"], m["visible"]["milestone"], m["open_before"], len(d["lanes"]["worktrees"]))')" "--json now block"
 
-# 8. Since from transcripts: the operator message before the newest one; Claude Code, then Codex.
 top="$(git -C "$r2" rev-parse --show-toplevel)"
 python3 - "$HOME" "$top" <<'PY2'
 import datetime, json, os, sys
@@ -292,8 +277,6 @@ rm -rf "$HOME/.claude"
 out="$("$fs" --repo "$r2")"
 expect_grep '^   since your last message \([0-9T:-]+Z, from codex session rollout-.*\.jsonl\): 2 commits, ' "$out" "since comes from the Codex session when it is the only one"
 
-# 9. --next: the first "in progress" row of the | # | Milestone | Done when | State | table, else the
-# first "planned" row, else "none" with the reason. JSON carries the step and BLOCKED.md's open rows.
 nx() { "$fs" --next --repo "$1"; }
 r4="$tmp/r4"
 mkdir -p "$r4"
@@ -374,10 +357,9 @@ cat > "$r4/PLAN.md" <<'MD'
 MD
 expect_grep 'Done when \| State' "$("$fs" --help)" "--help names the milestone table header"
 
-# 10. Block 7 carries the next step and the cost line; worktrees come from the main work tree.
 sed -i.bak 's/| blocked |/| in progress |/' "$r4/PLAN.md"; rm -f "$r4/PLAN.md.bak"
 out="$("$fs" --repo "$r4")"
-expect_grep '^   next step: row 2, Import page \(in progress, PLAN.md line 15\)' "$out" "block 7 prints the next step"
+expect_grep '^   next step: row 2, Import page \(in progress, PLAN.md line 15\)' "$out" "block 6 prints the next step"
 expect_grep '^   cost: 0 worktrees in \.local/worktrees \(0 MiB\); [0-9.]+ (GiB|MiB) free on this disk; rounds: none recorded$' "$out" "cost line without worktrees or rounds"
 mkdir -p "$r2/.local/worktrees/a" "$r2/.local/worktrees/b"
 python3 -c 'import sys; open(sys.argv[1], "wb").write(b"x" * (3 * 2 ** 20))' "$r2/.local/worktrees/a/blob"

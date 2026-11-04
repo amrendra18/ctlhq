@@ -24,7 +24,7 @@ tests/stand-ins/     fakes for tests: Claude Code, GitHub CLI, pre-commit, and a
 1. macOS, the only platform ctlhq supports. Some tests call macOS-only commands.
 2. `node`, version 22.18 or newer. Four tests fail without it, the tests of ctlhq-plan-lint, stand-ins, ctlhq-browser, and ctlhq-icon-sheet.
 3. Google Chrome, for the ctlhq-browser and ctlhq-icon-sheet tests.
-4. `bun`, only for the TypeScript unit tests and type check of `ctlhq-orch` and `ctlhq-watch-pr`. The gate runs them only when bun is installed, and prints a skipped line otherwise.
+4. `bun`, only for the TypeScript unit tests and type check of `ctlhq-watch-pr`. The gate runs them only when bun is installed, and prints a skipped line otherwise.
 
 There is no CI (continuous integration) yet. Nothing runs these checks for you when you push or open a pull request, so run them yourself first.
 

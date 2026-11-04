@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ctlhq-status: where a project stands, in seven numbered blocks read from its repository; writes nothing.
+"""ctlhq-status: where a project stands, in six numbered blocks read from its repository; writes nothing.
 
 Usage:
   ctlhq-status [--repo DIR] [--since TIME|REV] [--json]
@@ -18,10 +18,7 @@ Blocks, in this order:
   4. BLOCKED.md: present or absent; when present, its first 8 lines.
   5. PLAN.md: the last 3 non-empty lines of section 10 (the approvals ledger), when the
      file exists.
-  6. Agents: when .local/orch/ exists (or ORCH_STORE names a folder), runs `ctlhq-orch status`
-     from this repository's bin/ when bun is installed, else prints "ctlhq-orch store present,
-     bun missing". Otherwise "no agent store".
-  7. Now: seven lines.
+  6. Now: seven lines.
      a. Since your last message: commits since then and changed working-tree files modified
         since then (10 each at most). The time is --since (an ISO time, or a git revision:
         then the commits after it). Without --since, the time of the operator's message
@@ -63,13 +60,12 @@ or starts with, closed:, resolved:, done:, or unblocked:, or holds ~~struck~~ te
 
 --repo DIR reads that repository (default: the git work tree that holds the current
 directory). --json prints the same facts as one JSON object with the keys repository, gate,
-decisions, blocked, plan, agents, now; now.next holds the --next object and now.cost the
-cost line's numbers. ctlhq-status itself writes nothing; `ctlhq-orch status` renders
-status.md inside its own store.
+decisions, blocked, plan, now; now.next holds the --next object and now.cost the
+cost line's numbers.
 
 Exit codes: 0 printed; 1 DIR is not a git repository; 2 usage error.
 
-Operator rule (home/AGENTS.md, Replies): "Before stating the state of a process, agent or window, check it." Run this before a status reply; block 3 answers "anything pending on me"; block 7 answers
+Operator rule (home/AGENTS.md, Replies): "Before stating the state of a process, agent or window, check it." Run this before a status reply; block 3 answers "anything pending on me"; block 6 answers
 "what changed since my last message", "what item now", "how far to something I can see",
 "what runs in parallel", "why did it stop", "what is next", and "what has this cost". It
 runs the same from a Codex session. The reply lint (ctlhq-reply-lint) reads --next --json.
@@ -270,31 +266,6 @@ def plan_block(root: Path) -> dict:
                     body.append(raw)
             info["last_lines"] = body[-3:]
             break
-    return info
-
-
-def agents_block(root: Path) -> dict:
-    store: Path | None = None
-    if (root / ".local" / "orch").is_dir():
-        store = root / ".local" / "orch"
-    elif os.environ.get("ORCH_STORE") and Path(os.environ["ORCH_STORE"]).is_dir():
-        store = Path(os.environ["ORCH_STORE"])
-    if store is None:
-        return {"store": None, "bun": shutil.which("bun") is not None, "note": "no agent store", "status": None, "exit": None}
-    info: dict = {"store": str(store), "bun": shutil.which("bun") is not None, "note": None, "status": None, "exit": None}
-    if not info["bun"]:
-        info["note"] = "ctlhq-orch store present, bun missing"
-        return info
-    orch = Path(__file__).resolve().parent / "ctlhq-orch"
-    if not orch.exists():
-        info["note"] = f"ctlhq-orch store present, {orch} not found"
-        return info
-    try:
-        r = subprocess.run([str(orch), "--store", str(store), "status"], capture_output=True, text=True, timeout=60)
-        info["status"] = (r.stdout + r.stderr).strip()
-        info["exit"] = r.returncode
-    except (OSError, subprocess.TimeoutExpired) as e:
-        info["note"] = f"ctlhq-orch status failed: {e}"
     return info
 
 
@@ -689,7 +660,7 @@ def now_block(root: Path, since: str | None, now: datetime.datetime, gate: list[
 
 
 def print_now(nb: dict) -> None:
-    print("7. Now")
+    print("6. Now")
     sn = nb["since"]
     if sn["since"] is None:
         print(f"   since your last message: unknown ({sn['source']}; pass --since TIME)")
@@ -782,15 +753,6 @@ def print_text(facts: dict) -> None:
         print(f"   last {len(plan['last_lines'])} lines:")
         for l in plan["last_lines"]:
             print(f"   {l}")
-    ag = facts["agents"]
-    print("6. Agents")
-    if ag["note"]:
-        print(f"   {ag['note']}")
-    else:
-        print(f"   ctlhq-orch store {ag['store']} (ctlhq-orch status exit {ag['exit']})")
-        for l in (ag["status"] or "").split("\n"):
-            if l.strip():
-                print(f"   {l}")
     print_now(facts["now"])
 
 
@@ -849,7 +811,6 @@ def main(argv: list[str]) -> int:
         "decisions": decisions_block(root),
         "blocked": blocked_block(root),
         "plan": plan_block(root),
-        "agents": agents_block(root),
         "now": now_block(root, since, now, gate),
     }
     if as_json:

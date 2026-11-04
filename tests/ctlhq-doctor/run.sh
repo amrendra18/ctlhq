@@ -38,7 +38,7 @@ expect_grep '^summary: required [0-9]+/[0-9]+ ok, optional [0-9]+/[0-9]+ ok.*; e
 if command -v bun >/dev/null 2>&1; then
 	expect_grep '^ok +bun ' "$out" "bun is ok (installed on this machine)"
 else
-	expect_grep '^missing +bun +install: curl -fsSL https://bun.sh/install \| bash +needed by ctlhq-watch-pr, ctlhq-orch' "$out" "bun missing with install line and needed-by"
+	expect_grep '^missing +bun +install: curl -fsSL https://bun.sh/install \| bash +needed by ctlhq-watch-pr and the TypeScript unit tests' "$out" "bun missing with install line and needed-by"
 fi
 if command -v gh >/dev/null 2>&1; then
 	expect_grep '^ok +gh ' "$out" "gh is ok (installed on this machine)"
@@ -110,7 +110,7 @@ expect_grep '^missing +first-commit +not on PATH +needed by run-method, start-pr
 expect_grep '^ok +present-tool +found \('"$fake"'/present-tool\) +needed by alpha, beta$' "$out" "a present separate tool shows its path and both host skills"
 expect_grep '^missing +absent-tool +not on PATH +needed by alpha$' "$out" "an absent separate tool is missing and names its skill"
 expect_grep '^missing +agents-tool +not on PATH +needed by gamma$' "$out" "a skill installed for the agents host is read too"
-expect_grep '^missing +bun +install: .+ +needed by ctlhq-watch-pr, ctlhq-orch, and the TypeScript unit tests \(the bun-tests row of ctlhq-test\)$' "$out" "a missing bun names the unit tests it runs"
+expect_grep '^missing +bun +install: .+ +needed by ctlhq-watch-pr and the TypeScript unit tests \(the bun-tests row of ctlhq-test\)$' "$out" "a missing bun names the unit tests it runs"
 printf '#!/bin/sh\necho "Google Chrome 130.0.6723.58"\n' >"$tmp/chrome"
 printf '#!/bin/sh\ntouch "%s"\n' "$tmp/separate-tool-ran" >"$fake/first-commit"
 chmod +x "$tmp/chrome" "$fake/first-commit"
