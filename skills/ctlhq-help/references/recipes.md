@@ -33,7 +33,7 @@ Swap in the real paths, skills, and done checks. Informal wording works.
 
 ## Review and ship
 
-- `/interrogate the whole branch, but skeptically. don't change anything yet. no nitpicks unless it's a real bug or regression.` Read the dismissals too.
+- `/interrogate the whole branch, but skeptically. don't change anything yet. no nitpicks unless it's a real bug or regression.` Read the Dropped list too.
 - `/swarm check every package under <dir> against its check script. one worker per package. one report.`
 - `/ctlhq-mode open the pr. small ordered commits, evidence in the description.`
 - `/ctlhq-mode babysit this pr. get it green.` For status only: `/ctlhq-mode check on pr <number>. anything outstanding?`
