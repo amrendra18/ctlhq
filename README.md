@@ -60,7 +60,7 @@ Required:
 
 Optional:
 
-1. `bun`, for `ctlhq-orch` and `ctlhq-watch-pr`. Their first run installs packages with `bun install`, which downloads them over the network.
+1. `bun`, for `ctlhq-watch-pr`. Its first run installs packages with `bun install`, which downloads them over the network.
 2. `gh` (the GitHub command-line tool), for `ctlhq-watch-pr`, the pull-request column of `ctlhq-worktree-audit`, and the pull-request playbooks.
 3. `rg` and `jq`, for `ctlhq-worktree-audit`.
 4. `gitleaks`, for a fuller secret scan in `ctlhq-first-push`. It looks in `~/.ctlhq/bin/` first, then on your PATH. Without it, `ctlhq-first-push` checks only its built-in token patterns.
@@ -158,7 +158,7 @@ Written by other tools, only when you run them:
 | 2 | `~/.ctlhq/first-push.toml` | `github_owner`, the only GitHub account that `ctlhq-push` and `ctlhq-first-push` accept | you, by hand |
 | 3 | `.git/hooks/pre-push` in one repository | a hook that runs `ctlhq-first-push` before each push; an existing hook is kept as `pre-push.before-first-push` and still runs first | `ctlhq-first-push hook install` |
 | 4 | `.local/catalog/` in your clone | the catalog of skills, agents, and tools | `ctlhq-catalog build` or `ctlhq-catalog open` |
-| 5 | `skills/ctlhq-mode/scripts/node_modules/` in your clone | the packages of `ctlhq-orch` and `ctlhq-watch-pr` | `bun install`, on their first run |
+| 5 | `skills/ctlhq-mode/scripts/node_modules/` in your clone | the packages of `ctlhq-watch-pr` | `bun install`, on its first run |
 
 Suggested, never applied for you:
 
@@ -180,7 +180,7 @@ Read by tools:
 
 Network use:
 
-1. `ctlhq-orch` and `ctlhq-watch-pr` download their packages with `bun install` on first run. `bin/ctlhq-test` does the same once when bun is installed and the packages are missing.
+1. `ctlhq-watch-pr` downloads its packages with `bun install` on first run. `bin/ctlhq-test` does the same once when bun is installed and the packages are missing.
 2. `ctlhq-watch-pr`, `ctlhq-worktree-audit`, and the pull-request playbooks call GitHub through `gh`. `ctlhq-worktree-audit` also runs `git fetch origin` for an `origin/` base branch, the default, unless you pass `--no-fetch`.
 3. `ctlhq-push` pushes to GitHub, and only to repositories of the owner in `~/.ctlhq/first-push.toml`.
 4. `ctlhq-dep-age` asks the npm, PyPI, Go, and crates.io registries for release dates.

@@ -15,7 +15,7 @@ fails its check); warn (the branch row only, off the default branch). A missing 
 other than a separate tool prints its one-line install command and the ctlhq tools that
 need it. node is needed by ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, and the
 ctlhq-plan-lint and stand-ins tests (the stand-ins test imports .ts files, which node runs
-from 22.18 on); bun by ctlhq-watch-pr and ctlhq-orch; gh by ctlhq-watch-pr, ctlhq-worktree-audit (PR state),
+from 22.18 on); bun by ctlhq-watch-pr; gh by ctlhq-watch-pr, ctlhq-worktree-audit (PR state),
 and the PR playbooks; rg and jq by ctlhq-worktree-audit; Google Chrome by ctlhq-browser,
 ctlhq-icon-sheet, and their tests. Chrome is looked up where ctlhq-browser looks: the
 environment variable CTLHQ_CHROME, else the macOS app path.
@@ -68,10 +68,10 @@ INSTALL = {
 }
 NEEDED_BY = {
     "python3": "every Python tool in bin/ (ctlhq-models, ctlhq-skills, ctlhq-unslop, ctlhq-playbook, ...) and ctlhq-worktree-audit",
-    "bash": "the bin/ wrappers (ctlhq-plan-lint, ctlhq-worktree-audit, ctlhq-watch-pr, ctlhq-orch) and tests/*/run.sh",
+    "bash": "the bin/ wrappers (ctlhq-plan-lint, ctlhq-worktree-audit, ctlhq-watch-pr) and tests/*/run.sh",
     "git": "ctlhq-worktree-audit, ctlhq-no-comments --diff, every playbook that commits",
     "node": "ctlhq-plan-lint, ctlhq-browser, ctlhq-icon-sheet, the ctlhq-plan-lint and stand-ins tests",
-    "bun": "ctlhq-watch-pr, ctlhq-orch, and the TypeScript unit tests (the bun-tests row of ctlhq-test)",
+    "bun": "ctlhq-watch-pr and the TypeScript unit tests (the bun-tests row of ctlhq-test)",
     "gh": "ctlhq-watch-pr, ctlhq-worktree-audit (PR state), the PR playbooks (opening-a-pr, babysit, shipping, autopilot)",
     "rg": "ctlhq-worktree-audit",
     "jq": "ctlhq-worktree-audit",

@@ -69,9 +69,9 @@ expect_eq "2 alpha:0 liar:3" "$(printf '%s' "$json" | python3 -I -c 'import json
 # locked install when node_modules/ is missing there. Without bun it is skipped and does not fail.
 # A fake bun logs its folder and arguments, and fails the command named in FAKE_BUN_FAIL.
 bunroot="$tmp/bunrepo"
-mkdir -p "$bunroot/tests" "$bunroot/skills/ctlhq-mode/scripts/orch"
+mkdir -p "$bunroot/tests" "$bunroot/skills/ctlhq-mode/scripts/watch-pr"
 cp -R "$tmp/repo/tests/alpha" "$bunroot/tests/"
-: >"$bunroot/skills/ctlhq-mode/scripts/orch/orch.test.ts"
+: >"$bunroot/skills/ctlhq-mode/scripts/watch-pr/sample.test.ts"
 scripts_dir="$(cd "$bunroot/skills/ctlhq-mode/scripts" && pwd -P)"
 fakebun="$tmp/fakebun"
 mkdir -p "$fakebun"
