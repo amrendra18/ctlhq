@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# tests/ctlhq-message-check/run.sh: checks bin/ctlhq-message-check on the test inputs in fixtures/
-# and on scratch git repositories. Prints "N checks passed" and exits 1 when any check fails.
-# Writes only to a temp folder, with HOME inside it, so no real word list is read.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -30,7 +27,6 @@ newrepo() {
 }
 commit() { git -C "$1" commit -q --allow-empty -m "$2"; }
 
-# 1. Help and usage.
 out="$("$mc" --help 2>&1)"; expect_rc 0 $? "--help exits 0"
 expect_grep '^ctlhq-message-check: ' "$(printf '%s\n' "$out" | head -1)" "--help first line is 'ctlhq-message-check: ...'"
 expect_grep 'reword' "$out" "--help names the first way out"
@@ -46,10 +42,8 @@ expect_grep 'own list line' "$out" "--help says a longer word needs its own list
 "$mc" --branch x --history >/dev/null 2>&1; expect_rc 2 $? "--branch with --history exits 2"
 "$mc" --history --root "$tmp" >/dev/null 2>&1; expect_rc 2 $? "--history outside a repository exits 2"
 
-# 2. The test inputs: each one gives exactly its listed rules.
 flagged=0; clean=0
 while IFS=$'\t' read -r name want; do
-  case "$name" in \#*) continue ;; esac
   out="$("$mc" "$fixtures/$name")"; rc=$?
   if [ "$want" = "-" ]; then
     clean=$((clean + 1)); expect_rc 0 "$rc" "$name exits 0"; expect_eq "" "$out" "$name prints nothing"
@@ -63,7 +57,6 @@ expect_eq 3 "$clean" "3 clean inputs ran"
 expect_eq 15 "$(for f in "$fixtures"/flagged-*.txt; do cksum < "$f"; done | sort -u | wc -l | tr -d ' ')" "the 15 flagged inputs are all different"
 expect_eq "approval,label,path,review" "$(rules_of "$("$mc" "$fixtures/bad-example.txt")")" "the bad example gives all four rules"
 
-# 3. Each pattern, one line each, so none can go dead behind another.
 while IFS=$'\t' read -r want line; do
   expect_eq "$want" "$(rules_of "$(printf '%s\n' "$line" | "$mc")")" "'$line' gives $want"
 done <<'TABLE'
@@ -114,14 +107,18 @@ around 5 seconds
 the commit-review skill
 the .local/print folder
 an April review of the sprint
+docs(pr-review): say what it reads
+docs(commit-review): name the message file
+fix(pr-review): name the title and body
+the pr-review skill reads the body
+the commit-review skill reads the message file
 TABLE
+expect_eq review "$(rules_of "$(printf 'Pull-request reviews A and B\n' | "$mc")")" "prose about a review still gives review"
 
-# 3a. A rule does not reach across a blank line.
 for text in 'Fix the commit\n\nReview the plan before a push.\n' 'Fix how we round\n\n2 tests now run.\n' 'Fix the commit\r\n\r\nReview it.\n' 'Fix the commit\n  \n  review it.\n'; do
   printf "$text" | "$mc" >/dev/null; expect_rc 0 $? "'$text' exits 0"
 done
 
-# 3b. A note is found across a line break or any white space, and reports its first line.
 wrapped() { out="$(printf "$2" | "$mc")"; expect_rc 1 $? "'$2' exits 1"; expect_eq "$1" "$(rules_of "$out")" "'$2' gives $1"; }
 wrapped approval 'This commit waits for\n  their yes before any push.\n'
 wrapped approval 'The operator\napproved it.\n'
@@ -143,7 +140,6 @@ out="$(printf 'plain\nThis waits for\n  their yes.\nplain\nCommit review: ok\n' 
 expect_eq "line 2: approval: This waits for" "$(printf '%s\n' "$out" | sed -n 1p)" "a wrapped note reports its first line"
 expect_eq "line 5: review: Commit review: ok" "$(printf '%s\n' "$out" | sed -n 2p)" "a later finding keeps its line number"
 
-# 4. Output: the line, the rule, the text, then one fix line that names the home.
 printf 'ok line\nCommit review: accept\n' > "$tmp/m.txt"
 out="$("$mc" "$tmp/m.txt")"; expect_rc 1 $? "a flagged FILE exits 1"
 expect_eq "line 2: review: Commit review: accept" "$(printf '%s\n' "$out" | head -1)" "a finding prints 'line N: rule: text'"
@@ -158,17 +154,15 @@ out="$(printf 'round 2 \033[2Jhidden\n' | "$mc")"
 if printf '%s' "$out" | LC_ALL=C grep -q "$(printf '\033')"; then bad "a control byte reaches the terminal"; else ok; fi
 expect_grep 'round 2 \?\[2Jhidden' "$out" "a control byte prints as ?"
 
-# 5. --branch.
-for b in m2-safety m1 M4-adoption milestone-3-x milestone2 m0-round-trip; do
+for b in m2-safety m1 M4-adoption milestone-3-x milestone2 m0-round-trip internal-notes-m0 notes-M12 notes-milestone-2 notes-milestone2 fix/m3; do
   out="$("$mc" --branch "$b")"; expect_rc 1 $? "--branch $b exits 1"
   expect_grep "^branch: $b\$" "$out" "--branch $b names the branch"
   expect_grep '^fix: ' "$out" "--branch $b has a fix line"
 done
-for b in ci-gate main m1x-core audit-fixes-next-train team-m2-safety; do
+for b in ci-gate main m1x-core audit-fixes-next-train team-m2-safety notes-m1x notes-m notes-am2 notes-milestone; do
   "$mc" --branch "$b" >/dev/null; expect_rc 0 $? "--branch $b exits 0"
 done
 
-# 6. --history counts every commit, merge commits included.
 newrepo h
 commit "$tmp/h" "first clean commit"
 commit "$tmp/h" "$(printf 'second\n\nCommit review: accept\n.local/reviews/a.md\n')"
@@ -185,11 +179,22 @@ expect_grep "^${second:0:12}: line 3: review; line 4: path$" "$out" "--history p
 expect_eq 3 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "two commit lines and the count"
 git -C "$tmp/h" config log.showSignature true
 expect_eq "flagged: 2 of 4" "$("$mc" --history --root "$tmp/h" 2>/dev/null | tail -1)" "log.showSignature does not change the count"
+git -C "$tmp/h" checkout -q -b unmerged
+commit "$tmp/h" "unmerged: commit review"
+unmerged="$(git -C "$tmp/h" rev-parse HEAD)"
+git -C "$tmp/h" checkout -q --detach main
+commit "$tmp/h" "tagged: commit review"
+tagged="$(git -C "$tmp/h" rev-parse HEAD)"
+git -C "$tmp/h" tag v1
+git -C "$tmp/h" checkout -q main
+out="$("$mc" --history --root "$tmp/h")"; expect_rc 1 $? "--history with a tag and an unmerged branch exits 1"
+expect_eq "flagged: 4 of 6" "$(printf '%s\n' "$out" | tail -1)" "--history counts a tag and an unmerged branch"
+expect_grep "^${unmerged:0:12}: line 1: review$" "$out" "--history reads an unmerged branch"
+expect_grep "^${tagged:0:12}: line 1: review$" "$out" "--history reads a commit only a tag reaches"
 newrepo clean; commit "$tmp/clean" "one clean commit"
 out="$("$mc" --history --root "$tmp/clean")"; expect_rc 0 $? "--history with no flagged commit exits 0"
 expect_eq "flagged: 0 of 1" "$out" "--history prints the count alone"
 
-# 7. --new-only reads only commits no remote-tracking ref reaches.
 newrepo n
 git init -q --bare "$tmp/n.git"
 git -C "$tmp/n" remote add origin "$tmp/n.git"
@@ -203,7 +208,6 @@ out="$("$mc" --history --new-only --root "$tmp/n")"; expect_rc 1 $? "--history -
 expect_eq "flagged: 1 of 2" "$(printf '%s\n' "$out" | tail -1)" "--history --new-only counts two new commits"
 expect_eq "flagged: 2 of 3" "$("$mc" --history --root "$tmp/n" | tail -1)" "--history alone counts all three"
 
-# 8. Word lists. The word itself never appears in the output.
 printf '\n   \n# a comment line\n' > "$HOME/.ctlhq/message-words.txt"
 out="$(printf 'a plain line\n\n' | "$mc")"; expect_rc 0 $? "empty lines and a comment in a list flag nothing"
 expect_eq "" "$out" "a list of empty lines prints nothing"

@@ -29,7 +29,7 @@ it starts.
   review      audit round, round 2, reviews A and B, commit review, commit-review: accept, blind
               review, pull-request review, PR review
   label       milestone 2, M2 (a capital M, so a lowercase m2 stays clean)
-  branch      a branch name that starts with m2- or milestone-2-
+  branch      a branch name that starts with m2- or milestone-2-, or ends with -m2 or -milestone-2
   extra-word  a word from ~/.ctlhq/message-words.txt or .local/message-words.txt (in a linked
               worktree, also the main worktree's). One word or phrase per line, matched in any
               case. A word ends at anything but a letter, so zebrafinch finds zebrafinch_worker
@@ -63,6 +63,7 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
+from typing import NamedTuple
 
 RULES = [
     ("path", [r"\.local/(reviews|briefs|verify|plans|msg|commit|pr-)"]),
@@ -75,7 +76,8 @@ RULES = [
 ]
 GAP = r"(?=\s)[^\S\n]*\n?[^\S\n]*"
 COMPILED = [(name, [re.compile(p.replace(" ", GAP)) for p in patterns]) for name, patterns in RULES]
-BRANCH_RE = re.compile(r"(?i)^(m[0-9]+|milestone-?[0-9]+)(-|$)")
+BRANCH_LABEL = r"(m[0-9]+|milestone-?[0-9]+)"
+BRANCH_RE = re.compile(rf"(?i)^{BRANCH_LABEL}(-|$)|[-/]{BRANCH_LABEL}$")
 EXTRA = "extra-word"
 RANK = {name: rank for rank, name in enumerate([EXTRA] + [name for name, _ in RULES])}
 HOMES = {
@@ -93,6 +95,17 @@ class CannotRun(Exception):
     pass
 
 
+class Starred(NamedTuple):
+    text: str
+    word_starts: list[int]
+
+
+class Finding(NamedTuple):
+    line: int
+    rule: str
+    starred_line: str
+
+
 def nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
@@ -101,22 +114,26 @@ def git(root: Path, args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root)] + args, capture_output=True)
 
 
+def main_worktree(root: Path) -> Path | None:
+    common = git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if common.returncode != 0:
+        return None
+    path = Path(common.stdout.decode().strip())
+    return path.parent if path.name == ".git" else None
+
+
 def project_folders(root: Path) -> list[Path]:
-    """The folders whose .local/ may hold a list: the work tree, and in a linked worktree the main one."""
     top = git(root, ["rev-parse", "--show-toplevel"])
     if top.returncode != 0:
         return []
     folders = [Path(top.stdout.decode().strip())]
-    common = git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
-    if common.returncode == 0:
-        path = Path(common.stdout.decode().strip())
-        if path.name == ".git" and path.parent not in folders:
-            folders.append(path.parent)
+    main = main_worktree(root)
+    if main is not None and main not in folders:
+        folders.append(main)
     return folders
 
 
-def list_exists(path: Path) -> bool:
-    """False only when the list or a folder above it is absent. Anything else that hides it stops the check."""
+def list_exists_or_raise(path: Path) -> bool:
     try:
         os.lstat(path)
     except FileNotFoundError:
@@ -132,7 +149,7 @@ def list_exists(path: Path) -> bool:
 def read_words(root: Path) -> list[re.Pattern]:
     words: list[re.Pattern] = []
     for path in [Path.home() / USER_LIST] + [f / PROJECT_LIST for f in project_folders(root)]:
-        if not list_exists(path):
+        if not list_exists_or_raise(path):
             continue
         try:
             text = path.read_bytes().decode("utf-8-sig")
@@ -145,8 +162,7 @@ def read_words(root: Path) -> list[re.Pattern]:
     return words
 
 
-def star_words(text: str, words: list[re.Pattern]) -> tuple[str, list[int]]:
-    """The text with each listed word as stars, line breaks kept, and where each word starts."""
+def star_words(text: str, words: list[re.Pattern]) -> Starred:
     chars = list(text)
     starts = []
     for word in words:
@@ -155,24 +171,23 @@ def star_words(text: str, words: list[re.Pattern]) -> tuple[str, list[int]]:
             for i in range(*match.span()):
                 if chars[i] != "\n":
                     chars[i] = "*"
-    return "".join(chars), starts
+    return Starred("".join(chars), starts)
 
 
 def printable(text: str) -> str:
     return "".join(c if c.isprintable() else "?" for c in text.strip())
 
 
-def findings(message: str, words: list[re.Pattern]) -> list[tuple[int, str, str]]:
-    """(line number, rule, line text with listed words as stars), sorted by line."""
+def findings(message: str, words: list[re.Pattern]) -> list[Finding]:
     message = nfc(message)
-    starred, starts = star_words(message, words)
+    starred = star_words(message, words)
     line_of = lambda position: message.count("\n", 0, position) + 1
-    found = {(line_of(start), EXTRA) for start in starts}
+    found = {(line_of(start), EXTRA) for start in starred.word_starts}
     for rule, patterns in COMPILED:
         for pattern in patterns:
             found.update((line_of(m.start()), rule) for m in pattern.finditer(message))
-    lines = starred.split("\n")
-    return [(number, rule, printable(lines[number - 1]))
+    lines = starred.text.split("\n")
+    return [Finding(number, rule, printable(lines[number - 1]))
             for number, rule in sorted(found, key=lambda hit: (hit[0], RANK[hit[1]]))]
 
 
@@ -183,11 +198,11 @@ def fix_line(rules: set[str]) -> str:
 
 def check_text(message: str, words: list[re.Pattern]) -> int:
     found = findings(message, words)
-    for number, rule, text in found:
-        print(f"line {number}: {rule}: {text}")
+    for finding in found:
+        print(f"line {finding.line}: {finding.rule}: {finding.starred_line}")
     if not found:
         return 0
-    print(fix_line({rule for _, rule, _ in found}))
+    print(fix_line({finding.rule for finding in found}))
     return 1
 
 
@@ -203,16 +218,16 @@ def check_history(root: Path, new_only: bool, words: list[re.Pattern]) -> int:
         found = findings(message, words)
         if found:
             flagged += 1
-            print(f"{sha[:12]}: " + "; ".join(f"line {number}: {rule}" for number, rule, _ in found))
+            print(f"{sha[:12]}: " + "; ".join(f"line {finding.line}: {finding.rule}" for finding in found))
     print(f"flagged: {flagged} of {len(commits)}")
     return 1 if flagged else 0
 
 
 def check_branch(name: str, words: list[re.Pattern]) -> int:
-    starred, starts = star_words(nfc(name), words)
-    if not starts and not BRANCH_RE.search(name):
+    starred = star_words(nfc(name), words)
+    if not starred.word_starts and not BRANCH_RE.search(name):
         return 0
-    print(f"branch: {printable(starred)}")
+    print(f"branch: {printable(starred.text)}")
     print("fix: rename the branch for what it changes. GitHub copies the name into the merge commit, milestones go in "
           "PLAN.md section 7, and a listed word stays out of the name.")
     return 1

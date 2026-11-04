@@ -354,8 +354,7 @@ class Index:
             print(f"ctlhq-commit: the index still holds the named paths staged; restoring it failed: {e}", file=sys.stderr)
 
 
-def refuse_message(message: str, root: Path) -> bool:
-    """Runs the message check. True when it refused, or did not run, after printing why."""
+def message_refused(message: str, root: Path) -> bool:
     try:
         r = subprocess.run([str(MESSAGE_CHECK), "--root", str(root)], input=message, capture_output=True,
                            encoding="utf-8", errors="surrogateescape")
@@ -369,7 +368,7 @@ def refuse_message(message: str, root: Path) -> bool:
         print("why: a commit message outlives the commit, and a reader has only the repository.", file=sys.stderr)
         sys.stderr.write(out)
         return True
-    print(f"ctlhq-commit: the message check did not run (exit {code}): {err}; refusing to commit", file=sys.stderr)
+    print(f"ctlhq-commit: the message check did not run (exit {code}): {err or 'it printed no reason'}; refusing to commit", file=sys.stderr)
     print("why: a message nobody checked could carry internal notes into history.", file=sys.stderr)
     print("fix: clear the cause above: repair a broken word list, or ctlhq-message-check next to this tool. "
           "`ctlhq-message-check --help` lists the ways out.", file=sys.stderr)
@@ -566,7 +565,7 @@ def main(argv: list[str]) -> int:
         print(f"review: {review_shown}")
 
     # 3. message file
-    if refuse_message(message, root):
+    if message_refused(message, root):
         return 6
     commit_dir = root / ".local" / "commit"
     commit_dir.mkdir(parents=True, exist_ok=True)

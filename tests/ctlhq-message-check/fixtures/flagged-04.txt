@@ -1,2 +1,2 @@
-The operator prefers CrewTalk as the product's name in sentences.
+The operator prefers TitleCase as the product's name in sentences.
 - Commit review accepted, with one low defect, now fixed.

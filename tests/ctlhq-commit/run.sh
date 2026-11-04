@@ -536,7 +536,7 @@ printf 'a3\n' > a.txt; "$fc" "${four[@]}" -- a.txt >/dev/null 2>&1
 expect_eq "None" "$(review_of "$(git rev-parse HEAD)")" "R3: without --review the receipt's review is null"
 expect_grep '\[--review FILE\]' "$("$fc" --help)" "R4: --help lists --review"
 
-# M. The message check: a flagged message is refused before anything is staged, and the check fails closed.
+# 29. The message check: a flagged message is refused before anything is staged, and the check fails closed.
 msgs="$root/tests/ctlhq-message-check/fixtures"
 fresh msg; printf 'a2\n' > a.txt; printf 'b2\n' > b.txt; git add b.txt; h="$(git rev-parse HEAD)"; i="$(index_sum)"; before="$(ls .local/commit 2>/dev/null | wc -l)"
 err="$("$fc" --message-file "$msgs/bad-example.txt" -- a.txt b.txt 2>&1)"; expect_rc 6 $? "M1: a flagged message file exits 6"
@@ -552,9 +552,10 @@ err="$("$fc" --subject "Add a.txt" --why "Commit review: accept." --changes c --
 expect_grep '^line 4: review: ' "$err" "M2: the refusal numbers the built message's lines"
 expect_eq "" "$(git diff --cached --name-only)" "M2: nothing is staged"
 printf 'a3\n' > a.txt
-out="$("$fc" --message-file "$msgs/clean-good-example.txt" --review "$msgs/rules.tsv" -- a.txt 2>&1)"; expect_rc 0 $? "M3: the good example commits"
+mkdir -p .local/reviews; printf 'accept\n' > .local/reviews/msg.md
+out="$("$fc" --message-file "$msgs/clean-good-example.txt" --review .local/reviews/msg.md -- a.txt 2>&1)"; expect_rc 0 $? "M3: the good example commits"
 expect_grep '^committed ' "$out" "M3: the commit exists"
-expect_eq "$msgs/rules.tsv" "$(review_of "$(git rev-parse HEAD)")" "M3: the receipt holds the review path"
+expect_eq ".local/reviews/msg.md" "$(review_of "$(git rev-parse HEAD)")" "M3: the receipt holds the review path"
 printf 'a3b\n' > a.txt; mkdir -p "$HOME/.ctlhq"; printf 'Zebrafinch\n' > "$HOME/.ctlhq/message-words.txt"
 err="$("$fc" --subject "the zebrafinch change" --why w --changes c --test-plan t --risks r -- a.txt 2>&1)"; expect_rc 6 $? "M3b: a word from the list exits 6"
 expect_grep '^line 1: extra-word: the \*+ change$' "$err" "M3b: the refusal names the line, with the word starred out"
@@ -580,6 +581,7 @@ done
 stub "sys.exit(1)"
 err="$("$checkout/ctlhq-commit" --message-file "$msgs/clean-good-example.txt" -- a.txt 2>&1)"; expect_rc 6 $? "M6: a check that exits 1 with no finding gives exit 6"
 expect_grep 'check did not run' "$err" "M6: exit 1 with no finding: the line says the check did not run"
+expect_grep 'did not run \(exit 1\): it printed no reason; refusing' "$err" "M6: the line says the check gave no reason"
 printf '#!/usr/bin/env python3\nthis is not python\n' > "$checkout/ctlhq-message-check"
 err="$("$checkout/ctlhq-commit" --message-file "$msgs/clean-good-example.txt" -- a.txt 2>&1)"; expect_rc 6 $? "M7: a check with a syntax error gives exit 6"
 expect_grep 'check did not run' "$err" "M7: a syntax error: the line says the check did not run"
