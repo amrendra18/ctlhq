@@ -668,28 +668,23 @@ export function orderStack(
   open: readonly T.OpenPullRequest[]
 ): T.NonEmpty<T.PrContext> {
   const byNumber = new Map(open.map((pr) => [pr.number, pr]));
-  const byHead = new Map(
-    open.filter((pr) => !pr.isCrossRepository).map((pr) => [pr.headRefName, pr])
-  );
+  const sameRepository = open.filter((pr) => !pr.isCrossRepository);
+  const byHead = new Map(sameRepository.map((pr) => [pr.headRefName, pr]));
   const children = new Map<string, T.OpenPullRequest[]>();
-  for (const pr of open)
+  for (const pr of sameRepository)
     children.set(pr.baseRefName, [...(children.get(pr.baseRefName) ?? []), pr]);
   for (const values of children.values())
     values.sort((a, b) => a.number - b.number);
   const start = byNumber.get(context.number);
   if (start === undefined) return [context];
+  const seen = new Set<T.PrNumber>([start.number]);
   const down: T.OpenPullRequest[] = [];
-  let current = start;
-  while (byHead.has(current.baseRefName)) {
-    const parent = byHead.get(current.baseRefName);
-    if (parent === undefined) break;
-    down.push(parent);
-    current = parent;
+  let below = byHead.get(start.baseRefName);
+  while (below !== undefined && !seen.has(below.number)) {
+    seen.add(below.number);
+    down.push(below);
+    below = byHead.get(below.baseRefName);
   }
-  const seen = new Set<T.PrNumber>([
-    ...down.map((pr) => pr.number),
-    start.number,
-  ]);
   const up: T.OpenPullRequest[] = [];
   const visit = (parent: T.OpenPullRequest): void => {
     if (parent.isCrossRepository) return;

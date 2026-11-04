@@ -27,6 +27,15 @@ const context = {
   number: parsePrNumber(42),
 };
 
+function orderStackInChild(open: readonly object[]): number[] {
+  const program = `import { orderStack } from ${JSON.stringify(import.meta.dir + "/github.ts")};
+    console.log(JSON.stringify(orderStack(${JSON.stringify(context)}, ${JSON.stringify(open)})));`;
+  const child = spawnSync(process.execPath, ["-e", program], { encoding: "utf8", timeout: 2000 });
+  expect(child.error).toBeUndefined();
+  expect(child.status).toBe(0);
+  return JSON.parse(child.stdout).map((item: { number: number }) => item.number);
+}
+
 describe("checks fallback chain", () => {
   it("uses a non-empty fast-path result without a rollup query", async () => {
     const reader = fakeReader({
@@ -497,15 +506,39 @@ describe("context and stack discovery", () => {
     expect(ordered.map((item) => Number(item.number))).toEqual([42]);
   });
 
+  it("leaves out a fork based on a stack branch", () => {
+    const ordered = orderStack(context, [
+      { number: context.number, headRefName: "feature", baseRefName: "main", isCrossRepository: false },
+      { number: parsePrNumber(77), headRefName: "patch-1", baseRefName: "feature", isCrossRepository: true },
+    ]);
+    expect(ordered.map((item) => Number(item.number))).toEqual([42]);
+  });
+
   it("terminates when an unrelated fork opens main against main", () => {
-    const program = `import { orderStack } from ${JSON.stringify(import.meta.dir + "/github.ts")};
-      console.log(JSON.stringify(orderStack(${JSON.stringify(context)}, [
+    expect(
+      orderStackInChild([
         { number: 41, headRefName: "main", baseRefName: "main", isCrossRepository: true },
-        { number: 42, headRefName: "feature", baseRefName: "main", isCrossRepository: false }
-      ])));`;
-    const child = spawnSync(process.execPath, ["-e", program], { encoding: "utf8", timeout: 2000 });
-    expect(child.error).toBeUndefined();
-    expect(child.status).toBe(0);
-    expect(JSON.parse(child.stdout).map((item: { number: number }) => item.number)).toEqual([42]);
+        { number: 42, headRefName: "feature", baseRefName: "main", isCrossRepository: false },
+      ])
+    ).toEqual([42]);
+  });
+
+  it("terminates when two pull requests target each other", () => {
+    expect(
+      orderStackInChild([
+        { number: 42, headRefName: "x", baseRefName: "y", isCrossRepository: false },
+        { number: 43, headRefName: "y", baseRefName: "x", isCrossRepository: false },
+      ])
+    ).toEqual([43, 42]);
+  });
+
+  it("terminates when two pull requests below the start target each other", () => {
+    expect(
+      orderStackInChild([
+        { number: 41, headRefName: "x", baseRefName: "y", isCrossRepository: false },
+        { number: 42, headRefName: "feature", baseRefName: "x", isCrossRepository: false },
+        { number: 43, headRefName: "y", baseRefName: "x", isCrossRepository: false },
+      ])
+    ).toEqual([43, 41, 42]);
   });
 });

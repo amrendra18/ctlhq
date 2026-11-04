@@ -39,16 +39,16 @@
 
 | # | Source | What the agent learns from it | Mapped to |
 | --- | --- | --- | --- |
-| C1 | <A file, folder or note store> | <What the agent must know from it> | <`command`, skill: name, not needed, or missing: what would wire it> |
+| C1 | <A file, folder or note store> | <What the agent must know from it> | <`command`, skill: name, or missing: what would wire it> |
 
 ### Exit checks
 
 | # | Check | Checklist items it proves | Mapped to |
 | --- | --- | --- | --- |
-| X1 | <What is checked> | <REQ-01, TEST-01> | <`command`, skill: name, not needed, or missing: what would wire it> |
+| X1 | <What is checked> | <REQ-01, TEST-01> | <`command`, skill: name, or missing: what would wire it> |
 
 ### Trigger
 
 | # | How the run starts | What starts it | Mapped to |
 | --- | --- | --- | --- |
-| T1 | <operator, schedule, or event> | <Who or what starts the run. For an event, the filter it must match> | <`command`, skill: name, not needed for an operator-started run, or missing: what would wire it> |
+| T1 | <operator, schedule, or event> | <Who or what starts the run. For a schedule, its interval. For an event, the filter it must match> | <`command`, skill: name, not needed for an operator-started run, or missing: what would wire it> |

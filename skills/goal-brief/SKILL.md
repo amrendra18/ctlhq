@@ -41,7 +41,7 @@ The pre-flight audit answers one question before the run starts: what does the a
 1. External systems: everything outside the repository the run touches, such as package registries, remote Git hosts, browsers, devices, deploy targets, other local services and the operator. If there is none, write one row with System `None found` and Mapped to `not needed`.
 2. Context sources: every document, folder or note store the agent must know, each reachable by one command or skill. Include the operator's notes outside the repository when they matter.
 3. Exit checks: every check that proves a checklist item, with the items it proves. Every `REQ` and `TEST` item appears in at least one exit check row.
-4. Trigger: one row for how the run starts (the operator, a schedule, or an event). For an event, name the filter an event must match before the run spends anything.
+4. Trigger: one row for how the run starts (the operator, a schedule, or an event). For a schedule, name its interval. For an event, name the filter an event must match before the run spends anything.
 5. The "Mapped to" cell holds exactly one of these:
    1. a CLI command in backticks, such as `npm test`. It counts only when `command -v` finds the tool and the repository defines or documents the command.
    2. `skill: <name>`. It counts only when that skill folder exists in this harness's skills folder (`~/.claude/skills` or `~/.codex/skills`).

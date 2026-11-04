@@ -148,6 +148,8 @@ else
 	echo "repository: $(printf '%s\n' "$out" | tail -1)"
 fi
 
+expect_grep 'throwaway home folder, with no push, no write to the real home folder, and no call to a paid or external service' "$(grep '^> Break this change' "$root/skills/interrogate/SKILL.md")" "the /interrogate adversary brief limits what its runs may touch"
+
 if [ "$fail" -gt 0 ]; then
 	echo "$fail checks failed, $pass checks passed"
 	exit 1
