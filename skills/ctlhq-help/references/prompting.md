@@ -93,7 +93,7 @@ Until then, the user runs it while watching. The overnight prompt holds these pa
 - Trusting an unvetted number. A warm cache or a skipped code path can fake a speedup. Run `/benchmark-checklist` first.
 - Correcting the same mistake by hand. A chat correction helps one run. `/mistake-proof` fixes the repository so no later run repeats it.
 - Using `/best-of-n` for coverage. `/best-of-n` repeats one brief and grafts the best parts. `/swarm` splits slices or race arms and returns one report.
-- Accepting every review comment. Bots and people file real catches and noise in one list. `/interrogate` sorts findings into act-on and dismissed, with reasons.
+- Accepting every review comment. Bots and people file real catches and noise in one list. `/interrogate` keeps only findings a rerun proves, and lists the dropped ones with reasons.
 - Treating `auto` as a model name. `auto` and `inherit-parent` both mean the subagent runs on the parent chat's model.
 - Reporting success from a green build. A build proves it compiles. Ask for the real command, flow, stored value, or profile.
 - Writing a `SKILL.md` freehand. Use the Authoring or modifying a skill playbook, so validation and review happen.
