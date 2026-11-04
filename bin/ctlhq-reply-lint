@@ -46,6 +46,21 @@ Failures (exit 1), each with the rule it encodes from home/AGENTS.md:
                  commit hash, or test name on the line. Elsewhere a warning. A word after not, no,
                  nothing, never, or none in its own clause is no claim. 'Never write "fixed",
                  "done", or "succeeds" without the state and the evidence.'
+  question-elsewhere  a sentence that tells the operator to answer ("you answer", "please answer",
+                 "can you answer", "the operator answers", "you decide", "you approve") and names another message ("from my last message", "my earlier
+                 question", "from earlier"), or names "questions above" in a reply with no other
+                 question mark, question or decision word, or pasted list. Also "as asked above" inside a question, and a sentence with no
+                 question mark that calls a question or decision open "from my last message" or
+                 "from my earlier reply", unless it says no, not, none, never, or closed. A report
+                 such as "questions 1 to 3 are still open" stays free. Text in backticks, double
+                 quotes, or a Markdown quotation is skipped. "A reply needing the operator pastes
+                 ctlhq-asks list."
+
+A list pasted from ctlhq-asks, from its "Open questions: N" line to its "End of open questions."
+line, is left out of every rule above and of the word count, so a stored question cannot block
+a reply. A code block inside it still counts for operator-command, and --approval accepts its
+fixed names. Text outside those two lines
+is checked as usual.
 
 Warnings (printed, exit unaffected):
   sentence-length  a sentence over 25 words. "At most 20 words for an instruction, 25 for an explanation."
@@ -128,6 +143,7 @@ HERE = Path(__file__).resolve().parent
 UNSLOP = HERE / "ctlhq-unslop"
 STATUS = HERE / "ctlhq-status"
 TRANSCRIPTS = HERE / "ctlhq-transcripts"
+ASKS = HERE / "ctlhq-asks"
 TURN_RULES = ("next-step-open", "repeat-reply")
 NEW_WORDS_MIN = 10
 FACT_TOKEN = re.compile(r"`[^`\n]+`|\S*\d\S*|\S+/\S+")
@@ -188,6 +204,33 @@ APPROVAL_ID = re.compile(
     r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"  # a UUID
     r"|\b[A-Za-z]+[_-](?=[A-Za-z0-9]*\d)[A-Za-z0-9]+\b",  # an id such as scope_3 or apr-7f3k
     re.IGNORECASE)
+ASKED = r"(?:questions?|decisions?)"
+NUMBERS = r"\d{1,9}(?:(?:\s+(?:to|and)\s+|\s*,\s*(?:and\s+)?)\d{1,9})*"
+COUNT = r"(?:\d{1,9}|two|three|four|five|six|seven|eight)"
+PAST = r"(?:last|earlier|previous|prior)"
+PAST_REPLY = rf"my\s+(?:{PAST}\s+(?:{COUNT}\s+)?(?:messages?|repl(?:y|ies)|summar(?:y|ies))|messages?\s+above)"
+NOT_A_CONDITION = "".join(rf"(?<!\b{word}\s)(?<!\b{word}\sthe\s)" for word in ("if", "when", "once", "after"))
+UP_TO_VERB = r"(?:(?!\b(?:not|never)\b)[^.?!]){0,80}?(?<!\bto\s)(?<!\bthe\s)(?<!\ban\s)(?<!\blast\s)(?<!\bearlier\s)(?<!\bprevious\s)(?<!\bprior\s)"
+OPERATOR_TURN = re.compile(
+    rf"{NOT_A_CONDITION}\b(?:you|please)\b{UP_TO_VERB}\b(?:answer|confirm|reply|decide|approve)\b"
+    rf"|{NOT_A_CONDITION}\boperator\b(?!'s){UP_TO_VERB}\b(?:answers|confirms|replies|decides|approves)\b"
+    r"|^\W*(?:next step:\s*)?(?:answer|confirm|reply)\b(?!\s*:|\s+(?:to|for|on)\b)",
+    re.IGNORECASE)
+ELSEWHERE = re.compile(
+    rf"\b(?:from|in)\s+{PAST_REPLY}\b"
+    rf"|\b{ASKED}(?:\s+{NUMBERS})?\s+from\s+(?:earlier|before)\b"
+    rf"|\bmy\s+{PAST}\s+(?:{COUNT}\s+)?{ASKED}\b",
+    re.IGNORECASE)
+AS_ASKED = re.compile(rf"\bas\s+(?:I\s+)?asked\s+(?:you\s+)?(?:above|earlier|before|previously|in\s+{PAST_REPLY})", re.IGNORECASE)
+ASK_ABOVE = re.compile(rf"\b{ASKED}(?:\s+{NUMBERS})?\s+above\b", re.IGNORECASE)
+OPEN_WORD = re.compile(r"\bopen\b(?!-)", re.IGNORECASE)
+ASK_WORD = re.compile(rf"\b{ASKED}\b", re.IGNORECASE)
+FROM_PAST_MESSAGE = re.compile(rf"\bfrom\s+my\s+(?:last|earlier|previous)\s+(?:{COUNT}\s+)?(?:messages?|repl(?:y|ies))\b", re.IGNORECASE)
+NOT_OPEN = re.compile(r"\b(?:no|not|none|never|closed)\b", re.IGNORECASE)
+QUOTED = re.compile(r'"[^"\n]*"|“[^”\n]*”|^\s*>.*')
+ASKS_HEADING = re.compile(r"^Open questions: \d+$")
+ASKS_END = "End of open questions."
+ASKS_ROW = re.compile(r"^([a-z][a-z0-9-]*-\d+): ", re.MULTILINE)
 QUESTION_MAX = 15
 FIRST_SENTENCE_MAX = 30
 
@@ -329,7 +372,7 @@ def glossed(sentence: str, start: int, end: int) -> bool:
 
 
 NOTHING_FROM_YOU = re.compile(r"\b(?:none|nothing)(?: needed)? from (?:you|the operator)\b", re.IGNORECASE)
-OPERATOR_ACTION = re.compile(r"\b(?:you|operator)\b.{0,40}\b(?:run|runs|execute|install|check|test|restart|start|open|paste|type|launch|verify)\b", re.IGNORECASE)
+OPERATOR_ACTION = re.compile(r"\b(?:you|operator)\b.{0,40}\b(?:run|runs|execute|install|check|test|restart|start|open(?!\s+(?:questions?|decisions?)\b)|paste|type|launch|verify)\b", re.IGNORECASE)
 TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$")
 LIST_LINE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
 
@@ -345,10 +388,43 @@ def prose_lines_for_budget(text: str) -> list:
     return out
 
 
+def question_elsewhere(lines: list[str], list_pasted: bool) -> list[tuple[int, str, str, str]]:
+    masked = [QUOTED.sub("quoted", ln) for ln in lines]
+    numbered = [ns for block in blocks(masked) for ns in sentences(block)]
+    asking = sum(1 for _, s in numbered if "?" in s or ASK_WORD.search(s))
+    findings = []
+    for n, s in numbered:
+        m = AS_ASKED.search(s) if "?" in s else None
+        if not m and OPERATOR_TURN.search(s):
+            m = ELSEWHERE.search(s) or (None if list_pasted or asking > 1 else ASK_ABOVE.search(s))
+        if not m and "?" not in s and ASK_WORD.search(s) and OPEN_WORD.search(s) and not NOT_OPEN.search(s):
+            m = FROM_PAST_MESSAGE.search(s)
+        if m:
+            findings.append((n, "question-elsewhere", "fail",
+                             f"'{m.group(0)}' sends the operator to a question in another message. "
+                             f"Run {ASKS} list and paste its output just before the next step line, then "
+                             f"use each question's fixed name. Add a missing question with {ASKS} add PROJECT TEXT."))
+    return findings
+
+
+def blank_pasted_lists(text: str) -> str:
+    raw = text.split("\n")
+    start = None
+    for i, ln in enumerate(raw):
+        if ASKS_HEADING.match(ln):
+            start = i
+        elif ln == ASKS_END and start is not None:
+            raw[start:i + 1] = [""] * (i + 1 - start)
+            start = None
+    return "\n".join(raw)
+
+
 def lint(text: str, max_words: int, need_next: bool, allow: set[str], max_structured: int = 600) -> list[tuple[int, str, str, str]]:
+    pasted = text
+    text = blank_pasted_lists(pasted)
     raw = text.split("\n")
     lines, ticked = prose_lines(raw)
-    findings = unslop_findings(text)
+    findings = unslop_findings(text) + question_elsewhere(lines, text != pasted)
 
     words, in_fence = 0, False  # every word outside fenced code counts, inline code included
     for r in raw:
@@ -358,7 +434,7 @@ def lint(text: str, max_words: int, need_next: bool, allow: set[str], max_struct
             words += len(r.split())
     if need_next and not any(NEXT_STEP.search(ln) for ln in lines):
         findings.append((len(raw), "next-step", "fail", "no 'Next step' line; add 'Next step: <who> <action>'"))
-    has_fence = any(FENCE.match(r) for r in raw)
+    has_fence = any(FENCE.match(r) for r in pasted.split("\n"))
     for n, ln in enumerate(raw, 1):
         if NEXT_STEP.search(ln) and OPERATOR_ACTION.search(ln) and not NOTHING_FROM_YOU.search(ln) and not has_fence:
             findings.append((n, "operator-command", "fail", "the next step asks the operator to run or check something; put the exact command in a code block in this reply"))
@@ -584,8 +660,10 @@ def first_sentence(text: str) -> str:
     return parts[0] if parts else ""
 
 
-def lint_approval_text(text: str) -> list:
+def lint_approval_text(pasted: str) -> list:
     out = []
+    text = blank_pasted_lists(pasted)
+    listed = set(ASKS_ROW.findall(pasted)) if text != pasted else set()
     first = first_sentence(text)
     if not READER.search(first):
         out.append((1, "approval-first-sentence", "fail",
@@ -595,7 +673,8 @@ def lint_approval_text(text: str) -> list:
     lines, _ = prose_lines(text.split("\n"))
     for i, ln in enumerate(lines, 1):
         for m in APPROVAL_ID.finditer(ln):
-            out.append((i, "approval-id", "fail", f"'{m.group(0)}' is a hash or id; say in plain words what it stands for"))
+            if m.group(0) not in listed:
+                out.append((i, "approval-id", "fail", f"'{m.group(0)}' is a hash or id; say in plain words what it stands for"))
         for q in SENT_END.split(ln):
             q = NUMBERED.sub("", BULLET.sub("", q)).strip()
             if q.endswith("?") and words_in(q) > QUESTION_MAX:

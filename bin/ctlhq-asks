@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""ctlhq-asks: keep one list of open questions for the operator, across projects.
+
+Usage:
+  ctlhq-asks add PROJECT [TEXT]      add a question and print its fixed name, such as ctlhq-1
+  ctlhq-asks list                    print every open question, as text ready to paste
+  ctlhq-asks close NAME [ANSWER]     close a question and record its answer; the answer
+                                     "deferred" takes a deferred question off the list
+
+Without TEXT or ANSWER, the tool reads it from standard input, so a question can hold a block
+of commands. Write each question so it stands alone: what it changes, what to run, and who runs
+it. PROJECT holds lowercase letters, digits, and hyphens, and starts with a letter.
+
+A name is PROJECT, a hyphen, and a number. Closed questions stay in the file, so a name is never
+given out twice. A reply that needs the operator pastes the list just before its next step line.
+The list runs from "Open questions: N" to "End of open questions.", and ctlhq-reply-lint leaves
+that block out of its rules, so a stored question cannot block a reply.
+
+State: ~/.ctlhq/asks.json, readable only by you. Never put a secret in a question.
+
+Exit 0 on success. Exit 1 on a refusal: an unknown name, a question already closed, or a state
+file that cannot be read or written; a damaged file is left as it is. Exit 2 on a usage error.
+"""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+PROJECT = re.compile(r"[a-z][a-z0-9-]*")
+NAME = re.compile(r"[a-z][a-z0-9-]*-\d+")
+
+
+class Refused(Exception):
+    pass
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-asks: {msg}", file=sys.stderr)
+    print("usage: ctlhq-asks add PROJECT [TEXT] | list | close NAME [ANSWER]", file=sys.stderr)
+    return 2
+
+
+def state_path() -> Path:
+    return Path.home() / ".ctlhq" / "asks.json"
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def valid(row) -> bool:
+    return (isinstance(row, dict) and isinstance(row.get("name"), str) and bool(NAME.fullmatch(row["name"]))
+            and {"project", "text", "closed", "answer"} <= row.keys())
+
+
+def load(path: Path) -> list[dict]:
+    try:
+        asks = json.loads(path.read_text(encoding="utf-8"))["asks"]
+        if not isinstance(asks, list) or not all(valid(a) for a in asks):
+            raise ValueError("wrong shape")
+        return asks
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, KeyError, TypeError, RecursionError) as e:
+        raise Refused(f"cannot read {path} ({e!r}); fix or move the file, then run the command again")
+
+
+def save(path: Path, asks: list[dict]) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"asks": asks}, f, indent=1, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def update_under_lock(apply) -> str:
+    path = state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path.with_name(f"{path.name}.lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            asks = load(path)
+            result = apply(asks)
+            save(path, asks)
+    except OSError as e:
+        raise Refused(f"cannot write {path} ({e})")
+    return result
+
+
+def add(project: str, text: str) -> str:
+    def apply(asks: list[dict]) -> str:
+        numbers = [int(a["name"].rsplit("-", 1)[1]) for a in asks if a["project"] == project]
+        name = f"{project}-{max(numbers, default=0) + 1}"
+        asks.append({"name": name, "project": project, "text": text, "closed": None, "answer": None})
+        return name
+    return update_under_lock(apply)
+
+
+def close(name: str, answer: str) -> str:
+    def apply(asks: list[dict]) -> str:
+        row = next((a for a in asks if a["name"] == name), None)
+        if row is None:
+            raise Refused(f"no question named {name}; run ctlhq-asks list")
+        if row["closed"]:
+            raise Refused(f"{name} is already closed, with the answer: {row['answer']}")
+        row["closed"], row["answer"] = now(), answer
+        return f"closed {name}"
+    return update_under_lock(apply)
+
+
+def listing() -> str:
+    open_asks = [a for a in load(state_path()) if not a["closed"]]
+    if not open_asks:
+        return "No open questions."
+    rows = "\n\n".join(f"{a['name']}: {a['text']}" for a in open_asks)
+    return f"Open questions: {len(open_asks)}\n\n{rows}\n\nEnd of open questions."
+
+
+def body(args: list[str]) -> str:
+    try:
+        text = args[0] if args else sys.stdin.read()
+        text.encode("utf-8")
+    except UnicodeError:
+        raise ValueError("the text is not valid UTF-8")
+    return text.strip()
+
+
+def main(argv: list[str]) -> int:
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if not argv:
+        return usage("give a command")
+    command, args = argv[0], argv[1:]
+    try:
+        if command == "list" and not args:
+            print(listing())
+        elif command == "add" and len(args) in (1, 2):
+            if not PROJECT.fullmatch(args[0]):
+                return usage(f"bad project name {args[0]!r}; use lowercase letters, digits, and hyphens")
+            text = body(args[1:])
+            if not text:
+                return usage("the question has no text")
+            print(add(args[0], text))
+        elif command == "close" and len(args) in (1, 2):
+            answer = body(args[1:])
+            if not answer:
+                return usage("close needs the answer")
+            print(close(args[0], answer))
+        else:
+            return usage(f"cannot read the command: {' '.join(argv)}")
+    except Refused as e:
+        print(f"ctlhq-asks: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        return usage(str(e))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
