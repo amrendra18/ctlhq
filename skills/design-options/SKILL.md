@@ -15,18 +15,24 @@ Use screens mode for a product with a screen. Use icon mode when the product shi
 
 Both modes use Chrome through `bin/ctlhq-browser`. When Chrome or Node 22 is missing, write the grant to `BLOCKED.md`, read the HTML and SVG files instead, and say in the reply that no screenshot was read.
 
+## Where the files go
+
+`<project>` is always the main checkout, so removing a worktree cannot delete the mock. From any folder of a repository, `git -C <folder> worktree list --porcelain | sed -n '1s/^worktree //p'` prints it. A folder with no repository yet is its own `<project>`.
+
+Git must ignore `.local/`, so the mock stays out of every commit. Before you write a file in a repository, run `git -C <project> check-ignore -q .local/mock/index.html`, and on exit 1 add the line `.local/` to `.gitignore`. In a folder with no repository, `run-method` section 4's setup adds that line. Outside that setup, whoever creates the repository adds it first.
+
 ## 1. Screens mode
 
 1. Read, in this order, the operator's prompt, the project's goals and use cases, then `references/style.md`. An earlier source overrides a later one.
 2. Write `<project>/.local/design/states.md`. Its first line names the platform, desktop app or web page, and that platform's usual conventions, for example native menus and shortcuts, or one URL per view and the browser's back button. Then a numbered table with one row per use case, holding the use case, the screens and states it needs, and each state's hash URL named by screen and state (`#inbox-empty`). Number the states inside each row (1.1, 1.2). Every use case gets at least one reachable state. Add the empty, loading and error states wherever they apply.
-3. Build the mock-up in `<project>/mock/index.html`, from that table. Make it one self-contained file of plain HTML and CSS, with a small script for clicks and no libraries. It shows behaviour and look, and decides nothing about the build stack. Each state opens at its hash URL, and `?theme=dark` before the hash shows the dark theme. The mock's own controls (the state picker and the theme switch) sit outside the app's frame, labelled as part of the mock.
+3. Build the mock-up in `<project>/.local/mock/index.html`, from that table. Make it one self-contained file of plain HTML and CSS, with a small script for clicks and no libraries. It shows behaviour and look, and decides nothing about the build stack. Each state opens at its hash URL, and `?theme=dark` before the hash shows the dark theme. The mock's own controls (the state picker and the theme switch) sit outside the app's frame, labelled as part of the mock.
 4. Check it yourself, and fix what fails before replying:
-   1. For each state, run `ctlhq-browser screenshot "file://<project>/mock/index.html#<state>" --out <project>/.local/design/screens/<state>.png`. For the dark theme, run `ctlhq-browser screenshot "file://<project>/mock/index.html?theme=dark#<state>" --out <project>/.local/design/screens/<state>-dark.png`. Read every screenshot.
+   1. For each state, run `ctlhq-browser screenshot "file://<project>/.local/mock/index.html#<state>" --out <project>/.local/design/screens/<state>.png`. For the dark theme, run `ctlhq-browser screenshot "file://<project>/.local/mock/index.html?theme=dark#<state>" --out <project>/.local/design/screens/<state>-dark.png`. Read every screenshot.
    2. Walk the main flow with the keyboard only, in the host's browser tool, or with a Playwright or Chrome DevTools script. Every step works, and the focus stays visible. When none of these is available, write the needed grant to `BLOCKED.md` and say in the reply that the keyboard pass did not run.
-   3. For each state, run `ctlhq-browser console "file://<project>/mock/index.html#<state>"`, and again with `?theme=dark` before the hash. Neither prints an error.
+   3. For each state, run `ctlhq-browser console "file://<project>/.local/mock/index.html#<state>"`, and again with `?theme=dark` before the hash. Neither prints an error.
    4. Search the file for real names, paths and accounts, and replace each with an invented one.
 5. Reply as section 3 says. The numbered options are the table's states, numbered as in the table (1.1, 1.2), each with its hash URL, in the order that walks through each use case.
-6. Revise until the operator accepts the mock-up in their own words. Record the acceptance in `PLAN.md` section 8, with the operator's quote and the mock's version, the SHA-256 that `shasum -a 256 <project>/mock/index.html` prints. After a later change to the file, ask the operator to accept it again.
+6. Revise until the operator accepts the mock-up in their own words. Record the acceptance in `PLAN.md` section 8, with the operator's quote and the mock's version, the SHA-256 that `shasum -a 256 <project>/.local/mock/index.html` prints. Save a copy outside the repository as `~/.ctlhq/mocks/<project name>/<SHA-256>.html`, or in another private place the prompt names, and record its path beside the hash. After a later change to the file, ask the operator to accept it again.
 
 ## 2. Icon mode
 

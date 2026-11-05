@@ -161,6 +161,7 @@ Written by other tools, only when you run them:
 | 5 | `skills/ctlhq-mode/scripts/node_modules/` in your clone | the packages of `ctlhq-watch-pr` | `bun install`, on its first run |
 | 6 | `~/.ctlhq/message-words.txt`, and `.local/message-words.txt` in one repository | words such as private project names that `ctlhq-message-check` refuses. `ctlhq-commit` runs that check on every commit message, and `ctlhq-push` runs it on new commit messages and branch names | you, by hand |
 | 7 | `~/.ctlhq/asks.json` and `~/.ctlhq/asks.json.lock` | the operator's questions, open and closed, under fixed names such as `ctlhq-1`; only you can read `asks.json` | `ctlhq-asks add` and `ctlhq-asks close` |
+| 8 | `~/.ctlhq/mocks/<project name>/<SHA-256>.html` | a copy of each mock-up you accepted, named by its hash | the `design-options` skill, when you accept a mock-up |
 
 Suggested, never applied for you:
 
@@ -214,7 +215,7 @@ So these commands can remove a VM of yours that has a recipe's name, such as `ub
    2. the Stop hook entry in `~/.claude/settings.json`, and the one in `~/.codex/hooks.json` if you added it;
    3. a pre-push hook from `ctlhq-first-push hook install`. In that repository, delete `.git/hooks/pre-push`, then rename `.git/hooks/pre-push.before-first-push` back to `pre-push` if it exists;
    4. `~/.ctlhq-backups/`, after you restore what you want from it (the uninstall does not move backed-up files back);
-   5. `~/.ctlhq/`, which holds the models file, the layers file, the push settings, the message word list, and `bin/gitleaks` if you put it there;
+   5. `~/.ctlhq/`, which holds the models file, the layers file, the push settings, the message word list, the accepted mock-ups, and `bin/gitleaks` if you put it there;
    6. the folders `~/.claude/skills`, `~/.claude/agents`, and `~/.codex/skills`, if the install created them and they are now empty;
    7. the clone itself.
 

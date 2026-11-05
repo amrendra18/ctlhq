@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""ctlhq-public-files: name the files in a Git repository that a stranger may not need.
+
+Usage:
+  ctlhq-public-files [--root DIR] [--allow FILE]
+
+Reads the file names Git tracks in the repository that holds DIR (default: the working
+folder), and the untracked ones Git does not ignore. It skips a tracked file that is gone
+from disk. It matches names only and never reads a file's content.
+
+Prints one line per match, then "N to decide, K allowed, M listed". Paths are relative to
+the repository's top folder.
+  path: planning material    a plan, requirements document, to-do list, or handoff, prompt,
+                             or report note
+  path: design mock          a design file (HTML, image, PDF, Figma, or Sketch) in a design,
+                             mock, mockup, or wireframe folder, or named for one of those; or
+                             any file in a top-level mock, mockup, or wireframe folder
+  path: measurement file     data from a benchmark, a baseline, or a results folder
+  path: tool config          settings or instructions for an editor or a coding agent
+
+Program code in a mocks or design folder gets no line, so test doubles and design tokens stay
+out. A plan or a mock under a test folder counts as test input and gets no line. Dot files get
+no "measurement file" line. A Markdown file gets that line only inside a benchmark,
+measurement, or results folder.
+
+A line is a question for the reviewer. A match can still be a file a stranger needs, and a
+file with no match can still be one a stranger does not need.
+
+--allow FILE  each line is "PATH  reason": a path, two spaces or a tab, and why the file stays.
+              A PATH that names a folder covers every file under it. A match under an allowed
+              path ends with "(allowed: reason)" and does not count. The tool skips blank lines
+              and lines that start with "#". A line with no reason is a usage error. Give
+              --allow more than once to read several files.
+
+Exit 0 when no match counts, 1 on any counted match, 2 on a usage error, an unreadable allow
+file, a folder outside a Git repository, or a failed git ls-files.
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ALLOW_LINE = re.compile(r"^(\S(?:.*?\S)?)(?:\t+|  +)(\S.*?)\s*$")
+DATA = r"\.(json|jsonl|ndjson|csv|tsv|txt|log|xlsx)$"
+DESIGN_FILE = r"\.(fig|gif|html|jpeg|jpg|pdf|png|sketch|svg|webp)$"
+TEST_FOLDER = re.compile(r"(^|/)(__mocks__|__tests__|fixtures|spec|test|testdata|tests)/", re.IGNORECASE)
+TEST_INPUT_KINDS = {"planning material", "design mock"}
+KINDS = (
+    ("planning material", re.compile(
+        r"(^|/)(([^/]*[-_.])?(plan|prd|roadmap|todo)|blocked|goal|handoff|next|notes|prompt|report|status|design)\.(md|txt|html)$"
+        r"|(^|/)(adrs?|briefs|planning|plans|rfcs)/", re.IGNORECASE)),
+    ("design mock", re.compile(
+        r"^(mock|mockups?|wireframes?)/"
+        r"|(^|/)(designs?|mocks?|mockups?|wireframes?)/.*" + DESIGN_FILE +
+        r"|(^|/)[^/]*(mockup|wireframe)[^/]*" + DESIGN_FILE +
+        r"|(^|/)(design|mock)[^/]*" + DESIGN_FILE, re.IGNORECASE)),
+    ("measurement file", re.compile(
+        r"(^|/)(benchmarks?|measurements?|results?)/(.*/)?[^/.][^/]*(\.md$|" + DATA + ")"
+        r"|(^|/)([^/.][^/]*[-_.])?(baselines?|benchmarks?|measurements?|metrics|results?|timings?)([-_.][^/]*)?" + DATA,
+        re.IGNORECASE)),
+    ("tool config", re.compile(
+        r"(^|/)\.(aider|claude|codex|continue|cursor|gemini|idea|vscode|windsurf|zed)/"
+        r"|(^|/)(agents|claude|gemini)\.md$"
+        r"|(^|/)\.(aider\.conf\.yml|clinerules|coderabbit\.ya?ml|cursorrules|mcp\.json|windsurfrules)$"
+        r"|\.code-workspace$"
+        r"|(^|/)\.github/copilot-instructions\.md$", re.IGNORECASE)),
+)
+
+
+def usage(msg: str) -> int:
+    print(f"ctlhq-public-files: {msg}", file=sys.stderr)
+    print("usage: ctlhq-public-files [--root DIR] [--allow FILE]", file=sys.stderr)
+    return 2
+
+
+def read_allow(path: str) -> list[tuple[str, str]] | str:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return f"cannot read --allow {path} ({e})"
+    rows = []
+    for n, ln in enumerate(text.splitlines(), 1):
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        m = ALLOW_LINE.match(ln.strip())
+        if not m:
+            return f"{path}:{n}: write PATH, two spaces or a tab, then the reason"
+        rows.append((m.group(1).removeprefix("./").rstrip("/"), m.group(2)))
+    return rows
+
+
+def allowed(path: str, rows: list[tuple[str, str]]) -> str | None:
+    for p, reason in rows:
+        if path == p or path.startswith(p + "/"):
+            return reason
+    return None
+
+
+def kind_of(path: str) -> str | None:
+    for kind, pattern in KINDS:
+        if kind in TEST_INPUT_KINDS and TEST_FOLDER.search(path):
+            continue
+        if pattern.search(path):
+            return kind
+    return None
+
+
+def main(argv: list[str]) -> int:
+    root, rows = ".", []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        if a not in ("--root", "--allow"):
+            return usage(f"unknown argument {a}")
+        i += 1
+        if i >= len(argv):
+            return usage(f"{a} needs a value")
+        if a == "--root":
+            root = argv[i]
+        else:
+            got = read_allow(argv[i])
+            if isinstance(got, str):
+                return usage(got)
+            rows += got
+        i += 1
+    if not Path(root).is_dir():
+        return usage(f"{root} is not a folder")
+    r = subprocess.run(["git", "-C", root, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if r.returncode != 0:
+        return usage(f"{os.path.abspath(root)} is not inside a Git repository")
+    top = Path(r.stdout.strip())
+    listed = subprocess.run(["git", "-C", str(top), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                            capture_output=True)
+    if listed.returncode != 0:
+        return usage(f"git ls-files failed in {top}: {listed.stderr.decode('utf-8', 'replace').strip()}")
+    names = set(listed.stdout.decode("utf-8", "surrogateescape").split("\0")) - {""}
+    files = sorted(n for n in names if os.path.lexists(top / n))
+
+    matches, kept = 0, 0
+    for rel in files:
+        kind = kind_of(rel)
+        if not kind:
+            continue
+        name = rel if rel.isprintable() else repr(rel)
+        reason = allowed(rel, rows)
+        if reason is None:
+            matches += 1
+            print(f"{name}: {kind}")
+        else:
+            kept += 1
+            print(f"{name}: {kind} (allowed: {reason})")
+    print(f"{matches} to decide, {kept} allowed, {len(files)} listed")
+    return 1 if matches else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

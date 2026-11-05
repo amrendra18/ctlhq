@@ -36,6 +36,7 @@ Inputs:
 3. The copy of the listed files, as the checklist shows: `rsync` and the count check exit 0. Then `gitleaks dir` on that copy: exit 0.
 4. `git diff --quiet -- <protected paths>`: exit 0.
 5. `git status --short`, `git diff --stat`, and the untracked files.
+6. `ctlhq-public-files --root <your worktree> --allow <your worktree>/.local/public-files-allow.txt`: exit 0. Write that allow file from the rows in the reviewers' reports. With no kept match, leave `--allow` out.
 
 ## Report
 

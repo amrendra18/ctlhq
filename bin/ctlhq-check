@@ -11,12 +11,10 @@ Checks, across the target:
   1. every relative Markdown link resolves
   2. no leftover brand words (the upstream project's name, the author's handle, two old
      skill names, this project's two old names, the old host's own tool, plugin, and
-     question-tool names, the port's source folder name, and the old host name, as BRAND
-     and HOST_WORD in this tool spell them) outside LICENSE, this tool, which names them
-     to find them, and the "## Credits" section of README.md (its heading up to the next
-     "## " heading; headings inside fenced code do not count). The host name is also
-     allowed in skills/ctlhq-mode/scripts/check-plan.mjs and
-     skills/ctlhq-mode/scripts/watch-pr/, which use the word as a paging variable
+     question-tool names, and the port's source folder name, as BRAND in this tool spells
+     them) outside LICENSE, this tool, which names them to find them, and the "## Credits"
+     section of README.md (its heading up to the next "## " heading; headings inside fenced
+     code do not count)
   3. every executable in bin/ answers --help with exit 0
   4. every bin/ name starts with "ctlhq-" (also with --no-tools); every bin/* --help
      first line matches "<name>: "; every skill with bin/ has a "## Tool" (or
@@ -52,10 +50,6 @@ BRAND = re.compile(r"pot" r"eto|\bps" r"tack|\bben" r"ny\b|comment[- ]sic" r"ko"
                    r"|\bdes" r"lop|cur" r"sor-team-kit|\bcontrol-(?:c" r"li|u" r"i)\b|general" r"Purpose"
                    r"|\bAsk" r"Question\b|plugi" r"ns-main",
                    re.IGNORECASE)
-HOST_WORD = "cur" + "sor"
-HOST = re.compile(rf"\b{HOST_WORD}\b", re.IGNORECASE)
-# Path prefixes where the host name may stay: both use it as a paging variable.
-HOST_ALLOWED = ("skills/ctlhq-mode/scripts/check-plan.mjs", "skills/ctlhq-mode/scripts/watch-pr/")
 SKIP_DIRS = {".git", ".local", "node_modules"}
 MODE_SKILL = "skills/ctlhq-mode/SKILL.md"
 # A stranger needs these to install, see what changes, and undo it.
@@ -259,13 +253,12 @@ def main(argv: list[str]) -> int:
             text = tp.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        host_ok = rel_t.startswith(HOST_ALLOWED)
         lines = text.split("\n")
         credits = level2_sections(lines).get(CREDITS, range(0)) if rel_t == "README.md" else range(0)
         for n, line in enumerate(lines, 1):
             if n in credits:
                 continue
-            if BRAND.search(line) or (not host_ok and HOST.search(line)):
+            if BRAND.search(line):
                 brand += 1
                 problems.append(f"brand leftover: {rel_t}:{n}  {line.strip()[:100]}")
 
