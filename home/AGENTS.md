@@ -206,6 +206,11 @@ stall, a re-ask, or an unsafe step.
   operator"), never in a tracked file. `PLAN.md` stays untracked (listed in
   `.gitignore`). Update it in the same work block as the change that opens or
   closes an item.
+- Add what needs the operator now with `ctlhq-asks add PROJECT TEXT`, written to
+  stand alone. Close with `ctlhq-asks close NAME ANSWER`, or ANSWER "deferred" to
+  defer it. `PLAN.md` section 9 stays the project's own record. A reply needing the
+  operator pastes `ctlhq-asks list` before "Next step" and cites no earlier reply.
+  A coordinator relays a report only if final, blocked, or needing the operator.
 - End every work block with "Next step: <who> <action>".
 
 ### Decisions and approval

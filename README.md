@@ -160,6 +160,7 @@ Written by other tools, only when you run them:
 | 4 | `.local/catalog/` in your clone | the catalog of skills, agents, and tools | `ctlhq-catalog build` or `ctlhq-catalog open` |
 | 5 | `skills/ctlhq-mode/scripts/node_modules/` in your clone | the packages of `ctlhq-watch-pr` | `bun install`, on its first run |
 | 6 | `~/.ctlhq/message-words.txt`, and `.local/message-words.txt` in one repository | words such as private project names that `ctlhq-message-check` refuses. `ctlhq-commit` runs that check on every commit message, and `ctlhq-push` runs it on new commit messages and branch names | you, by hand |
+| 7 | `~/.ctlhq/asks.json` and `~/.ctlhq/asks.json.lock` | the operator's questions, open and closed, under fixed names such as `ctlhq-1`; only you can read `asks.json` | `ctlhq-asks add` and `ctlhq-asks close` |
 
 Suggested, never applied for you:
 

@@ -19,6 +19,9 @@ expect_eq() { # expected actual label
 expect_grep() { # pattern text label
 	if printf '%s\n' "$2" | grep -Eq -- "$1"; then ok; else bad "$3 (no line matches: $1)"; fi
 }
+expect_nogrep() {
+	if printf '%s\n' "$2" | grep -Eq -- "$1"; then bad "$3 (a line matches: $1)"; else ok; fi
+}
 count() { printf '%s\n' "$2" | grep -Ec -- "$1"; }
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctlhq-reply-lint-test.XXXXXX")"
@@ -367,6 +370,225 @@ MD
 out="$("$rl" "$tmp/mistake-proof.md" 2>&1)"; rc=$?
 expect_rc 0 "$rc" "the /mistake-proof offer with its code block exits 0"
 expect_eq "0 failures, 0 warnings" "$out" "the /mistake-proof offer has no findings"
+
+while IFS= read -r line; do
+	[ -n "$line" ] || continue
+	out="$(printf '%s\n\nNext step: none from you.\n' "$line" | "$rl" 2>&1)"; rc=$?
+	expect_rc 1 "$rc" "flagged: $line"
+	expect_grep '^1: question-elsewhere: fail: ' "$out" "named question-elsewhere: $line"
+done <<'TXT'
+You answer questions 1 to 3 from my last message.
+Can you answer questions 1 to 3 from my last message?
+Please answer what I asked in my last message.
+Please answer my earlier question.
+Please answer questions 1 to 3 in my message above.
+Answer the questions from earlier.
+Answer the questions above.
+Will you answer the questions above?
+You answer questions 1 to 5 above.
+You answer questions 1 to 4 from my last two messages.
+You answer decisions 1 to 3 from my last summary, yes or no.
+You reply yes or no to my last 3 decisions.
+You review the branch, then answer question 4 from my earlier message.
+May the builder replace the installed build, as asked above?
+As I asked you earlier, may I push?
+Keep the two folders separate, as asked in my last reply?
+The operator answers questions 1 to 3 from my last message.
+Next step: operator answers the questions above.
+The operator decides decision 2 from my last message.
+The operator approves decision 2 from my last message.
+You decide questions 1 to 3 from my last message.
+You approve decision 2 from my last message.
+Questions 1 to 4 from my earlier message stay open.
+Questions 1 to 4 from my last message are still open.
+Questions 1 to 4 from my last two messages are still open.
+Decisions 1 and 2 from my previous reply are still open.
+Two questions are still open from my last reply.
+Your six questions from my last message are still open too.
+The two open decisions from my last reply.
+The one left is the open decision 1 from my last message.
+TXT
+printf 'You answer questions 1 to 3 from my last\nmessage.\n\nNext step: none from you.\n' >"$tmp/wrapped.md"
+out="$("$rl" "$tmp/wrapped.md" 2>&1)"; rc=$?
+expect_rc 1 "$rc" "a pointer that wraps over two lines is flagged"
+expect_grep '^1: question-elsewhere: fail: ' "$out" "a wrapped pointer reports its first line"
+expect_grep "$root/bin/ctlhq-asks list" "$out" "the refusal gives the full path of the list command"
+expect_grep "$root/bin/ctlhq-asks add" "$out" "the refusal says how to add a missing question"
+
+while IFS= read -r line; do
+	[ -n "$line" ] || continue
+	out="$(printf '%s\n\nNext step: none from you.\n' "$line" | "$rl" 2>&1)"
+	expect_nogrep 'question-elsewhere' "$out" "not flagged: $line"
+done <<'TXT'
+Questions 1 to 3 are still open.
+Are questions 1 to 3 from my last message still open?
+Decision 1 from my last message is still open: should I make the edit myself? I recommend yes.
+No questions are open from my last message.
+None of the questions from my last message is open.
+The question from my last message is no longer open.
+Question 1 from my previous reply is not open.
+The open question from my last message is closed.
+Decisions 1 to 3 from my earlier summary stay open.
+The open file holds the decision from my last commit message.
+Open-source users read the question from my last reply.
+You answer questions 1 and 2.
+I also wrote "as asked above" and "from my last message", which sends you hunting.
+You answer "questions 1 to 3 from my last message" with the old form.
+The rule flags “questions 1 to 3 are open” in a reply.
+> You answer questions 1 to 3 from my last message.
+The check refuses `you answer questions 1 to 3 from my last message` in a reply.
+I dropped my earlier question about fixing the error message.
+I settled three questions from earlier records, so none of them goes to you.
+Ended its turn, as asked.
+You asked earlier whether the push waits.
+You also asked earlier whether the push waits.
+They asked earlier whether the push waits.
+The operator asked earlier for a shorter list.
+Main asked earlier for a shorter list.
+The reviewer asked above whether the push waits.
+I ran the tests as asked earlier.
+I ran the tests as asked before the merge.
+Should the wait be one minute? I recommend yes (asked earlier).
+Decision: run the install as above? I recommend yes.
+Decision 6: add the check (table above) to the build? I recommend yes.
+The plan records the scheduling decision above.
+My answer to question 4 is yes.
+The answer to question 4 from my last message is yes.
+Answer to question 2: yes.
+Answer for question 2 from my last message: yes.
+Answer on question 2: yes.
+Answer: yes to question 2 from my last message.
+Answer: question 3 from my last message is closed.
+Reply: question 3 from my last message is closed.
+I have no answer to question 2 yet.
+This reply answers question 2.
+The logs confirm question 3 from my last message is closed.
+The builder's reply to question 3 from my last message is in the log.
+You asked me to answer question 3 from my last message.
+You gave the answer to question 3 from my last message.
+You do not need to answer question 3 from my last message.
+Your answer to question 4 from my last message is in the plan.
+If you reply, question 3 from my last message closes.
+When you confirm the plan, I will close question 3 from my last message.
+The skill keeps questions 4 to 8 from the shared list.
+Correction: the decision in my last reply named the wrong hash.
+No questions remain from my last message.
+All questions from my last message are now closed.
+I withdraw my last two questions.
+The decision is recorded in my last commit message.
+Questions 1 and 2 from my last message are replaced by the questions below.
+That covers decision 1 from my earlier message.
+Please hold your answers to my last 5 questions until the plan is back.
+My earlier decision still stands.
+Question 1 is no longer open.
+None of questions 1 to 3 is open.
+No decisions are pending from my last reply.
+Only questions 1 and 2 were open, and both are closed now.
+Your question 5 is waiting for my reply.
+Your question 3 is open and I answer it below.
+I am waiting on the test to answer your question 3.
+Every answer holds except question 3.
+Decision 8 in the plan says this stays open.
+The plan's decision 4 waits on the install.
+The open file holds question 3.
+The test waits for question 3 to finish.
+If you reply, question 3 closes.
+You can reply later, and decision 2 is recorded.
+When the operator answers, the plan from my last reply changes.
+If the operator decides, my earlier decision stays.
+The operator's answer to question 3 from my last message is in the plan.
+The operator approved the plan from my last message.
+You approved the plan from my last message.
+The operator asked me to answer question 3 from my last message.
+You run the command from my last reply.
+You start the sessions with the prompt from my earlier reply.
+Will you run the commit block from my previous reply yourself?
+TXT
+printf '1 - May I push?\n2 - Keep it?\n\nQuestions 1 and 2 are open.\n\nNext step: you answer questions 1 and 2.\n' >"$tmp/own-list.md"
+out="$("$rl" "$tmp/own-list.md" 2>&1)"
+expect_nogrep 'question-elsewhere' "$out" "a reply with its own list is free in any list form"
+printf '1. May I push?\n\nNext step: you answer the question above.\n' >"$tmp/own-above.md"
+out="$("$rl" "$tmp/own-above.md" 2>&1)"
+expect_nogrep 'question-elsewhere' "$out" "a pointer above is free when this reply holds a question"
+printf 'Next step: you answer the three questions above with yes or no:\n\n1. May I push?\n' >"$tmp/own-below.md"
+out="$("$rl" "$tmp/own-below.md" 2>&1)"
+expect_nogrep 'question-elsewhere' "$out" "a pointer above is free when the reply's question sits below"
+printf 'Decision 1: push or hold.\n\nNext step: you answer decision 1 above.\n' >"$tmp/own-decision.md"
+out="$("$rl" "$tmp/own-decision.md" 2>&1)"
+expect_nogrep 'question-elsewhere' "$out" "a pointer above is free when the reply names a decision with no question mark"
+printf 'The build finished.\n\nNext step: you answer the questions above.\n' >"$tmp/no-question.md"
+out="$("$rl" "$tmp/no-question.md" 2>&1)"
+expect_grep 'question-elsewhere' "$out" "a pointer above fires when the reply holds no question"
+printf '```\nyou answer questions 1 to 3 from my last message\n```\n\nNext step: none from you.\n' >"$tmp/fenced.md"
+out="$("$rl" "$tmp/fenced.md" 2>&1)"
+expect_nogrep 'question-elsewhere' "$out" "fenced code is not flagged"
+
+pointer='You answer questions 1 to 3 from my last message.\n\nNext step: none from you.'
+err="$(printf '{"last_assistant_message": "%s"}' "$pointer" | "$rl" --hook 2>&1 >/dev/null)"; rc=$?
+expect_rc 2 "$rc" "--hook blocks a pointer"
+expect_grep 'question-elsewhere: fail' "$err" "--hook names the rule"
+out="$(printf '{"last_assistant_message": "%s"}' "$pointer" | "$rl" --hook-json 2>/dev/null)"; rc=$?
+expect_rc 0 "$rc" "--hook-json exits 0 on a pointer"
+expect_grep '"decision": "block"' "$out" "--hook-json blocks a pointer"
+expect_grep 'question-elsewhere' "$out" "--hook-json names the rule"
+
+for unit in 'question ' 'question 1 ' 'you answer '; do
+	python3 -I -c 'import sys; print(sys.argv[1] * 20000)' "$unit" >"$tmp/long.md"
+	start=$SECONDS
+	"$rl" "$tmp/long.md" >/dev/null 2>&1
+	[ $((SECONDS - start)) -lt 20 ] && ok || bad "20000 repeats of '$unit' in one sentence take under 20 s"
+done
+
+printf 'Open questions: 1\n\nctlhq-1: May I push the branch?\n\nNext step: you answer the open questions.\n' >"$tmp/plain.md"
+out="$("$rl" "$tmp/plain.md" 2>&1)"; rc=$?
+expect_rc 0 "$rc" "a plain list and its next step exit 0: $out"
+printf 'Next step: you open the page in the browser.\n' >"$tmp/open.md"
+out="$("$rl" "$tmp/open.md" 2>&1)"; rc=$?
+expect_rc 1 "$rc" "you open a page still needs a command block"
+expect_grep 'operator-command' "$out" "you open a page still names operator-command"
+
+question='May I push the branch to the remote now that the review is finished, knowing that this step sends the commits to GitHub, where every reader can see them, and that nothing else depends on it today and tomorrow?'
+{
+	printf 'Open questions: 16\n\n'
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do printf 'ctlhq-%s: %s\n\nA second paragraph of the same question.\n\n' "$i" "$question"; done
+	printf 'End of open questions.\n\nNext step: you answer the open questions.\n'
+} >"$tmp/long-list.md"
+out="$("$rl" "$tmp/long-list.md" 2>&1)"; rc=$?
+expect_rc 0 "$rc" "a long pasted list exits 0"
+expect_nogrep 'max-words' "$out" "a long pasted list is not held to the word limit"
+{ for i in $(seq 1 500); do printf 'word '; done; printf '\n\n'; cat "$tmp/long-list.md"; } >"$tmp/long-prose.md"
+out="$("$rl" "$tmp/long-prose.md" 2>&1)"
+expect_grep 'max-words: fail: 50[0-9] words' "$out" "text before the list still counts, and the list does not"
+{ printf 'Open questions: 1\n\nctlhq-1: May I push?\n\nEnd of open questions.\n\n'; for i in $(seq 1 500); do printf 'word '; done; printf '\n\nNext step: none from you.\n'; } >"$tmp/after-list.md"
+out="$("$rl" "$tmp/after-list.md" 2>&1)"
+expect_grep 'max-words: fail: 50[0-9] words' "$out" "text after the list still counts"
+{ printf 'Open questions: 1\n\n'; for i in $(seq 1 500); do printf 'word '; done; printf '\n\nNext step: none from you.\n'; } >"$tmp/no-end.md"
+out="$("$rl" "$tmp/no-end.md" 2>&1)"
+expect_grep 'max-words: fail' "$out" "a heading with no end line is checked as usual"
+for stored in 'May I start S6 now?' 'May I push — now?' 'You answer questions 1 to 3 from my last message.' 'Run this?\n\n```\nsudo true'; do
+	printf "Open questions: 1\n\nctlhq-1: $stored\n\nEnd of open questions.\n\nNext step: you answer ctlhq-1.\n" >"$tmp/stored.md"
+	out="$("$rl" "$tmp/stored.md" 2>&1)"; rc=$?
+	expect_rc 0 "$rc" "stored text cannot block a reply: $stored: $out"
+done
+printf 'Open questions: 1\n\nctlhq-1: May I push?\n\nEnd of open questions.\n\nNext step: you answer the questions above.\n' >"$tmp/list-above.md"
+out="$("$rl" "$tmp/list-above.md" 2>&1)"; rc=$?
+expect_rc 0 "$rc" "a pointer above the pasted list exits 0: $out"
+printf 'Open questions: 1\n\ncrewtalk-1: Run this block?\n\n```\nsudo true\n```\n\nEnd of open questions.\n\nNext step: you run the block in crewtalk-1.\n' >"$tmp/list-block.md"
+out="$("$rl" "$tmp/list-block.md" 2>&1)"; rc=$?
+expect_rc 0 "$rc" "a command block inside the pasted list counts for the next step: $out"
+printf 'Open questions: 1\n\nctlhq-1: May I push?\n\nEnd of open questions.\n\nThe S6 work — done.\n\nNext step: none from you.\n' >"$tmp/stored-after.md"
+out="$("$rl" "$tmp/stored-after.md" 2>&1)"
+expect_grep '^7: long-dash' "$out" "a long dash after the list is still found, on its own line number"
+expect_grep 'label-gloss' "$out" "a label after the list is still found"
+
+long_question='May I push the whole branch to the public remote now that the long review of every commit on it has finished?'
+printf 'You get the branch on the remote once you say yes.\n\nOpen questions: 1\n\nctlhq-1: %s\n\nEnd of open questions.\n\nNext step: you answer ctlhq-1.\n' "$long_question" >"$tmp/ap-list.md"
+out="$("$rl" --approval "$tmp/ap-list.md" 2>&1)"; rc=$?
+expect_rc 0 "$rc" "--approval accepts a pasted list and its fixed names: $out"
+printf 'You get the branch on the remote once you say yes.\n\nOpen questions: 1\n\nctlhq-1: May I push?\n\nEnd of open questions.\n\nNext step: you answer other-7.\n' >"$tmp/ap-other.md"
+out="$("$rl" --approval "$tmp/ap-other.md" 2>&1)"; rc=$?
+expect_rc 1 "$rc" "--approval still refuses a name that the pasted list does not hold"
+expect_grep "approval-id: fail: 'other-7'" "$out" "the refusal names the unlisted id"
 
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then
