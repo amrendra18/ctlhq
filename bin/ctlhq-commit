@@ -2,16 +2,28 @@
 """ctlhq-commit: commit named paths with a four-section message file after a green gate, then verify hash, signature, and clean tree.
 
 Usage:
-  ctlhq-commit [--gate NAME] [--subject TEXT] [--why TEXT] [--changes TEXT]
+  ctlhq-commit [-C DIR] [--gate NAME] [--subject TEXT] [--why TEXT] [--changes TEXT]
                 [--test-plan TEXT] [--risks TEXT] [--message-file FILE] [--tz local]
-                [--co-author LINE] [--review FILE] [--allow-dirty] -- <path> [path...]
+                [--co-author LINE] [--review FILE] [--allow-dirty]
+                [--paths-file FILE] [-- <path> [path...]]
 
 Agents commit only through this tool, which adds the co-author trailer.
 The trailer names the model that made the commit, and only the agent knows its model.
 
+-C DIR acts as if the tool started in DIR, like git -C, wherever it stands among the
+options. Relative paths, --review, --message-file and --paths-file then resolve there. A
+second -C, or a folder it cannot enter, exits 2. Each command in a fix: line names the
+tool's full path and its folder, so it runs as written from any folder.
+
 Steps, in order:
-  1. Needs at least one path after "--" (exit 2). Every path is added by name: ".", "-A",
-     "--all", and anything that starts with "-" are refused (exit 2).
+  1. Needs at least one path, after "--" or in --paths-file FILE (exit 2). The file holds
+     one path per line, and its paths join any after "--". An empty file, a missing file,
+     a second --paths-file, a blank line, or a NUL byte refuses (exit 2). A file name that
+     holds a newline goes after "--". Every path is added by name, so these are refused
+     (exit 2): "*", anything that starts with "-" (such as "-A" and "--all"), a path made
+     only of "." and ".." parts ("", ".", "./", "../", "src/.."), and any path that is the
+     top of the work tree, such as its absolute path. A symbolic link inside the work tree,
+     named by its own name, stays a plain name. A folder written by name stays allowed.
   2. With --gate NAME, reads .local/gate/NAME.exit (written by ctlhq-run-gate). A missing file or
      anything but 0 refuses (exit 3) and prints the exit it found and the .meta line.
      It also reads .local/gate/NAME.tree, which holds the same run's exit and the tree ID
@@ -112,7 +124,8 @@ Steps, in order:
 Exit codes: 0 success; 1 git refused (no work tree, a named path missing, add or commit
 failed), a hook changed the commit, a named path is not committed afterwards, or the
 tree is dirty afterwards without --allow-dirty (in the last three cases the commit exists
-and its hash is printed); 2 usage, also a --tz value other than local; 3 gate not
+and its hash is printed); 2 usage, also a --tz value other than local, a second -C, a -C
+folder it cannot enter, or a --paths-file it refuses; 3 gate not
 green, it ran on a different tree, the index would commit content the gate did not test
 or that differs from the files on disk, the index holds staged changes outside the named
 paths, a file is staged as deleted but still on disk and not ignored, or the --review
@@ -142,14 +155,13 @@ TRAILER_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*: \S")
 CO_AUTHOR_SHAPE = 'Co-Authored-By: Name <email>'
 # Without it, a git call that writes a split index may delete the shared index file the saved index copy points to.
 KEEP_SHARED = ["-c", "splitIndex.sharedIndexExpire=never"]
-MARKS_FIX = ("stage the files as they are on disk (a file marked assume-unchanged or skip-worktree keeps its old staged "
-             "copy; `git update-index --no-assume-unchanged --no-skip-worktree <path>` clears both marks), ")
 RUN_GATE = Path(__file__).resolve().parent / "ctlhq-run-gate"
 MESSAGE_CHECK = Path(__file__).resolve().parent / "ctlhq-message-check"
 USAGE = (
-    "usage: ctlhq-commit [--gate NAME] [--subject TEXT] [--why TEXT] [--changes TEXT]\n"
+    "usage: ctlhq-commit [-C DIR] [--gate NAME] [--subject TEXT] [--why TEXT] [--changes TEXT]\n"
     "                     [--test-plan TEXT] [--risks TEXT] [--message-file FILE] [--tz local]\n"
-    "                     [--co-author LINE] [--review FILE] [--allow-dirty] -- <path> [path...]"
+    "                     [--co-author LINE] [--review FILE] [--allow-dirty]\n"
+    "                     [--paths-file FILE] [-- <path> [path...]]"
 )
 SIG_CODES = {
     "G": "good signature",
@@ -225,6 +237,45 @@ def lit(args: list[str]) -> subprocess.CompletedProcess:
     return git(["--literal-pathspecs"] + args)
 
 
+def read_paths_file(name: str) -> list[str]:
+    """One path per line, decoded the way Python decodes command-line arguments, so a name that is not UTF-8 survives."""
+    try:
+        data = Path(name).read_bytes()
+    except OSError as e:
+        raise ValueError(f"cannot read --paths-file {name}: {e.strerror or e}")
+    if not data:
+        raise ValueError(f"--paths-file {name} is empty")
+    lines = os.fsdecode(data).removesuffix("\n").split("\n")
+    for number, line in enumerate(lines, 1):
+        if not line:
+            raise ValueError(f"--paths-file {name}: line {number} is empty")
+        if "\0" in line:
+            raise ValueError(f"--paths-file {name}: line {number} holds a NUL byte; write one path per line")
+    return lines
+
+
+def only_dot_parts(p: str) -> bool:
+    return set(os.path.normpath(p).split("/")) <= {".", ".."}
+
+
+def link_in_tree(p: str, root: Path) -> bool:
+    normal = os.path.normpath(p)
+    return os.path.islink(normal) and Path(os.path.realpath(os.path.dirname(normal) or ".")).is_relative_to(root)
+
+
+def is_top(p: str, root: Path) -> bool:
+    return not link_in_tree(p, root) and os.path.exists(p) and os.path.samefile(p, root)
+
+
+def git_at(folder: Path | str) -> str:
+    return f"git -C {shlex.quote(str(folder))}"
+
+
+def marks_fix(root: Path) -> str:
+    return ("stage the files as they are on disk (a file marked assume-unchanged or skip-worktree keeps its old staged "
+            f"copy; `{git_at(root)} update-index --no-assume-unchanged --no-skip-worktree <path>` clears both marks), ")
+
+
 def review_problem(path: Path) -> str | None:
     if not path.exists():
         return "does not exist"
@@ -295,7 +346,7 @@ def listed(root: Path, args: list[str], named: list[str]) -> dict[str, bool]:
 
 def covered(path: str, named: list[str]) -> bool:
     """Whether a top-relative path is a named path or inside a named folder."""
-    return any(n == "." or path == n or path.startswith(n + "/") for n in named)
+    return any(path == n or path.startswith(n + "/") for n in named)
 
 
 def unnamed_staged(named: list[str]) -> list[str]:
@@ -306,12 +357,12 @@ def unnamed_staged(named: list[str]) -> list[str]:
     return [s for s in r.stdout.split("\0") if s and not covered(s, named)]
 
 
-def refuse_unnamed(what: str, listed: list[str]) -> int:
+def refuse_unnamed(what: str, listed: list[str], root: Path) -> int:
     print(f"ctlhq-commit: {what}; refusing to commit:", file=sys.stderr)
     for n in listed:
         print(f"  {n}", file=sys.stderr)
     print("why: git commit takes the whole index, so these changes would go in unnamed, and no gate checked the staged copy.", file=sys.stderr)
-    print("fix: name them after --, or unstage them with `git reset -q -- <path>`, then run ctlhq-commit again.", file=sys.stderr)
+    print(f"fix: name them after --, or unstage them with `{git_at(root)} reset -q -- <path>`, then run ctlhq-commit again.", file=sys.stderr)
     return 3
 
 
@@ -371,15 +422,20 @@ def message_refused(message: str, root: Path) -> bool:
     print(f"ctlhq-commit: the message check did not run (exit {code}): {err or 'it printed no reason'}; refusing to commit", file=sys.stderr)
     print("why: a message nobody checked could carry internal notes into history.", file=sys.stderr)
     print("fix: clear the cause above: repair a broken word list, or ctlhq-message-check next to this tool. "
-          "`ctlhq-message-check --help` lists the ways out.", file=sys.stderr)
+          f"`{shlex.quote(str(MESSAGE_CHECK))} --help` lists the ways out.", file=sys.stderr)
     return True
+
+
+def gate_line(gate: str, folder: str, command: str) -> str:
+    name = "" if gate == "gate" else f"--name {shlex.quote(gate)} "
+    return f"{shlex.quote(str(RUN_GATE))} -C {shlex.quote(folder)} {name}-- {command}"
 
 
 def rerun_line(gate: str, meta_line: str) -> str:
     fields = meta_line.split("\t")
     command = fields[3] if len(fields) >= 4 else "<check command>"
-    name = "" if gate == "gate" else f"--name {shlex.quote(gate)} "
-    return f"ctlhq-run-gate {name}-- {command}"
+    folder = fields[4] if len(fields) >= 5 else os.getcwd()
+    return gate_line(gate, folder, command)
 
 
 def signature_state() -> str:
@@ -422,15 +478,17 @@ def write_receipt(root: Path, receipt: dict) -> str:
 def main(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
     sys.stdout.reconfigure(errors="backslashreplace")
+    folder: str | None = None
     gate: str | None = None
     subject = why = changes = test_plan = risks = None
     message_file: str | None = None
     co_author: str | None = None
-    review: Path | None = None
+    review_arg: str | None = None
     local_tz = False
     allow_dirty = False
     paths: list[str] | None = None
-    valued = {"--gate", "--subject", "--why", "--changes", "--test-plan", "--risks", "--message-file", "--co-author", "--review", "--tz"}
+    paths_file: str | None = None
+    valued = {"--gate", "--subject", "--why", "--changes", "--test-plan", "--risks", "--message-file", "--co-author", "--review", "--tz", "--paths-file", "-C"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -463,11 +521,19 @@ def main(argv: list[str]) -> int:
             elif a == "--review":
                 if not val:
                     return usage("--review needs a file")
-                review = Path(os.path.realpath(val))
+                review_arg = val
             elif a == "--tz":
                 if val != "local":
                     return usage(f"--tz {val!r}: the only value is local; without --tz the dates are UTC")
                 local_tz = True
+            elif a == "--paths-file":
+                if paths_file is not None:
+                    return usage("--paths-file given twice; put all the paths in one file")
+                paths_file = val
+            elif a == "-C":
+                if folder is not None:
+                    return usage("-C given twice")
+                folder = val
             else:
                 message_file = val
             i += 2
@@ -478,13 +544,25 @@ def main(argv: list[str]) -> int:
             continue
         return usage(f"unknown option {a!r} (paths go after --)")
 
+    if folder is not None:
+        try:
+            os.chdir(folder)
+        except OSError as e:
+            return usage(f"-C {folder}: {e.strerror or e}")
+    review = Path(os.path.realpath(review_arg)) if review_arg is not None else None
+
     # 1. paths by name
+    if paths_file is not None:
+        try:
+            paths = (paths or []) + read_paths_file(paths_file)
+        except ValueError as e:
+            return usage(str(e))
     if paths is None:
-        return usage("missing -- before the paths")
+        return usage("missing -- before the paths, and no --paths-file")
     if not paths:
         return usage("no paths after --; git add is by name, never -A or .")
     for p in paths:
-        if p in (".", "..", "-A", "--all", "*") or p.startswith("-"):
+        if only_dot_parts(p) or p == "*" or p.startswith("-"):
             return usage(f"refusing path {p!r}; git add is by name, never -A or .")
 
     # message inputs
@@ -532,6 +610,9 @@ def main(argv: list[str]) -> int:
         print(f"ctlhq-commit: not inside a git work tree: {Path.cwd()}", file=sys.stderr)
         return 1
     root = Path(r.stdout.strip())
+    for p in paths:
+        if is_top(p, root):
+            return usage(f"refusing path {p!r}, the top of the work tree; git add is by name, never -A or .")
 
     # 2. gate
     gate_record = None
@@ -542,7 +623,7 @@ def main(argv: list[str]) -> int:
         meta_path = root / ".local" / "gate" / f"{gate}.meta"
         meta_line = meta_path.read_text(encoding="utf-8", errors="replace").strip() if meta_path.is_file() else "(no .meta line)"
         if not exit_path.is_file():
-            print(f"ctlhq-commit: gate {gate}: no file .local/gate/{gate}.exit; run `ctlhq-run-gate --name {gate} -- <command>` first", file=sys.stderr)
+            print(f"ctlhq-commit: gate {gate}: no file .local/gate/{gate}.exit; run `{gate_line(gate, os.getcwd(), '<command>')}` first", file=sys.stderr)
             return 3
         found = exit_path.read_text(encoding="utf-8", errors="replace").strip()
         if found != "0":
@@ -607,7 +688,7 @@ def main(argv: list[str]) -> int:
     if retracked:
         print(f"ctlhq-commit: {', '.join(retracked)}: staged as deleted but still on disk, and git does not ignore it; refusing to commit", file=sys.stderr)
         print("why: git add would track it again, so the staged deletion would be lost.", file=sys.stderr)
-        print("fix: to stop tracking it, add the path to .gitignore and name .gitignore after -- too; to keep it tracked, run `git add <path>`. With --gate, rerun the gate, then ctlhq-commit.", file=sys.stderr)
+        print(f"fix: to stop tracking it, add the path to .gitignore and name .gitignore after -- too; to keep it tracked, run `{git_at(os.getcwd())} add <path>`. With --gate, rerun the gate, then ctlhq-commit.", file=sys.stderr)
         return 3
     to_rm = [p for p in paths if p not in on_disk]
     to_add = [p for p, n in pairs if p in on_disk and n not in ignored]
@@ -617,7 +698,7 @@ def main(argv: list[str]) -> int:
         print(f"ctlhq-commit: {e}", file=sys.stderr)
         return 1
     if stray:
-        return refuse_unnamed("the index holds staged changes outside the named paths", stray)
+        return refuse_unnamed("the index holds staged changes outside the named paths", stray, root)
     index = Index()
     head_before = git(["rev-parse", "-q", "--verify", "HEAD"]).stdout.strip() or None
 
@@ -655,7 +736,7 @@ def main(argv: list[str]) -> int:
             return undo(1)
         outside = [p for p in changed if not covered(p, named)]
         if outside:
-            return undo(refuse_unnamed("the commit would change paths outside the named paths", outside))
+            return undo(refuse_unnamed("the commit would change paths outside the named paths", outside, root))
         if gate is not None:
             reference = tested
         else:
@@ -675,14 +756,14 @@ def main(argv: list[str]) -> int:
             return undo(refuse_gate(
                 gate, "the commit would hold content for these paths that differs from the tree it tested", meta_line, differ,
                 why="git commit takes each path's staged copy, which differs here from the file the gate tested.",
-                fix=MARKS_FIX + "or ",
+                fix=marks_fix(root) + "or ",
             ))
         if differ:
             print("ctlhq-commit: the commit would hold content for these paths that differs from the files on disk; refusing to commit:", file=sys.stderr)
             for n in differ:
                 print(f"  {n}", file=sys.stderr)
             print("why: git commit takes each path's staged copy, which differs here from the file on disk, so nobody has seen what would be committed.", file=sys.stderr)
-            print(f"fix: {MARKS_FIX}then run ctlhq-commit again.", file=sys.stderr)
+            print(f"fix: {marks_fix(root)}then run ctlhq-commit again.", file=sys.stderr)
             return undo(3)
         if gate is not None:
             print(f"gate {gate}: exit 0 on this tree ({meta_line})")
@@ -741,16 +822,17 @@ def main(argv: list[str]) -> int:
                 print(f"  {l}", file=sys.stderr)
         print("why: a hook or another process changed the index or the files during git commit, so no gate checked what was committed; --allow-dirty never accepts this.", file=sys.stderr)
         parent = git(["rev-parse", "-q", "--verify", "HEAD^"]).stdout.strip() or None
+        at_top = git_at(root)
         if parent == head_before:
-            undo_cmd = "git reset --soft HEAD~1" if head_before else "git update-ref -d HEAD"
-            undo_text = f"Check it with `git show --stat {full[:12]}` and undo it with `{undo_cmd}` if it is wrong"
+            undo_cmd = f"{at_top} reset --soft HEAD~1" if head_before else f"{at_top} update-ref -d HEAD"
+            undo_text = f"Check it with `{at_top} show --stat {full[:12]}` and undo it with `{undo_cmd}` if it is wrong"
         elif head_before:
             b = head_before[:12]
             undo_text = (f"HEAD's parent is not {b}, the commit HEAD named before this run, so another commit was made too (a hook "
-                         f"can do this). Check `git log {b}..HEAD`, and go back with `git reset --soft {b}` only if every commit after {b} is wrong")
+                         f"can do this). Check `{at_top} log {b}..HEAD`, and go back with `{at_top} reset --soft {b}` only if every commit after {b} is wrong")
         else:
             undo_text = ("This run made the first commit, but HEAD has a parent, so another commit was made too (a hook can do this). "
-                         "Check `git log` before you undo anything")
+                         f"Check `{at_top} log` before you undo anything")
         print(f"fix: the commit {full[:12]} exists. {undo_text}; then check the repository's hooks and run ctlhq-commit again.", file=sys.stderr)
         return 1
     if dirty:

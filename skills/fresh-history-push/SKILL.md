@@ -18,7 +18,7 @@ Deleting `.git` cannot be undone without the backup, so the backup comes first a
    2. `git status --porcelain` prints nothing, so the tree is clean. `git worktree list` shows one worktree.
    3. `git ls-files -ci --exclude-standard` prints nothing, so no tracked file is also ignored. After the reset, `git add -A` would leave such a file out.
    4. `git submodule status` prints nothing. A submodule's history lives inside `.git`, which the reset deletes.
-   5. The gate is green on this tree. Run `ctlhq-run-gate -- <check command>` now and read its exit line.
+   5. The gate is green on this tree. Run `<repo-root>/bin/ctlhq-run-gate -C <repo> -- <check command>` now and read its exit line. `<repo-root>` is the literal absolute path of ctlhq's main checkout.
    6. `.git/info/exclude` holds no active pattern. Each one moves into `.gitignore` first.
    7. A private-values list exists: first-commit's user list `~/.config/first-commit/private-values.txt`, or `.local/first-commit/private-values.txt` with `git check-ignore -q .local/first-commit/private-values.txt` exiting 0. `ctlhq-first-push` needs one in step 4.
    8. The operator has created the empty GitHub repository (no README, license, or `.gitignore`) and named its owner and name.

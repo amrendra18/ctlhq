@@ -167,15 +167,22 @@ stall, a re-ask, or an unsafe step.
   `tail` or `grep`), `git add` by name, `git commit -F` from a message file,
   signature and clean tree verified, hash recorded in `PLAN.md`. Only then say
   "committed <hash>".
-  `ctlhq-run-gate -- <check command>` (in ctlhq's `bin/` folder, added to PATH by
-  install step 4 in ctlhq's README) runs the gate and prints its exit line
-  directly. `ctlhq-commit --gate gate -- <paths>` then
-  stages, commits, and verifies, and refuses when the gate is not green.
+  `ctlhq-run-gate` (in ctlhq's `bin/` folder) runs the gate and prints its exit
+  line directly. `ctlhq-commit` then stages, commits, and verifies, and refuses
+  when the gate is not green.
   Recording the hash in `PLAN.md` stays with the agent. Agents commit only
   through `ctlhq-commit`, which adds the Co-Authored-By trailer from
   `--co-author` or `CTLHQ_CO_AUTHOR`. The trailer names the model and uses
   its maker's address, `noreply@anthropic.com` for Claude or
-  `noreply@openai.com` for Codex.
+  `noreply@openai.com` for Codex. Run these two tools as one command each, with
+  the full path first and no `cd`, pipe, or environment prefix. The agent tool's
+  permission rules match the command text as written. The forms are
+  `<repo-root>/bin/ctlhq-run-gate -C <work-tree> -- <check command>` and
+  `<repo-root>/bin/ctlhq-commit -C <work-tree> --gate gate --review FILE --message-file FILE --co-author LINE --paths-file .local/paths.txt`.
+  `<repo-root>` is the literal absolute path of ctlhq's main checkout, with no
+  `~`, no `$HOME`, and no linked worktree. Relative files resolve in
+  `<work-tree>`. Keep the paths file under `.local/`. `ctlhq-run-gate` has no
+  allow rule, because a rule for it would allow any command.
 - Carry a rename, removal, or policy change to every place it applies. That
   means file names, contents, configs, comments, and code kept for the old
   form. Before calling it done, `ctlhq-rename-check OLD_NAME...` must exit 0.
