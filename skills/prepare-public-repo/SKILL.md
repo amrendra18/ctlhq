@@ -10,7 +10,7 @@ metadata:
 The goal is a current tree that a stranger can read and that holds nothing private.
 This skill reviews and fixes that tree. It never touches `.git` history, remotes, or GitHub settings.
 
-## Tool
+## Tools
 
 Paths such as `tests/privacy/run.sh` are relative to the ctlhq repository (the folder that holds this `skills/` directory). `<project>` and `<worktree>` are folders of the repository being prepared.
 
@@ -19,6 +19,20 @@ Paths such as `tests/privacy/run.sh` are relative to the ctlhq repository (the f
 ```
 tests/privacy/run.sh --root <worktree>   # file:line per hit; ignored files are not read
 ```
+
+`ctlhq-public-files` lists files, by name, that a stranger may not need: planning material, design mocks, measurement files, and tool configs. Each line is a question for the reviewer. A file that stays goes in the allow file with its reason, so the tool can exit 0. `--help` defines every exit code.
+
+```
+ctlhq-public-files --root <worktree> --allow <worktree>/.local/public-files-allow.txt   # path: kind per match; ignored files are not listed
+```
+
+A project built with ctlhq's method keeps `AGENTS.md`, so its allow file holds this line:
+
+```
+AGENTS.md  instructions for contributors who use a coding agent
+```
+
+Leave `--allow` out until that file exists; a missing allow file exits 2.
 
 ## Steps
 

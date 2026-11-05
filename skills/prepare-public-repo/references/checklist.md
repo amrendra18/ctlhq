@@ -79,7 +79,7 @@ The plan block from Confirm names the license, as step 1.5 of the skill sets it.
 
 | # | Check | How |
 | --- | --- | --- |
-| 1 | Every tracked file should be public | `git ls-files`, judged file by file. |
+| 1 | A stranger who uses or contributes needs every listed file. Check planning material, design mocks, measurement files, and tool configs that nothing runs first. | `git ls-files -co --exclude-standard`, judged file by file. `ctlhq-public-files --root <worktree>` lists likely cases by name. A file nobody needs leaves the tree. A kept match goes in `<worktree>/.local/public-files-allow.txt` with its reason. |
 | 2 | `.gitignore` covers every local file | `GIT_OPTIONAL_LOCKS=0 git -C <project> status --ignored --short` in the main folder, which keeps the command read-only. Each untracked local file needs a `.gitignore` pattern. |
 | 3 | No tracked file is also ignored | `git ls-files -ci --exclude-standard` prints nothing. |
 | 4 | No generated output, caches, logs, `.env` files, keys, editor or OS files, or large binaries | A generated file that a command can rebuild leaves the tree; the command writes it into an ignored folder. |
@@ -105,3 +105,4 @@ The plan block from Confirm names the license, as step 1.5 of the skill sets it.
 | 3 | `gitleaks dir` on the copy of the listed files exits 0. |
 | 4 | `git diff --quiet -- <protected paths>` exits 0, so no protected file changed. |
 | 5 | `git status --short` and `git diff --stat`, including deletions and new files. |
+| 6 | `ctlhq-public-files --root <worktree> --allow <worktree>/.local/public-files-allow.txt` exits 0. With no kept match, leave `--allow` out. |

@@ -17,8 +17,8 @@ bad() { fail=$((fail + 1)); echo "FAIL: $1"; }
 expect_rc() { if [ "$1" -eq "$2" ]; then ok; else bad "$3 (expected exit $1, got $2)"; fi; }
 expect_grep() { if printf '%s\n' "$2" | grep -Eq -- "$1"; then ok; else bad "$3 (no line matches: $1)"; fi; }
 expect_no() { if printf '%s\n' "$2" | grep -Eq -- "$1"; then bad "$3 (a line matches: $1)"; else ok; fi; }
-# The brand word and the old host name are built from pieces so the brand-word scan of this
-# repository (check 2) does not flag this file.
+# The brand word and the old plugin name's first part are built from pieces so the brand-word
+# scan of this repository (check 2) does not flag this file.
 OLD_BRAND="p""stack"
 OLD_HOST="Cur""sor"
 ASK="Ask""Question"
@@ -83,22 +83,16 @@ fresh; printf '# Notes\n\nChanges from %s.\n' "$OLD_BRAND" >"$tgt/NOTES.md"; run
 expect_rc 1 "$rc" "check 2 control (brand word in another Markdown file): exits 1"
 expect_grep '^brand leftover: NOTES.md:3  ' "$out" "check 2: a top-level Markdown file has no exemption"
 
-fresh; printf '\nAsk the operator (%s in %s).\n' "$ASK" "$OLD_HOST" >>"$tgt/skills/alpha/SKILL.md"; run
-expect_rc 1 "$rc" "check 2 control (the old host name in a skill): exits 1"
-expect_grep "^brand leftover: skills/alpha/SKILL.md:$(line_of "$ASK" skills/alpha/SKILL.md)  " "$out" "check 2: the old host name is reported with file:line"
-fresh; printf '\nThe %s folder.\n' "$(printf '%s' "$OLD_HOST" | tr '[:lower:]' '[:upper:]')" >>"$tgt/skills/alpha/SKILL.md"; run
-expect_rc 1 "$rc" "check 2 control (the old host name in capitals): exits 1"
-fresh; lower="$(printf '%s' "$OLD_HOST" | tr '[:upper:]' '[:lower:]')"
-mkdir -p "$tgt/skills/ctlhq-mode/scripts/watch-pr"
-printf 'let %s = 0;\n' "$lower" >"$tgt/skills/ctlhq-mode/scripts/check-plan.mjs"
-printf 'const %s = page.endCursor;\n' "$lower" >"$tgt/skills/ctlhq-mode/scripts/watch-pr/github.ts"
-printf '\nRead endCursor and call g_gh_%s.\n' "$lower" >>"$tgt/skills/alpha/SKILL.md"; run
-expect_rc 0 "$rc" "check 2: the two paging-variable paths, endCursor, and g_gh_ names exit 0"
-expect_no '^brand leftover' "$out" "check 2: no brand leftover for the allowed paths and words"
+fresh; printf '\nAsk the operator (%s).\n' "$ASK" >>"$tgt/skills/alpha/SKILL.md"; run
+expect_rc 1 "$rc" "check 2 control (the old question-tool name in a skill): exits 1"
+expect_grep "^brand leftover: skills/alpha/SKILL.md:$(line_of "$ASK" skills/alpha/SKILL.md)  " "$out" "check 2: the old question-tool name is reported with file:line"
+fresh; printf '\nThe %s folder and the %s folder.\n' "$OLD_HOST" "$(printf '%s' "$OLD_HOST" | tr '[:lower:]' '[:upper:]')" >>"$tgt/skills/alpha/SKILL.md"; run
+expect_rc 0 "$rc" "check 2: the editor name alone exits 0"
+expect_no '^brand leftover' "$out" "check 2: the editor name alone is not a brand leftover"
 
-fresh; printf '\nA %s plugin.\n' "$OLD_HOST" >>"$tgt/README.md"; run
-expect_rc 1 "$rc" "check 2 control (the old host name in README.md after the Credits section): exits 1"
-expect_grep "^brand leftover: README.md:$(line_of 'A '"$OLD_HOST"' plugin' README.md)  " "$out" "check 2: README.md outside Credits is reported with file:line"
+fresh; printf '\nA %s plugin.\n' "$OLD_BRAND" >>"$tgt/README.md"; run
+expect_rc 1 "$rc" "check 2 control (the brand word in README.md after the Credits section): exits 1"
+expect_grep "^brand leftover: README.md:$(line_of 'A '"$OLD_BRAND"' plugin' README.md)  " "$out" "check 2: README.md outside Credits is reported with file:line"
 fresh; sed -i.bak "s/^A fixture\.\$/A fixture, from $OLD_BRAND./" "$tgt/README.md"; rm "$tgt/README.md.bak"; run
 expect_rc 1 "$rc" "check 2 control (the brand word in README.md before the Credits section): exits 1"
 expect_grep '^brand leftover: README.md:3  ' "$out" "check 2: README.md line 3 is reported"
@@ -111,9 +105,8 @@ for w in $OLD_NAMES; do
 	expect_rc 1 "$rc" "check 2 control (old name $w in a skill): exits 1"
 	expect_grep "^brand leftover: skills/alpha/SKILL.md:$(line_of "Run $w here" skills/alpha/SKILL.md)  " "$out" "check 2: the old name $w is reported with file:line"
 done
-fresh; mkdir -p "$tgt/skills/ctlhq-mode/scripts"
-printf 'see %s-team-kit\n' "$(printf '%s' "$OLD_HOST" | tr '[:upper:]' '[:lower:]')" >"$tgt/skills/ctlhq-mode/scripts/check-plan.mjs"; run
-expect_grep '^brand leftover: skills/ctlhq-mode/scripts/check-plan.mjs:1  ' "$out" "check 2: the old host's plugin name is reported in a path that may hold the host name"
+fresh; printf '\nsee %s-team-kit\n' "$(printf '%s' "$OLD_HOST" | tr '[:upper:]' '[:lower:]')" >>"$tgt/skills/alpha/SKILL.md"; run
+expect_grep "^brand leftover: skills/alpha/SKILL.md:$(line_of '-team-kit' skills/alpha/SKILL.md)  " "$out" "check 2: the old plugin name in lower case is reported"
 fresh; sed -i.bak "s/^From .*/& $OLD_NAMES./" "$tgt/README.md"; rm "$tgt/README.md.bak"
 printf 'Copyright (c) 2026 %s\n' "$OLD_NAMES" >>"$tgt/LICENSE"; run
 expect_rc 0 "$rc" "check 2: LICENSE and the README Credits section may hold the old names"
@@ -152,8 +145,8 @@ fresh; sed -i.bak 's/^## Credits$/```text\
 expect_rc 1 "$rc" "check 2 control (a '## Credits' line inside fenced code, the brand word after it): exits 1"
 expect_grep "^brand leftover: README.md:$(line_of "From $OLD_BRAND" README.md)  " "$out" "check 2: a Credits heading inside fenced code exempts nothing"
 
-fresh; mkdir -p "$tgt/docs/notes"; printf '# Setup\n\nOpen %s.\n' "$OLD_HOST" >"$tgt/docs/notes/01-setup.md"; run
-expect_rc 1 "$rc" "check 2 control (the old host name in a docs file): exits 1"
+fresh; mkdir -p "$tgt/docs/notes"; printf '# Setup\n\nOpen %s.\n' "$OLD_BRAND" >"$tgt/docs/notes/01-setup.md"; run
+expect_rc 1 "$rc" "check 2 control (the brand word in a docs file): exits 1"
 
 fresh; mkdir -p "$tgt/docs/research"; printf '# Notes\n\nSee [the source](gone.md).\n' >"$tgt/docs/research/notes.md"; run
 expect_rc 1 "$rc" "check 1 control (broken link in docs/research): exits 1"
