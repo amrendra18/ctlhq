@@ -497,6 +497,8 @@ def main(argv: list[str]) -> int:
             message = Path(message_file).read_text(encoding="utf-8")
         except OSError as e:
             return usage(f"cannot read --message-file {message_file}: {e.strerror or e}")
+        except UnicodeDecodeError:
+            return usage(f"--message-file {message_file} is not UTF-8 text")
         if not message.strip():
             return usage(f"--message-file {message_file} is empty")
     else:

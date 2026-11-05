@@ -4,7 +4,7 @@
 Usage:
   ctlhq-message-check [--root DIR] [FILE]
   ctlhq-message-check --history [--new-only] [--root DIR]
-  ctlhq-message-check --new-only [--root DIR]
+  ctlhq-message-check --new-only [--rev REV] [--remote NAME] [--root DIR]
   ctlhq-message-check --branch NAME [--root DIR]
 
 A commit message and pull-request text outlive the commit, and a reader has only the
@@ -18,12 +18,17 @@ Modes:
                             and the tags, merge commits included. Prints one line per flagged
                             commit, "HASH: line N: rule; line N: rule", then "flagged: N of M".
   --new-only                the same, for commits no remote-tracking ref reaches.
+  --rev REV                 with --new-only, reads what REV reaches, in place of HEAD, the local
+                            branches and the tags. ctlhq-push names what it pushes, so a flagged
+                            commit on another local branch does not stop that push.
+  --remote NAME             with --new-only, only NAME's remote-tracking refs count as held. So a
+                            commit one remote holds is still new to another.
   --branch NAME             applies the branch rule and the word lists to one name, and prints
                             "branch: NAME" and one "fix:" line when either matches.
 
 Rules search the whole message. White space with at most one line break matches a space in a
-rule, so a note that wraps is found and a blank line ends it. A finding reports the line where
-it starts.
+rule, so a note that wraps is found and a blank line ends it. A list or quote mark (-, *, +, >)
+at the start of the next line counts as white space. A finding reports the line where it starts.
   path        a path under .local/ for reviews, briefs, verify, plans, msg, commit, or pr-
   approval    the operator approved, accepted, prefers, reviewed or reviews; waits for approval
   review      audit round, round 2, reviews A and B, commit review, commit-review: accept, blind
@@ -45,8 +50,9 @@ Exit 0 clean, 1 findings, 2 usage or any failure to run.
 
 When the check itself is wrong, no flag turns it off. Take these ways out, in this order:
   1. A false flag on one message: reword it.
-  2. A bug in the check: fix the check in that checkout. That checkout's bin/ctlhq-commit runs
-     its own check, so it checks the commit that holds the fix. The usual gate and review apply.
+  2. A bug in the check: fix the check in that checkout. There,
+     bin/ctlhq-commit and bin/ctlhq-push run that checkout's own check, so they check the commit
+     that holds the fix. The usual gate and review apply.
   3. When step 2 cannot work: stop, write BLOCKED.md, write the message to a file, and give the
      operator this block. Deny rules bind agents only, so the operator's own commands still run.
        cd REPO
@@ -74,10 +80,11 @@ RULES = [
                 r"(?i)commit-review:? (accept|fix first|reject)", r"(?i)blind(-| )review", r"(?i)pull(-| )request reviews?", r"(?i)\bPR reviews?"]),
     ("label", [r"(?i:milestone(-| )[0-9])", r"\bM[0-9]+\b"]),
 ]
-GAP = r"(?=\s)[^\S\n]*\n?[^\S\n]*"
+GAP = r"(?=\s)[^\S\n]*(?:\n[^\S\n]*(?:[-*+>][^\S\n]+)*)?"
 COMPILED = [(name, [re.compile(p.replace(" ", GAP)) for p in patterns]) for name, patterns in RULES]
 BRANCH_LABEL = r"(m[0-9]+|milestone-?[0-9]+)"
 BRANCH_RE = re.compile(rf"(?i)^{BRANCH_LABEL}(-|$)|[-/]{BRANCH_LABEL}$")
+REMOTE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 EXTRA = "extra-word"
 RANK = {name: rank for rank, name in enumerate([EXTRA] + [name for name, _ in RULES])}
 HOMES = {
@@ -206,8 +213,9 @@ def check_text(message: str, words: list[re.Pattern]) -> int:
     return 1
 
 
-def check_history(root: Path, new_only: bool, words: list[re.Pattern]) -> int:
-    revs = ["HEAD", "--branches", "--tags"] + (["--not", "--remotes"] if new_only else [])
+def check_history(root: Path, new_only: bool, rev: str | None, remote: str | None, words: list[re.Pattern]) -> int:
+    held = f"--remotes={remote}" if remote else "--remotes"
+    revs = ([rev] if rev else ["HEAD", "--branches", "--tags"]) + (["--not", held] if new_only else [])
     r = git(root, ["-c", "log.showSignature=false", "log", "-z", "--format=%H%n%B"] + revs + ["--"])
     if r.returncode != 0:
         raise CannotRun(f"git log failed in {root} (exit {r.returncode}): {r.stderr.decode(errors='replace').strip()}")
@@ -238,6 +246,8 @@ def run(argv: list[str]) -> int:
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--history", action="store_true")
     parser.add_argument("--new-only", action="store_true")
+    parser.add_argument("--rev")
+    parser.add_argument("--remote")
     parser.add_argument("--branch")
     parser.add_argument("--root", default=".")
     parser.add_argument("file", nargs="?")
@@ -250,6 +260,12 @@ def run(argv: list[str]) -> int:
         parser.error("--branch takes no FILE, --history or --new-only")
     if history and args.file:
         parser.error("--history and --new-only take no FILE")
+    if (args.rev or args.remote) and not args.new_only:
+        parser.error("--rev and --remote need --new-only")
+    if args.rev and args.rev.startswith("-"):
+        parser.error("a --rev value cannot start with a dash")
+    if args.remote and not REMOTE_NAME.fullmatch(args.remote):
+        parser.error("a --remote value must be a remote name")
     root = Path(args.root)
     if not root.is_dir():
         raise CannotRun(f"--root {args.root}: no such folder")
@@ -257,7 +273,7 @@ def run(argv: list[str]) -> int:
     if args.branch is not None:
         return check_branch(args.branch, words)
     if history:
-        return check_history(root, args.new_only, words)
+        return check_history(root, args.new_only, args.rev, args.remote, words)
     raw = Path(args.file).read_bytes() if args.file else sys.stdin.buffer.read()
     return check_text(raw.decode("utf-8", "replace"), words)
 
