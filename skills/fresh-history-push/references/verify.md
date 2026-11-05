@@ -92,7 +92,7 @@ ctlhq-push -u origin main
 1. Rerun section 1 first. The visibility may have changed since the preconditions.
 2. `git remote -v` shows the HTTPS fetch address and the SSH push address.
 3. `ssh -T git@github.com` greets the owner by name and exits 1; that exit is normal. A "Permission denied" line means the SSH agent holds no key (see the notes).
-4. `ctlhq-push` pushes only when every push address belongs to the GitHub owner in its settings file. It prints `pushed` last.
+4. `ctlhq-push` pushes only when every push address belongs to the GitHub owner in its settings file, and `ctlhq-message-check` finds nothing in the new commit messages and branch names. It prints `pushed` last, and exit 6 means the check refused the push or did not run.
 
 Only when the project releases by tag. Keep `TZ=UTC` when the operator chose UTC for the commit, so the tag records the same time zone:
 

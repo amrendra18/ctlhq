@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # tests/ctlhq-push/run.sh: checks for bin/ctlhq-push in a scratch git repository. No
-# network: the address checks push with GIT_SSH_COMMAND=false, so ssh fails at once. The message
-# checks push through a stand-in for ssh that hands each push to a scratch bare repository.
+# network: the address checks push with GIT_SSH_COMMAND=false, so ssh fails at once.
 # The allowed owner comes from a scratch HOME's .ctlhq/first-push.toml, never the real one.
 # Prints "N checks passed" and exits 1 when any check fails.
 set -u
@@ -131,8 +130,6 @@ printf 'github_owner = "kims"\n' >"$settings"
 git -C "$repo" remote set-url mine "$(printf 'git@github.com:Kim\305\277/x.git')"
 "$fp" -C "$repo" mine main >/dev/null 2>&1; expect_rc 3 "$?" "a long s in the address is not the owner's s"
 
-# The message check at push. A stand-in for ssh hands each push to a bare repository in a scratch
-# folder, so the address stays the allowed GitHub form and nothing leaves the machine.
 printf 'github_owner = "acme"\n' >"$settings"
 remotes="$tmp/remotes"
 mkdir -p "$remotes/acme"
@@ -237,7 +234,10 @@ rm "$HOME/.ctlhq/message-words.txt"
 fresh
 for refspec in nosuch 'refs/heads/*:refs/heads/*' 'tag v1'; do
   out="$("$fp" -C "$m" mine $refspec 2>&1)"; expect_rc 6 $? "source '$refspec' that names no commit exits 6"
-  expect_grep 'did not run' "$out" "source '$refspec': the line says the check did not run"
+  expect_grep 'names no commit' "$out" "source '$refspec': the line says it names no commit"
+  expect_grep '^why: ' "$out" "source '$refspec': the refusal has a why: line"
+  expect_grep '^fix: ' "$out" "source '$refspec': the refusal has a fix: line"
+  expect_nogrep 'did not run' "$out" "source '$refspec': a mistyped name is not a check that did not run"
 done
 expect_eq "" "$(refs)" "a source that names no commit moves no remote ref"
 
@@ -263,7 +263,6 @@ expect_grep '^  3\. .*ctlhq-message-check' "$("$fp" --help)" "--help names the c
 expect_grep 'Tag names, tag messages and other ref names are not read' "$("$fp" --help)" "--help says what the check leaves out"
 expect_grep '; 6 the$' "$("$fp" --help)" "--help lists exit 6"
 
-# Each refusal prints a fix that works. These follow the printed step, then push again.
 next_commit() { git -C "$m" commit -q --allow-empty -m "Change the next file"; }
 printed_base() { printf '%s\n' "$1" | sed -n 's/.*git reset --soft \([0-9a-f]\{40\}\).*/\1/p'; }
 fetch_all() { git -C "$m" fetch -q mine '+refs/heads/*:refs/remotes/mine/*'; }
@@ -408,6 +407,28 @@ git -C "$shallow" update-ref -d refs/remotes/mine/main
 out="$("$fp" -C "$shallow" mine main 2>&1)"; expect_rc 6 $? "a flagged commit at a shallow clone's edge exits 6"
 expect_grep '^fix: 2\. .*rewritten by the operator' "$out" "a commit at a shallow clone's edge goes to the operator"
 expect_nogrep 'update-ref' "$out" "a shallow clone never gets the line for a first commit"
+
+fresh
+git -C "$m" config remote.mine.push 'refs/heads/main:refs/heads/m2-safety'
+"$fp" -C "$m" mine main >/dev/null 2>&1; rc=$?
+expect_eq "refs/heads/main $(git -C "$m" rev-parse main)" "$(refs)" "remote.NAME.push cannot send a plain refspec to another name"
+expect_rc 0 "$rc" "a plain refspec pushes to its own name under remote.NAME.push"
+
+fresh
+git -C "$m" config push.default upstream
+git -C "$m" config branch.main.remote mine
+git -C "$m" config branch.main.merge refs/heads/m2-safety
+"$fp" -C "$m" mine main >/dev/null 2>&1; rc=$?
+expect_eq "refs/heads/main $(git -C "$m" rev-parse main)" "$(refs)" "push.default=upstream cannot send a plain refspec to another name"
+expect_rc 0 "$rc" "a plain refspec pushes to its own name under push.default=upstream"
+
+fresh
+git -C "$m" tag v4
+"$fp" -C "$m" mine v4 >/dev/null 2>&1; expect_rc 0 $? "a plain tag still pushes"
+expect_eq "refs/tags/v4 $(git -C "$m" rev-parse v4)" "$(refs)" "a plain tag stays a tag"
+"$fp" -C "$m" -u mine HEAD >/dev/null 2>&1; expect_rc 0 $? "HEAD with -u pushes the current branch"
+expect_eq "mine" "$(git -C "$m" config branch.main.remote)" "-u records the upstream"
+expect_eq "refs/heads/main" "$(git -C "$m" config branch.main.merge)" "-u records the branch's own name"
 
 echo "$pass checks passed"
 [ "$fail" -eq 0 ]

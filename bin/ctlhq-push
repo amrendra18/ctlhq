@@ -31,11 +31,14 @@ Steps, in order:
      names the push sends: `--new-only --remote <remote> --rev` for each refspec's source, then
      `--branch` for each branch name the remote would get. Only this remote's remote-tracking refs
      count as held. A finding refuses (exit 6) and prints the commit, line and rule, or the branch,
-     and the steps that fix that case. So does a source that names no commit, such as a wildcard,
-     and a check that exits anything else but 0, exits 1 with no finding, or cannot start: the
-     line says the check did not run. No flag turns this off; `ctlhq-message-check --help` lists
-     the ways out. Tag names, tag messages and other ref names are not read.
-  4. Runs `git push [-u] <remote> <refspec...>` in DIR, with stdin closed. The environment
+     and the steps that fix that case. So does a source that names no commit, such as a wildcard
+     or a mistyped name. So does a check that exits anything else but 0, exits 1 with no finding,
+     or cannot start: the line says the check did not run. No flag turns this off;
+     `ctlhq-message-check --help` lists the ways out.
+     Tag names, tag messages and other ref names are not read.
+  4. Runs `git push [-u] <remote> <refspec...>` in DIR, with stdin closed. A refspec with no
+     target goes out with its own full name as the target, so remote.<name>.push and
+     push.default=upstream cannot send it to a name step 3 did not read. The environment
      passes through, so GIT_SSH_COMMAND works, and the repository's pre-push hooks run.
      Prints "pushing: <remote> <refspecs> -> <address> (owner OWNER from <settings file>)"
      first and "pushed" or "push failed (exit N)" last.
@@ -123,8 +126,7 @@ def git(folder: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def check_findings(folder: Path, *arguments: str) -> str:
-    """What the check printed when it found something, or "" when it found nothing."""
+def check_findings(folder: Path, *arguments: str) -> str | None:
     try:
         result = subprocess.run(
             (str(MESSAGE_CHECK), "--root", str(folder), *arguments),
@@ -137,14 +139,13 @@ def check_findings(folder: Path, *arguments: str) -> str:
     except OSError as error:
         raise CheckDidNotRun(f"(exit None): {error}") from error
     if result.returncode == 0:
-        return ""
+        return None
     if result.returncode == 1 and result.stdout.strip():
         return result.stdout.rstrip()
     raise CheckDidNotRun(f"(exit {result.returncode}): {result.stderr.strip() or 'it printed no reason'}")
 
 
-def branch_name(folder: Path, source: str, target: str) -> str | None:
-    """The branch this refspec names on the remote. None for a tag, another ref, or no name Git can find."""
+def remote_branch_name(folder: Path, source: str, target: str) -> str | None:
     full = git(folder, "rev-parse", "--symbolic-full-name", source).stdout.strip()
     if target and not target.startswith("refs/") and full.startswith("refs/tags/"):
         return None
@@ -169,8 +170,14 @@ def operator_step(reason: str) -> str:
     )
 
 
+def explicit_refspec(folder: Path, refspec: str) -> str:
+    if ":" in refspec:
+        return refspec
+    full = git(folder, "rev-parse", "--symbolic-full-name", refspec).stdout.strip()
+    return f"{full}:{full}" if full.startswith("refs/") else refspec
+
+
 def rewrite_step(folder: Path, remote: str, source: str, branch: str | None, findings: str) -> str:
-    """The rewrite that leaves a push this remote takes, or a plain hand-off when no rewrite here can."""
     flagged = set(re.findall(r"(?m)^([0-9a-f]{12}): ", findings))
     commit = commit_of(folder, source)
     held = f"--remotes={remote}"
@@ -239,20 +246,21 @@ def refused_by_message_check(folder: Path, remote: str, refspecs: list[str]) -> 
     for source, _, _ in parts:
         if not commit_of(folder, source):
             print(
-                f"ctlhq-push: the message check did not run: source {source!r} names no commit; nothing was pushed.\n"
-                "fix: push a plain branch or tag name.",
+                f"ctlhq-push: source {source!r} names no commit; nothing was pushed.\n"
+                "why: the message check reads commits, and a wildcard or a mistyped name gives it none.\n"
+                "fix: push a plain branch or tag name that exists.",
                 file=sys.stderr,
             )
             return True
     refused = False
     try:
         for source, _, target in parts:
-            branch = branch_name(folder, source, target)
+            branch = remote_branch_name(folder, source, target)
             findings = check_findings(folder, "--new-only", "--remote", remote, "--rev", commit_of(folder, source))
             if findings:
                 refused = True
                 refuse_commits(folder, remote, source, branch, findings)
-            findings = check_findings(folder, "--branch", branch) if branch else ""
+            findings = check_findings(folder, "--branch", branch) if branch else None
             if findings:
                 refused = True
                 refuse_branch(folder, remote, branch, findings)
@@ -311,7 +319,8 @@ def main(arguments: list[str]) -> int:
         return fail(3, f"push address {refused[0]} is not a github.com/{owner} repository.", f"push only to a remote whose address is github.com/{owner}/<repo>; other pushes stay with the operator.")
     if refused_by_message_check(folder, remote, refspecs):
         return 6
-    command = ["git", "-C", str(folder), "push", *(["-u"] if upstream else []), remote, *refspecs]
+    explicit = [explicit_refspec(folder, refspec) for refspec in refspecs]
+    command = ["git", "-C", str(folder), "push", *(["-u"] if upstream else []), remote, *explicit]
     print(f"pushing: {remote} {' '.join(refspecs)} -> {', '.join(addresses)} (owner {owner} from {settings})", flush=True)
     result = subprocess.run(command, stdin=subprocess.DEVNULL, check=False)
     if result.returncode != 0:

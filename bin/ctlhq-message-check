@@ -50,8 +50,9 @@ Exit 0 clean, 1 findings, 2 usage or any failure to run.
 
 When the check itself is wrong, no flag turns it off. Take these ways out, in this order:
   1. A false flag on one message: reword it.
-  2. A bug in the check: fix the check in that checkout. That checkout's bin/ctlhq-commit runs
-     its own check, so it checks the commit that holds the fix. The usual gate and review apply.
+  2. A bug in the check: fix the check in that checkout. There,
+     bin/ctlhq-commit and bin/ctlhq-push run that checkout's own check, so they check the commit
+     that holds the fix. The usual gate and review apply.
   3. When step 2 cannot work: stop, write BLOCKED.md, write the message to a file, and give the
      operator this block. Deny rules bind agents only, so the operator's own commands still run.
        cd REPO
