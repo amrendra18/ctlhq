@@ -64,7 +64,7 @@ printf '0\n' > .local/gate/gate.exit
 err="$("$fc" --gate gate "${four[@]}" -- a.txt 2>&1)"; expect_rc 3 $? "a green exit with no tree record exits 3"
 expect_grep 'gate\.tree' "$err" "the refusal names the missing tree record"
 expect_grep '^why: ' "$err" "the missing-record refusal has a why: line"
-expect_grep '^fix: rerun `ctlhq-run-gate' "$err" "the missing-record refusal says to rerun the gate"
+expect_grep '^fix: rerun `/.*/ctlhq-run-gate -C /' "$err" "the missing-record refusal says to rerun the gate"
 printf 'head none\ntracked x\nuntracked y\n' > .local/gate/gate.tree
 err="$("$fc" --gate gate "${four[@]}" -- a.txt 2>&1)"; expect_rc 3 $? "a record in the round-1 three-line format exits 3"
 expect_grep 'no tree line' "$err" "the refusal says the record has no tree line"
@@ -73,7 +73,7 @@ expect_eq "$(printf 'exit 0\ntree %s' "$("$rgate" --tree)")" "$(cat .local/gate/
 printf 'edited\n' > a.txt
 err="$("$fc" --gate gate "${four[@]}" -- a.txt 2>&1)"; expect_rc 3 $? "an untracked file edited after the gate exits 3"
 expect_grep 'the files on disk differ from the ones it tested' "$err" "the refusal says the files differ"
-expect_grep '^fix: rerun `ctlhq-run-gate -- test -f a\.txt`' "$err" "the fix line repeats the gate's own command"
+expect_grep '^fix: rerun `/.*/ctlhq-run-gate -C /.* -- test -f a\.txt`' "$err" "the fix line repeats the gate's own command"
 expect_eq "" "$(git ls-files)" "the late refusal unstages the named paths again"
 "$rgate" --force -- test -f a.txt >/dev/null; printf 'one\n' > a.txt
 err="$("$fc" --gate gate "${four[@]}" -- a.txt 2>&1)"; expect_rc 3 $? "a staged file edited after the gate exits 3, with no commits yet"
@@ -185,7 +185,7 @@ printf '6\n' > keep.txt; "$fc" --allow-dirty "${four[@]}" -- keep.txt >/dev/null
 idx="$(git ls-files -s)"
 err="$("$fc" --allow-dirty "${four[@]}" -- keep.txt 2>&1)"; expect_rc 3 $? "a staged deletion of a file git does not ignore exits 3"
 expect_eq "$idx" "$(git ls-files -s)" "the refused file leaves the index unchanged"
-expect_grep 'add the path to \.gitignore and name \.gitignore after -- too; to keep it tracked, run `git add <path>`' "$err" "the refusal names both ways out and says to name .gitignore"
+expect_grep 'add the path to \.gitignore and name \.gitignore after -- too; to keep it tracked, run `git -C /.* add <path>`' "$err" "the refusal names both ways out and says to name .gitignore"
 git reset -q -- keep.txt
 printf '7\n' > untrack.txt; "$fc" --allow-dirty "${four[@]}" -- untrack.txt >/dev/null 2>&1
 git rm -q --cached untrack.txt; printf 'untrack.txt\n' >> .gitignore
@@ -305,7 +305,7 @@ printf 'BAD\n' > b.txt; git add b.txt; printf 'good\n' > b.txt; printf 'new\n' >
 err="$("$fc" --gate gate "${four[@]}" -- a.txt 2>&1)"; expect_rc 3 $? "P1: staged content on an unnamed path exits 3"
 expect_grep '^  b\.txt$' "$err" "the refusal lists the staged path"
 expect_grep '^why: git commit takes the whole index' "$err" "the refusal has a why: line"
-expect_grep '^fix: name them after --, or unstage them with `git reset -q -- <path>`' "$err" "the refusal has a fix: line"
+expect_grep '^fix: name them after --, or unstage them with `git -C /.* reset -q -- <path>`' "$err" "the refusal has a fix: line"
 expect_eq "b.txt" "$(git diff --cached --name-only)" "the refusal leaves the index as it was"
 expect_eq "$base" "$(git rev-parse HEAD)" "no commit after the P1 refusal"
 printf 'other\n' > b.txt; git add b.txt
@@ -368,7 +368,7 @@ err="$("$fc" --gate gate "${four[@]}" -- a.txt 2>&1)"; expect_rc 1 $? "H1: a hoo
 expect_grep "^ctlhq-commit: the commit [0-9a-f]{12} exists, but it differs from the index ctlhq-commit checked" "$err" "the H1 refusal says the commit differs"
 expect_grep '^  M a\.txt$' "$err" "the H1 refusal names the changed path"
 expect_grep '^fix: the commit [0-9a-f]{12} exists\. ' "$err" "the H1 fix line says the commit exists"
-expect_grep 'undo it with `git reset --soft HEAD~1`' "$err" "the H1 fix line gives the one-commit undo when HEAD's parent is the commit from before"
+expect_grep 'undo it with `git -C /.* reset --soft HEAD~1`' "$err" "the H1 fix line gives the one-commit undo when HEAD's parent is the commit from before"
 expect_eq "changed by a hook|1" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["tree"], d["exit"], sep="|")' ".local/commits/$(git rev-parse HEAD).json")" "the H1 receipt says a hook changed the commit"
 fresh h2; printf '#!/bin/sh\nprintf "HOOKED\\n" > b.txt; git add b.txt\n' > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit
 printf 'a2\n' > a.txt; "$rgate" --force -- true >/dev/null
@@ -513,7 +513,7 @@ printf '#!/bin/sh\n[ -e .git/extra-done ] && exit 0\ntouch .git/extra-done\ngit 
 err="$("$fc" "${four[@]}" -- a.txt 2>&1)"; expect_rc 1 $? "a post-commit hook that makes another commit exits 1"
 fixl="$(printf '%s\n' "$err" | grep '^fix: ')"
 expect_grep "HEAD's parent is not ${h0:0:12}" "$fixl" "the fix: line says HEAD's parent is not the commit from before the run"
-expect_grep "git reset --soft ${h0:0:12}" "$fixl" "the fix: line names that earlier commit"
+expect_grep "git -C /.* reset --soft ${h0:0:12}" "$fixl" "the fix: line names that earlier commit"
 case "$fixl" in *HEAD~1*) bad "the fix: line leaves out git reset --soft HEAD~1";; *) ok;; esac
 
 fresh review; r="$(pwd -P)"; printf 'a2\n' > a.txt; h="$(git rev-parse HEAD)"; i="$(index_sum)"
@@ -565,6 +565,7 @@ rm "$HOME/.ctlhq/message-words.txt"; ln -s "$tmp/nowhere" "$HOME/.ctlhq/message-
 err="$("$fc" --subject "plain" --why w --changes c --test-plan t --risks r -- a.txt 2>&1)"; expect_rc 6 $? "MSG3c: a dangling word list exits 6"
 expect_grep 'check did not run.*message-words\.txt' "$err" "MSG3c: the line says the check did not run, and names the list"
 expect_grep '^fix: .*word list' "$err" "MSG3c: the fix line names a broken word list"
+expect_grep '^fix: .*`/.*/ctlhq-message-check --help`' "$err" "MSG3c: the fix line gives the check's full path"
 rm "$HOME/.ctlhq/message-words.txt"; git checkout -q a.txt
 
 checkout="$tmp/checkout/bin"; mkdir -p "$checkout"
@@ -608,6 +609,135 @@ err="$("$fc" --tz Europe/Berlin "${four[@]}" -- a.txt 2>&1)"; expect_rc 2 $? "T3
 expect_grep '^usage: ctlhq-commit ' "$err" "T3: the refusal prints the usage line"
 expect_eq "$h" "$(git rev-parse HEAD)" "T3: no commit after the --tz refusal"
 expect_grep '\[--tz local\]' "$("$fc" --help)" "T4: --help lists --tz local"
+
+fresh anyfolder
+outside="$tmp/outside"; mkdir -p "$outside"
+mkdir -p .local/in
+printf 'Add one\n\nWhy:\nIt is needed.\n\nChanges:\nOne file.\n\nTest Plan:\nRead it.\n\nRisks:\nNone known.\n' > .local/in/m.txt
+printf 'reviewed\n' > .local/in/r.md
+printf 'c1\n' > "c one.txt"
+printf 'c one.txt\n' > .local/in/p.txt
+"$rgate" -C "$PWD" --force -- true >/dev/null
+here_repo="$PWD"
+out="$(cd "$outside" && "$fc" -C "$here_repo" --gate gate --review .local/in/r.md --message-file .local/in/m.txt --paths-file .local/in/p.txt 2>&1)"; expect_rc 0 $? "C1: -C with relative --review, --message-file and --paths-file commits from another folder"
+expect_eq "c one.txt" "$(git show --name-only --format= HEAD)" "C1: the path with a space is committed under its whole name"
+expect_grep '^review: \.local/in/r\.md$' "$out" "C1: the review file resolves inside DIR"
+expect_nogrep '^folder: ' "$out" "C1: the run prints no folder line, because fix: lines name their folder"
+expect_eq "" "$(ls -A "$outside")" "C1: nothing is written in the folder the tool started from"
+err="$(cd "$outside" && "$fc" -C "$tmp/no-such-folder" "${four[@]}" -- a.txt 2>&1)"; expect_rc 2 $? "C2: a missing DIR exits 2"
+expect_grep 'no-such-folder' "$err" "C2: the refusal names the folder"
+expect_nogrep 'Traceback' "$err" "C2: no Python traceback"
+err="$("$fc" -C 2>&1)"; expect_rc 2 $? "C3: -C with no value exits 2"
+expect_grep '^usage: ctlhq-commit -C DIR|\[-C DIR\]' "$err" "C3: the refusal prints the usage line with -C"
+printf 'c4\n' > "c 4.txt"; printf 'c 4.txt\n' > .local/in/p.txt
+(cd "$outside" && "$fc" --review .local/in/r.md --message-file .local/in/m.txt --paths-file .local/in/p.txt -C "$here_repo" >/dev/null 2>&1); expect_rc 0 $? "C4: -C after other options still resolves their relative files in DIR, as ctlhq-push accepts it"
+expect_eq "c 4.txt" "$(git show --name-only --format= HEAD)" "C4: the commit holds the path from the file in DIR"
+err="$("$fc" -C "$here_repo" -C "$here_repo" "${four[@]}" -- a.txt 2>&1)"; expect_rc 2 $? "C5: a second -C exits 2"
+expect_grep '^ctlhq-commit: -C given twice' "$err" "C5: the refusal says -C came twice"
+(cd "$outside" && "$fc" -C "$outside" "${four[@]}" -- a.txt >/dev/null 2>&1); expect_rc 1 $? "C6: -C on a folder outside a work tree exits 1"
+mkdir -p "sub dir"; printf 's\n' > "sub dir/in sub.txt"
+(cd "$outside" && "$fc" -C "$here_repo/sub dir" "${four[@]}" -- "in sub.txt" >/dev/null 2>&1); expect_rc 0 $? "C7: -C on a subfolder reads paths from that subfolder"
+expect_eq "sub dir/in sub.txt" "$(git show --name-only --format= HEAD)" "C7: the path is the one inside the subfolder"
+printf 'two\n' > a2.txt; printf 'three\n' > "b 3.txt"; printf 'b 3.txt\n' > .local/in/p.txt
+"$fc" "${four[@]}" --paths-file .local/in/p.txt -- a2.txt >/dev/null 2>&1; expect_rc 0 $? "P1: --paths-file adds to the paths after --"
+expect_eq "$(printf 'a2.txt\nb 3.txt')" "$(git show --name-only --format= HEAD | sort)" "P1: both the file's path and the path after -- are committed"
+printf 'four\n' > c4.txt; printf 'c4.txt' > .local/in/p.txt
+"$fc" "${four[@]}" --paths-file .local/in/p.txt -- >/dev/null 2>&1; expect_rc 0 $? "P2: a file with no final newline works, with an empty list after --"
+head_p="$(git rev-parse HEAD)"; printf 'five\n' > d5.txt
+for bad_entry in . .. -A --all '*' --cached; do
+  printf 'd5.txt\n%s\n' "$bad_entry" > .local/in/p.txt
+  err="$("$fc" "${four[@]}" --paths-file .local/in/p.txt 2>&1)"; expect_rc 2 $? "P3: the entry '$bad_entry' in a paths file exits 2"
+  expect_grep 'git add is by name' "$err" "P3: the '$bad_entry' refusal says add is by name"
+done
+: > .local/in/p.txt
+err="$("$fc" "${four[@]}" --paths-file .local/in/p.txt -- d5.txt 2>&1)"; expect_rc 2 $? "P4: an empty paths file exits 2, even with paths after --"
+expect_grep 'p\.txt is empty' "$err" "P4: the refusal names the file"
+printf 'd5.txt\n\nb 3.txt\n' > .local/in/p.txt
+err="$("$fc" "${four[@]}" --paths-file .local/in/p.txt 2>&1)"; expect_rc 2 $? "P5: a blank line in a paths file exits 2"
+expect_grep 'line 2 is empty' "$err" "P5: the refusal names the line"
+printf '\n' > .local/in/p.txt
+"$fc" "${four[@]}" --paths-file .local/in/p.txt >/dev/null 2>&1; expect_rc 2 $? "P6: a paths file with only a newline exits 2"
+err="$("$fc" "${four[@]}" --paths-file .local/in/none.txt 2>&1)"; expect_rc 2 $? "P7: a missing paths file exits 2"
+expect_grep 'cannot read --paths-file' "$err" "P7: the refusal says the file cannot be read"
+"$fc" "${four[@]}" --paths-file >/dev/null 2>&1; expect_rc 2 $? "P8: --paths-file with no value exits 2"
+printf 'no-such-file.txt\n' > .local/in/p.txt
+err="$("$fc" "${four[@]}" --paths-file .local/in/p.txt 2>&1)"; expect_rc 1 $? "P9: a named path that does not exist exits 1, as after --"
+expect_grep 'no-such-file\.txt: not on disk' "$err" "P9: the refusal names the path"
+printf 'pat/*.txt\n' > .local/in/p.txt; mkdir -p pat; printf 'g\n' > pat/g.txt
+"$fc" "${four[@]}" --paths-file .local/in/p.txt >/dev/null 2>&1; expect_rc 1 $? "P10: a pattern in a paths file matches nothing, because a path is a plain name"
+rm -rf pat
+expect_eq "$head_p" "$(git rev-parse HEAD)" "P: no commit after the paths-file refusals"
+expect_eq "" "$(git diff --cached --name-only)" "P: nothing stays staged after the refusals"
+printf 'd5.txt\n' > .local/in/p.txt
+"$fc" "${four[@]}" --paths-file .local/in/p.txt >/dev/null 2>&1; expect_rc 0 $? "P11: a named path alone in the file commits with no -- at all"
+expect_grep '\-\-paths-file FILE' "$("$fc" --help)" "P12: --help lists --paths-file"
+expect_grep '^  ctlhq-commit \[-C DIR\]' "$("$fc" --help)" "P12: --help lists -C"
+
+fresh wholetree
+top_n="$PWD"; printf 'n1\n' > n1.txt; h_n="$(git rev-parse HEAD)"; mkdir -p .local
+for form in ./ .// ./. ././ ../ ../.. src/.. ./src/../ "$top_n" "$top_n/" "$top_n/." "$top_n/src/.." "../$(basename "$top_n")"; do
+  err="$("$fc" "${four[@]}" -- "$form" 2>&1)"; expect_rc 2 $? "N1: the path '$form' after -- exits 2"
+  expect_grep 'git add is by name' "$err" "N1: the '$form' refusal says add is by name"
+  printf '%s\n' "$form" > .local/p.txt
+  "$fc" "${four[@]}" --paths-file .local/p.txt >/dev/null 2>&1; expect_rc 2 $? "N2: the entry '$form' in a paths file exits 2"
+done
+for form in ./ ../ .. "$top_n" "../../$(basename "$top_n")" ../src/..; do
+  "$fc" -C src "${four[@]}" -- "$form" >/dev/null 2>&1; expect_rc 2 $? "N3: from a subfolder, the path '$form' exits 2"
+done
+expect_eq "$h_n" "$(git rev-parse HEAD)" "N: no commit after the whole-tree refusals"
+expect_eq "" "$(git diff --cached --name-only)" "N: nothing stays staged after the whole-tree refusals"
+printf 'x2\n' > src/x.py; printf 'src/x.py\n' > .local/p.txt
+"$fc" --allow-dirty "${four[@]}" -- ./src/x.py >/dev/null 2>&1; expect_rc 0 $? "N4: a named file written with ./ still commits"
+expect_eq "src/x.py" "$(git show --name-only --format= HEAD)" "N4: only that file is committed"
+printf 'y2\n' > src/y.py
+"$fc" -C src --allow-dirty "${four[@]}" -- ../src >/dev/null 2>&1; expect_rc 0 $? "N5: a named folder reached through .. still commits"
+expect_eq "src/y.py" "$(git show --name-only --format= HEAD)" "N5: only that folder's change is committed"
+ln -s . self
+"$fc" --allow-dirty "${four[@]}" -- self >/dev/null 2>&1; expect_rc 0 $? "N6: a symbolic link to the top, named by name, commits as a link"
+expect_eq "self" "$(git show --name-only --format= HEAD)" "N6: only the link is committed, with n1.txt left out"
+
+fresh byteslist; mkdir -p .local; ff="$(printf '\377')"
+git update-index --add --cacheinfo "100644,$(printf 'q\n' | git hash-object -w --stdin),$ff.txt"; git commit -qm bytes
+printf '%s.txt\n' "$ff" > .local/p.txt
+err="$("$fc" "${four[@]}" --paths-file .local/p.txt 2>&1)"; expect_rc 0 $? "N7: a paths-file entry with byte 0xff reaches git unchanged, so its deletion commits"
+expect_nogrep 'Traceback' "$err" "N7: no Python traceback"
+expect_eq "" "$(git ls-files -- "$ff.txt")" "N7: the file with byte 0xff is gone from the index"
+
+printf 'p\n' > n1.txt; printf 'q\n' > n2.txt; printf 'n1.txt\n' > .local/p1.txt; printf 'n2.txt\n' > .local/p2.txt; h_t="$(git rev-parse HEAD)"
+err="$("$fc" --allow-dirty "${four[@]}" --paths-file .local/p1.txt --paths-file .local/p2.txt 2>&1)"; expect_rc 2 $? "A2: a second --paths-file exits 2"
+expect_grep '^ctlhq-commit: --paths-file given twice' "$err" "A2: the refusal says it came twice"
+printf 'n1.txt\0' > .local/p.txt
+err="$("$fc" "${four[@]}" --paths-file .local/p.txt 2>&1)"; expect_rc 2 $? "A4: a NUL byte in a paths file exits 2"
+expect_grep 'line 1 holds a NUL byte' "$err" "A4: the refusal names the line"
+expect_nogrep 'Traceback' "$err" "A4: no Python traceback"
+printf 'n1.txt\nn2.txt\0' > .local/p.txt
+err="$("$fc" "${four[@]}" --paths-file .local/p.txt 2>&1)"; expect_rc 2 $? "A4: a NUL byte on a later line exits 2"
+expect_grep 'line 2 holds a NUL byte' "$err" "A4: the refusal names the later line"
+expect_eq "$h_t" "$(git rev-parse HEAD)" "A2, A4: no commit after the refusals"
+expect_eq "" "$(git diff --cached --name-only)" "A2, A4: nothing staged after the refusals"
+expect_grep 'made only of "\." and "\.\." parts' "$("$fc" --help | tr '\n' ' ' | tr -s ' ')" "A3: --help says which paths the dot rule refuses"
+"$fc" "${four[@]}" -- "" >/dev/null 2>&1; expect_rc 2 $? "A3: an empty path after -- exits 2"
+
+fresh fixlines; top_f="$(pwd -P)"; away="$tmp/away place"; mkdir -p "$away" sub .local; printf '#!/bin/sh\nexit 0\n' > sub/check.sh; chmod +x sub/check.sh; git add -A; git commit -qm check
+ln -s "$top_f" "$tmp/toplink"; printf 'n\n' > n.txt; h_f="$(git rev-parse HEAD)"
+err="$("$fc" -C "$top_f" "${four[@]}" -- "$tmp/toplink" 2>&1)"; expect_rc 2 $? "A5: a link outside the work tree that points at the top exits 2"
+expect_grep 'top of the work tree' "$err" "A5: the refusal says it is the top"
+expect_eq "" "$(git diff --cached --name-only)" "A5: nothing is staged, not even for a moment's refusal"
+(cd "$away" && "$rgate" -C "$top_f/sub" --force -- ./check.sh >/dev/null); expect_rc 0 $? "F1: a gate runs in a subfolder"
+printf 'n2\n' > n.txt
+err="$(cd "$away" && "$fc" -C "$top_f" --gate gate "${four[@]}" -- n.txt 2>&1)"; expect_rc 3 $? "F1: an edit after the gate exits 3"
+line="$(printf '%s\n' "$err" | sed -n 's/^fix: rerun `\(.*\)`, then run ctlhq-commit again\.$/\1/p')"
+expect_grep "^$root/bin/ctlhq-run-gate -C $top_f/sub -- \./check\.sh$" "$line" "F1: the fix line names the tool's full path and the gate's own folder"
+(cd "$away" && eval "${line/ -- / --force -- }" >/dev/null 2>&1); expect_rc 0 $? "F1: the fix line runs as written from another folder"
+"$fc" -C "$top_f" --gate gate "${four[@]}" -- n.txt >/dev/null 2>&1; expect_rc 0 $? "F1: after the fix line, the commit goes through"
+printf 'n3\n' > n.txt; printf 's\n' > s.txt; git add s.txt
+err="$(cd "$away" && "$fc" -C "$top_f" --allow-dirty "${four[@]}" -- n.txt 2>&1)"; expect_rc 3 $? "F2: a staged path outside the named paths exits 3"
+line="$(printf '%s\n' "$err" | sed -n 's/^fix: .*unstage them with `\(.*\)`, then run.*$/\1/p')"
+(cd "$away" && eval "${line/<path>/s.txt}"); expect_rc 0 $? "F2: the fix line runs as written from another folder"
+expect_eq "" "$(git diff --cached --name-only)" "F2: the fix line unstaged the path"
+rm s.txt; git checkout -q -- n.txt
+err="$(cd "$away" && "$fc" -C "$top_f" --gate never "${four[@]}" -- n.txt 2>&1)"; expect_rc 3 $? "F3: a gate that never ran exits 3"
+expect_grep "run \`$root/bin/ctlhq-run-gate -C $top_f --name never -- <command>\` first" "$err" "F3: the line names the tool's full path, the folder and the gate"
 
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then echo "$fail checks failed"; exit 1; fi

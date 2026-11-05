@@ -102,7 +102,7 @@ So keep the clone where you made it.
    bin/ctlhq-install
    ```
 
-4. Add `bin/` to your PATH, so the tools run by name. Near the end of its output, the installer prints a line labelled `PATH line`. Copy the part of that line that starts with `export PATH=`; it holds your clone's full path. Paste it at the end of `~/.zshrc`, then open a new terminal window.
+4. Add `bin/` to your PATH, so the tools run by name. Agents run `ctlhq-commit` by its full path instead, as [the permissions doc](skills/run-method/references/hooks-and-permissions.md) explains. Near the end of its output, the installer prints a line labelled `PATH line`. Copy the part of that line that starts with `export PATH=`; it holds your clone's full path. Paste it at the end of `~/.zshrc`, then open a new terminal window.
 
 5. Check the result in the new window. `--check` reports any missing, wrong, or stale link and changes nothing. A `stale` link is an old link the installer would remove; run `bin/ctlhq-install` again to remove it. `ctlhq-doctor` reports any missing tool. At this step it may list optional tools and `models.toml` as not ok; step 6 writes `models.toml`.
 

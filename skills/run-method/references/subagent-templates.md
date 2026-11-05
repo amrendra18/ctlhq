@@ -77,9 +77,11 @@ Re-review after every fix round. Do not accept a report that says "fixed" withou
 ## 5. The commit sequence (run by whoever commits, in this order)
 
 1. Add the five review answers, one line each, below the reviewer's report in `.local/reviews/<commit>.md`. They stay out of the commit message.
-2. Run the gate: `ctlhq-run-gate -- ./scripts/check full`. Read its exit line directly. Never pipe it through `tail` or `grep`.
+2. Run the gate: `<repo-root>/bin/ctlhq-run-gate -C <work-tree> -- ./scripts/check full`. Read its exit line directly. Never pipe it through `tail` or `grep`.
 3. `git status --short` shows only the intended paths.
-4. `ctlhq-commit --gate gate --review .local/reviews/<commit>.md --message-file .local/commit-<n>.txt -- <each path by name>`. The message file ends with your model's Co-Authored-By line, or `--co-author` gives it.
+4. `<repo-root>/bin/ctlhq-commit -C <work-tree> --gate gate --review .local/reviews/<commit>.md --message-file .local/commit-<n>.txt --co-author LINE --paths-file .local/paths-<n>.txt`. `LINE` is your model's Co-Authored-By line. The paths file holds each path by name, one per line. Keep it under `.local/`, because any other new file changes the tree the gate tested. Relative files resolve in `<work-tree>`.
+
+   Run steps 2 and 4 as one command each, with the full path first and no `cd`, pipe, or environment prefix. The agent tool's permission rules match the command text as written. `<repo-root>` is the literal absolute path of ctlhq's main checkout, with no `~`, no `$HOME`, and no linked worktree. [The permissions doc](hooks-and-permissions.md) gives the rule for `ctlhq-commit`. `ctlhq-run-gate` has no allow rule, so it asks for approval.
 5. Verify: signature (`git log --show-signature -1`), clean tree, `--version` prints the new stamp, the data folder is absent.
 6. If a hook rejects the commit, or the harness denies a step: write the exact command and the reason to `BLOCKED.md`, report, stop that step. Keep working on anything that does not depend on it.
 7. Record the hash, date, tests and lines in `PLAN.md` section 7 and in memory. Only then report "committed <hash>".

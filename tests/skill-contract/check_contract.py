@@ -21,7 +21,8 @@ Checks, each reported as `file:line: message`:
      section N" or "**X** section N", or "section N of X" that names a skill X points at a "## N." heading in
      that skill's SKILL.md.
 
-Placeholders such as `<title>` and globs are skipped. `--help` runs with HOME set to an
+A leading `<repo-root>/` is read as if absent, so a full-path command is checked too.
+Other placeholders such as `<title>` and globs are skipped. `--help` runs with HOME set to an
 empty temp folder and stdin closed. Prints "N checks passed" and exits 0, or prints every
 problem and "M problems, N checks passed" and exits 1. Exit 2 on a usage error.
 """
@@ -299,6 +300,7 @@ class Checker:
                 if line.lstrip().startswith("```"):
                     fenced = not fenced
                     continue
+                line = line.replace("<repo-root>/", "")
                 self.commands(path, i, line)
                 self.paths(path, i, line)
                 if fenced:

@@ -19,7 +19,7 @@ out="$(git ls-files -ci --exclude-standard)" && test -z "$out"
 echo "3 no tracked ignored file exit $?"
 out="$(git submodule status)" && test -z "$out"
 echo "4 no submodule exit $?"
-ctlhq-run-gate -- <check command>
+<repo-root>/bin/ctlhq-run-gate -C "<repo>" -- <check command>
 echo "5 gate exit $?"
 p="$(git rev-parse --git-path info/exclude)" && { test ! -e "$p" || { grep -qvE '^[[:space:]]*(#|$)' "$p"; test $? -eq 1; }; }
 echo "6 no info/exclude pattern exit $?"
@@ -27,7 +27,7 @@ ctlhq-preflight --repo "<repo>" --hooks --need git,ssh-add,ssh-keygen,tar
 echo "11 preflight exit $?"
 ```
 
-1. Every line must print exit 0. Any other code fails that precondition. A failing Git command fails its line too.
+1. Every line must print exit 0. Any other code fails that precondition. A failing Git command fails its line too. `<repo-root>` is the literal absolute path of ctlhq's main checkout.
 2. Line 6 also prints exit 0 when `.git/info/exclude` is missing.
 
 ## 1. Private-remote check
@@ -71,7 +71,7 @@ git --git-dir="<scratch>/backup-check/.git" rev-parse 'HEAD^{tree}'
 | 5 | Good signature | `git -c gpg.ssh.allowedSignersFile="<allowed signers file>" log --show-signature -1` | `Good "git" signature for <public email>` |
 | 6 | Only `main`, no tags | `git show-ref` | one line, `refs/heads/main` |
 | 7 | History check | `ctlhq-first-push` | exit 0 |
-| 8 | Gate on the new commit | `ctlhq-run-gate -- <check command>` | exit 0 |
+| 8 | Gate on the new commit | `<repo-root>/bin/ctlhq-run-gate -C "<repo>" -- <check command>` | exit 0 |
 
 The allowed signers file maps the email to the public key, one line, outside the repository:
 

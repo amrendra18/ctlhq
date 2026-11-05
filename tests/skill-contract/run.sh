@@ -55,6 +55,7 @@ Fine look-alikes: run `bin/good run --json`, read `references/real.md` and `refe
 Also `skills/ctlhq-mode/playbooks/real.md`, `/loop`, `/alpha`, the `ctlhq-mode` skill, ctlhq-agent.
 Also the project-local skill, the verification skill, `$HOME/projects/widget/bin/widget`, and /Users/x/tmp/file.
 Also the name `sidecar` alone, and `sidecar.md is a file`.
+Also the full-path form `<repo-root>/bin/good run --json`.
 Also the **alpha** skill's section 1, alpha's section 1, section 1 of `alpha`, the `alpha` skill, section 1, `alpha` section 1, and the plan's section 10.
 
 ```
@@ -73,6 +74,8 @@ DEFECT-8 use `/ghost-skill` here.
 DEFECT-9 use the `phantom` skill here.
 DEFECT-13 read the **alpha** skill's section 9 here.
 DEFECT-14 read **alpha** section 8 here.
+DEFECT-15 run `<repo-root>/bin/nosuch -C <work-tree>` here.
+DEFECT-16 run `<repo-root>/bin/good -C <work-tree> --nope` here.
 ```
 good stroll            # DEFECT-10 a fenced line with an unknown subcommand
 ```
@@ -98,15 +101,17 @@ expect_grep "^$f:$(ln DEFECT-11): \`sidecar\` is a separate tool that skills/alp
 expect_grep "^skills/alpha/references/real.md:3: \`sidecar\` is a separate tool" "$out" "control 12: a call in a references file after && is reported"
 expect_grep "^$f:$(ln DEFECT-13): \`the \*\*alpha\*\* skill's section 9\`: skills/alpha/SKILL.md has no \`## 9\.\` heading" "$out" "control 13: a section number the named skill does not have reported"
 expect_grep "^$f:$(ln DEFECT-14): \`\*\*alpha\*\* section 8\`: skills/alpha/SKILL.md has no \`## 8\.\` heading" "$out" "control 14: a section the bare marked form names is checked too"
-expect_eq 14 "$(printf '%s\n' "$out" | grep -c '^skills/\|^agents/')" "exactly the 14 planted problems are reported (no false positives on the look-alikes)"
-expect_grep '^14 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "summary line counts 14 problems"
+expect_grep "^$f:$(ln DEFECT-15): command \`bin/nosuch\` not found" "$out" "control 15: a missing tool on a full-path line is reported"
+expect_grep "^$f:$(ln DEFECT-16): \`good --nope\`: flag not in \`good --help\`" "$out" "control 16: an unknown flag on a full-path line is reported"
+expect_eq 16 "$(printf '%s\n' "$out" | grep -c '^skills/\|^agents/')" "exactly the 16 planted problems are reported (no false positives on the look-alikes)"
+expect_grep '^16 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "summary line counts 16 problems"
 
 cp "$fx/skills/alpha/SKILL.md" "$tmp/alpha.md"
 printf -- '---\nname: alpha\nmetadata:\n  separate-tools: sidecar\n---\n' >"$fx/skills/alpha/SKILL.md"
 sed '1,3d' "$tmp/alpha.md" >>"$fx/skills/alpha/SKILL.md"
 out="$(python3 "$chk" --root "$fx" 2>&1)"
 expect_nogrep 'sidecar' "$out" "a named separate tool is accepted in SKILL.md and references/"
-expect_grep '^12 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "only the 12 other planted problems remain"
+expect_grep '^14 problems, [0-9]+ checks passed$' "$(printf '%s\n' "$out" | tail -1)" "only the 14 other planted problems remain"
 cp "$tmp/alpha.md" "$fx/skills/alpha/SKILL.md"
 expect_nogrep 'widget|/Users/x|project-local|verification|`loop`|`alpha`|ctlhq-agent|ctlhq-mode|real\.md|<topic>' "$out" "look-alikes are not reported"
 
@@ -133,8 +138,8 @@ printf -- '---\nname: flow\nmetadata:\n  separate-tools: [sidecar, other]\n---\n
 printf -- '---\nname: block\nmetadata:\n  separate-tools:\n    - sidecar\n---\n# block\n' >"$lf/skills/block/SKILL.md"
 out="$(python3 "$chk" --root "$lf" 2>&1)"; rc=$?
 expect_rc 1 "$rc" "separate-tools written as a YAML list exits 1"
-expect_grep '^skills/flow/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 15: a list in brackets is reported with file:line"
-expect_grep '^skills/block/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 16: a list on the lines after separate-tools: is reported with file:line"
+expect_grep '^skills/flow/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 17: a list in brackets is reported with file:line"
+expect_grep '^skills/block/SKILL.md:4: separate-tools must be names separated by spaces$' "$out" "control 18: a list on the lines after separate-tools: is reported with file:line"
 
 # 3. This repository: every SKILL.md, playbook, and agent file.
 out="$(python3 "$chk" --root "$root" 2>&1)"; rc=$?
@@ -154,7 +159,7 @@ expect_grep 'throwaway home folder, with no push, no write to the real home fold
 asks='commit message under|(review|verdict|answer)[^.]* (in|to|into) the commit message'
 expect_eq 2 "$(printf 'Add the review paragraph to the commit message under Test Plan.\nFive answers, in the commit message under Test Plan.\nReview answers stay out of the commit message.\n' | grep -Ec "$asks")" "control: the pattern catches both old sentences and not a sentence that keeps them out"
 templates="$root/skills/run-method/references/subagent-templates.md"
-expect_grep 'ctlhq-commit --gate gate --review \.local/reviews/<commit>\.md --message-file' "$(cat "$templates")" "the commit sequence commits through ctlhq-commit with the review file"
+expect_grep 'bin/ctlhq-commit -C <work-tree> --gate gate --review \.local/reviews/<commit>\.md --message-file' "$(cat "$templates")" "the commit sequence commits through ctlhq-commit with the review file"
 expect_nogrep 'git commit -F' "$(cat "$templates")" "the commit sequence holds no raw git commit"
 expect_grep 'below the reviewer' "$(cat "$templates")" "the five answers go below the reviewer's report, so the report stays"
 expect_grep 'Co-Authored-By' "$(cat "$templates")" "the commit sequence names the co-author line"

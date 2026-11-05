@@ -2,8 +2,12 @@
 """ctlhq-run-gate: run one gate command with stdout and stderr kept apart, print "exit N" first, and exit with that code.
 
 Usage:
-  ctlhq-run-gate [--name NAME] [--max-load N] [--force] [--tail N] -- <command> [args...]
-  ctlhq-run-gate --tree
+  ctlhq-run-gate [-C DIR] [--name NAME] [--max-load N] [--force] [--tail N] -- <command> [args...]
+  ctlhq-run-gate [-C DIR] --tree
+
+-C DIR acts as if the tool started in DIR, like git -C, wherever it stands among the
+options: the command runs there, and .local/ is found from there. A second -C, or a folder
+it cannot enter, exits 2.
 
 Steps, in order:
   1. Refuses to start (exit 125, one line on stderr, nothing written) when the 1-minute
@@ -11,7 +15,9 @@ Steps, in order:
      --force skips the check.
   2. Runs the command with stdin from /dev/null, stdout to .local/gate/NAME.out and stderr
      to .local/gate/NAME.err (never merged). Writes the exit code to .local/gate/NAME.exit
-     and one TSV line to .local/gate/NAME.meta: start, end, exit, command (UTC, ISO 8601).
+     and one TSV line to .local/gate/NAME.meta: start, end, exit, command, folder (times in
+     UTC, ISO 8601; folder is where the command ran, and a tab or newline in it or in the
+     command becomes a space). ctlhq-commit prints its rerun command from these fields.
      NAME defaults to "gate" and may hold letters, digits, ".", "-", "_". The .local/
      folder is at the top of the git work tree that holds the current directory, or in
      the current directory when there is no work tree.
@@ -67,7 +73,7 @@ import tempfile
 from pathlib import Path
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-USAGE = "usage: ctlhq-run-gate [--name NAME] [--max-load N] [--force] [--tail N] -- <command> [args...]"
+USAGE = "usage: ctlhq-run-gate [-C DIR] [--name NAME] [--max-load N] [--force] [--tail N] -- <command> [args...]"
 
 
 def usage(msg: str) -> int:
@@ -149,25 +155,14 @@ def tail_lines(path: Path, n: int) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    folder: str | None = None
+    tree = False
     name = "gate"
     max_load: float | None = None
     force = False
     tail = 20
     i = 0
     cmd: list[str] | None = None
-    if argv[:1] == ["--tree"]:
-        if len(argv) > 1:
-            return usage("--tree takes no other arguments")
-        root = work_tree()
-        if root is None:
-            print(f"ctlhq-run-gate: --tree: not inside a git work tree: {Path.cwd()}", file=sys.stderr)
-            return 1
-        try:
-            print(tree_id(root))
-        except TreeError as e:
-            print(f"ctlhq-run-gate: --tree: {e}", file=sys.stderr)
-            return 1
-        return 0
     while i < len(argv):
         a = argv[i]
         if a == "--":
@@ -176,11 +171,19 @@ def main(argv: list[str]) -> int:
         if a in ("-h", "--help"):
             print(__doc__.strip())
             return 0
-        if a in ("--name", "--max-load", "--tail"):
+        if a == "--tree":
+            tree = True
+            i += 1
+            continue
+        if a in ("-C", "--name", "--max-load", "--tail"):
             if i + 1 >= len(argv):
                 return usage(f"{a} needs a value")
             val = argv[i + 1]
-            if a == "--name":
+            if a == "-C":
+                if folder is not None:
+                    return usage("-C given twice")
+                folder = val
+            elif a == "--name":
                 if not NAME_RE.match(val):
                     return usage(f"--name {val!r}: use letters, digits, '.', '-', '_' only")
                 name = val
@@ -202,6 +205,24 @@ def main(argv: list[str]) -> int:
             i += 1
             continue
         return usage(f"unknown option {a!r} (the command goes after --)")
+    if folder is not None:
+        try:
+            os.chdir(folder)
+        except OSError as e:
+            return usage(f"-C {folder}: {e.strerror or e}")
+    if tree:
+        if len(argv) != (1 if folder is None else 3):
+            return usage("--tree takes no other arguments")
+        root = work_tree()
+        if root is None:
+            print(f"ctlhq-run-gate: --tree: not inside a git work tree: {Path.cwd()}", file=sys.stderr)
+            return 1
+        try:
+            print(tree_id(root))
+        except TreeError as e:
+            print(f"ctlhq-run-gate: --tree: {e}", file=sys.stderr)
+            return 1
+        return 0
     if cmd is None:
         return usage("missing -- before the command")
     if not cmd:
@@ -236,6 +257,7 @@ def main(argv: list[str]) -> int:
     except TreeError as e:
         tree_line = "error " + str(e).replace("\n", " ")
         print(f"ctlhq-run-gate: no tree ID, so ctlhq-commit --gate {name} will refuse this run: {e}", file=sys.stderr)
+    ran_in = os.getcwd()
     start = now_iso()
     with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
         try:
@@ -253,8 +275,8 @@ def main(argv: list[str]) -> int:
     if tree_line is not None:
         write_whole(tree_path, f"exit {code}\n{tree_line}\n")
     write_whole(exit_path, f"{code}\n")
-    command_text = " ".join(shlex.quote(c) for c in cmd).replace("\t", " ").replace("\n", " ")
-    meta_path.write_text("\t".join([start, end, str(code), command_text]) + "\n", encoding="utf-8")
+    command_text, folder_text = (t.replace("\t", " ").replace("\n", " ") for t in (" ".join(shlex.quote(c) for c in cmd), ran_in))
+    meta_path.write_text("\t".join([start, end, str(code), command_text, folder_text]) + "\n", encoding="utf-8")
 
     print(f"exit {code}")
     print(f"--- stdout (last {tail}) ---")

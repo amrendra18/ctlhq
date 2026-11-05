@@ -50,6 +50,14 @@ Why: without this list a subagent can put a file in the real login keychain or `
 
 Written by either bootstrap block (section 3) at repository creation. Rules match the command text as written, so the plain `git add:*` and `git commit -F .local/commit-:*` forms are enough inside a per-repository file; the `-C` forms are for a rule kept at the workspace level. Why: without it, `git add` and `git commit` are blocked in the middle of a build, and a rule added by hand mid-build tends to cover commit only.
 
+One rule in `~/.claude/settings.json` covers `ctlhq-commit` in every repository:
+
+```json
+{"permissions": {"allow": ["Bash(<repo-root>/bin/ctlhq-commit:*)"]}}
+```
+
+`<repo-root>` is the literal absolute path of ctlhq's main checkout. The rule does not match `~`, `$HOME`, a linked worktree's `bin/`, the bare tool name, or a command with `cd`, a pipe, or an environment prefix before it. With `-C`, this rule lets a session commit in any repository the user can write. `ctlhq-run-gate` gets no allow rule: it runs whatever follows `--`, so a rule for it would allow any command.
+
 ### 1.5 Skills to install for parity with Codex
 
 Give both harnesses the same skills, `run-method` and `commit-review` included. `bin/ctlhq-install` links every skill into `~/.claude/skills/` and `~/.codex/skills/`, except a skill that a layer's `docs/install.tsv` sends to other hosts; `bin/ctlhq-install --check` shows any skill one harness is missing.
