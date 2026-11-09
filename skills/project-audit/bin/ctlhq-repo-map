@@ -108,9 +108,9 @@ def usage(msg: str, fix: str) -> int:
     return fail(msg, "ctlhq-repo-map stops rather than guess; usage: ctlhq-repo-map [DIR] [--json]", fix, 2)
 
 
-def git(dir_: Path, *args: str, errors: str = "strict") -> tuple[int, str]:
+def git(dir_: Path, *args: str, text: bool = True) -> tuple[int, str | bytes]:
     try:
-        r = subprocess.run(["git", "-C", str(dir_), *args], capture_output=True, text=True, errors=errors)
+        r = subprocess.run(["git", "-C", str(dir_), *args], capture_output=True, text=text)
     except OSError as e:
         return 127, str(e)
     return r.returncode, r.stdout
@@ -339,21 +339,22 @@ def verification(top: Path, now: dt.datetime | None = None) -> list[dict]:
 
 
 def history(top: Path, head: str) -> dict:
-    log, listing = "", ""
+    log, listing = b"", b""
     if head:
         rc, log = git(top, "log", "-300", "--no-merges", "--no-renames", "--no-show-signature", "--root",
-                      "--format=%x00", "--name-only", "-z", "HEAD", errors="surrogateescape")
+                      "--format=%x00", "--name-only", "-z", "HEAD", text=False)
         if rc != 0:
             raise RuntimeError("git log failed")
-        rc, listing = git(top, "ls-tree", "-r", "--name-only", "-z", "HEAD", errors="surrogateescape")
+        rc, listing = git(top, "ls-tree", "-r", "--name-only", "-z", "HEAD", text=False)
         if rc != 0:
             raise RuntimeError("git ls-tree failed")
-    tracked = set(listing.split("\0"))
-    commits = log.split("\0\0")[1:]
+    tracked = {path.decode("utf-8", "surrogateescape") for path in listing.split(b"\0")}
+    commits = log.split(b"\0\0")[1:]
     changed, shared = Counter(), Counter()
     skipped = 0
     for commit in commits:
-        commit_paths = set(path for path in commit.lstrip("\0").removeprefix("\n").split("\0") if path)
+        commit_paths = {path.decode("utf-8", "surrogateescape")
+                        for path in commit.lstrip(b"\0").removeprefix(b"\n").split(b"\0") if path}
         if len(commit_paths) > 20:
             skipped += 1
             continue

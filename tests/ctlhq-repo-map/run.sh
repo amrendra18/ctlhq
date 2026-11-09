@@ -246,6 +246,56 @@ expect_grep '^window True$' "$invalid_facts" "deleted non-UTF-8 history path rea
 expect_grep '^changed True$' "$invalid_facts" "deleted non-UTF-8 history path counts safe.py once"
 expect_nogrep 'Traceback' "$(cat "$tmp/invalid-history.err")" "deleted non-UTF-8 history path has no traceback"
 
+filename_facts="$(python3 - "$tmp" "$rm_" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+def add(path):
+    return b'M 100644 inline ' + json.dumps(path).encode() + b'\ndata 2\nx\n'
+
+
+def commit(number, changes):
+    header = (f'commit refs/heads/main\nmark :{number}\n'
+              f'committer Test <test@example.com> {1700000000 + number} +0000\n'
+              'data 2\nx\n').encode()
+    parent = b'from :1\n' if number == 2 else b''
+    return header + parent + b''.join(changes) + b'\n'
+
+
+for name in ('count', 'bulk'):
+    repo = Path(sys.argv[1]) / ('carriage-return-' + name)
+    repo.mkdir()
+    first = [add('old\rname.py')]
+    second = [b'D "old\\rname.py"\n']
+    if name == 'count':
+        second.append(add('old\nname.py'))
+    else:
+        first += [add('old\nname.py')] + [add(f'file{i}.py') for i in range(19)]
+    for args, data in [
+        (('init', '-q'), None),
+        (('fast-import', '--quiet'), commit(1, first) + commit(2, second)),
+        (('symbolic-ref', 'HEAD', 'refs/heads/main'), None),
+        (('read-tree', 'HEAD'), None),
+        (('checkout-index', '-a'), None),
+    ]:
+        subprocess.run(['git', '-C', str(repo), *args], input=data, check=True, capture_output=True)
+    result = subprocess.run([sys.argv[2], '--json', str(repo)], check=True, capture_output=True)
+    history = json.loads(result.stdout)['history']
+    if name == 'count':
+        print(json.dumps(history['most_changed']))
+    else:
+        print(history['window'][0]['commits_skipped_bulk'])
+        print(len(history['most_changed']))
+PY
+)"
+expect_rc 0 $? "carriage-return history test inputs and maps exit 0"
+expect_eq '[{"commits": 1, "path": "old\nname.py"}]' "$(printf '%s\n' "$filename_facts" | sed -n '1p')" "history counts the current newline name once"
+expect_eq 1 "$(printf '%s\n' "$filename_facts" | sed -n '2p')" "history skips a bulk commit with 21 distinct names"
+expect_eq 0 "$(printf '%s\n' "$filename_facts" | sed -n '3p')" "history excludes all paths from the bulk commit"
+
 # 9. Verification harness facts, planted on disk (untracked, so the work tree check above is not affected).
 h="$tmp/harness"; mkdir -p "$h/scripts" "$h/verify/features" "$h/.local/verify/20200101T000000Z" "$h/.local/verify/20261001T120000Z" "$h/.local/verify/notes"
 git -C "$h" init -q
