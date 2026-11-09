@@ -78,10 +78,10 @@ py="$(command -v python3)"
 err="$(PATH=/var/empty "$py" "$rm_" "$repo" 2>&1)"; expect_rc 1 $? "no git on PATH exits 1"
 expect_grep '^fix: install git' "$err" "no git on PATH gets a fix line"
 
-# 2. Text report: seven numbered sections.
+# 2. Text report: eight numbered sections.
 out="$("$rm_" "$repo")"; expect_rc 0 $? "map exits 0"
 expect_grep '^ctlhq-repo-map: .*\(commit [0-9a-f]{7,}\)$' "$(printf '%s\n' "$out" | head -1)" "first line names the commit"
-expect_eq 7 "$(printf '%s\n' "$out" | grep -cE '^## [1-7]\. ')" "seven numbered section headers"
+expect_eq 8 "$(printf '%s\n' "$out" | grep -cE '^## [1-8]\. ')" "eight numbered section headers"
 expect_grep '^## 1\. Languages ' "$out" "section 1 is Languages"
 expect_grep '^## 6\. Ports and env vars ' "$out" "section 6 is Ports and env vars"
 expect_grep '^## 7\. Verification harness \(3\)$' "$out" "section 7 is Verification harness with three rows"
@@ -105,7 +105,7 @@ expect_grep '\| go main \| cmd/server \| cmd/server/main.go \|' "$out" "cmd/*/ma
 expect_grep '\| make target \| build \| Makefile \|' "$out" "Makefile target build"
 expect_nogrep '\| make target \| (VERSION|\.PHONY|%\.o) ' "$out" "variables, .PHONY and patterns are not targets"
 expect_grep '\| bin/ executable \| demo \| bin/demo \|' "$out" "executable in bin/"
-expect_nogrep 'bin/notes' "$out" "non-executable bin/ file skipped"
+expect_nogrep 'bin/notes' "$(printf '%s\n' "$out" | sed -n '/^## 2\./,/^## 3\./p')" "non-executable bin/ file skipped as an entry point"
 
 # 5. Test commands.
 expect_grep '\| npm run test \| package.json \|' "$out" "npm test script"
@@ -120,7 +120,7 @@ expect_grep '\| bash tests/smoke/run.sh \| tests/smoke/run.sh \|' "$out" "tests/
 expect_grep '\| 6 \| README.md \|' "$out" "README word count 6"
 expect_grep '\| 2 \| AGENTS.md \|' "$out" "AGENTS.md word count"
 expect_grep '\| 5 \| docs/intro.md \|' "$out" "docs/*.md word count"
-expect_nogrep 'docs/nested.txt|ignored.md' "$out" "non-md and ignored files skipped"
+expect_nogrep 'docs/nested.txt|ignored.md' "$(printf '%s\n' "$out" | sed -n '/^## 4\./,/^## 5\./p')" "non-md and ignored files skipped as docs"
 
 # 7. CI, ports and env vars.
 expect_grep '\| \.github/workflows/ci\.yml \|' "$out" "GitHub workflow listed"
@@ -137,14 +137,68 @@ expect_grep '\| port \| 9090 \| config/app\.yaml \|' "$out" "port key in config/
 sub="$("$rm_" "$repo/docs")"; expect_rc 0 $? "subfolder exits 0"
 expect_eq "$(printf '%s\n' "$out" | tail -n +2)" "$(printf '%s\n' "$sub" | tail -n +2)" "subfolder maps the whole repository"
 js="$("$rm_" --json "$repo")"; expect_rc 0 $? "--json exits 0"
-expect_eq "languages entry_points test_commands docs ci ports_env verification" \
-  "$(printf '%s' "$js" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(k for k in d if k not in ("root","commit")))')" "JSON has the seven sections"
+expect_eq "languages entry_points test_commands docs ci ports_env verification history" \
+  "$(printf '%s' "$js" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(k for k in d if k not in ("root","commit")))')" "JSON has eight sections"
 expect_eq 2 "$(printf '%s' "$js" | python3 -c 'import json,sys; d=json.load(sys.stdin); print([r["files"] for r in d["languages"] if r["language"]=="Go"][0])')" "JSON Go count matches"
 expect_eq "" "$(git -C "$repo" status --porcelain)" "work tree unchanged after runs"
 empty="$tmp/empty"; mkdir -p "$empty"; git -C "$empty" init -q
 eo="$("$rm_" "$empty")"; expect_rc 0 $? "empty repository exits 0"
-expect_eq 6 "$(printf '%s\n' "$eo" | grep -c '^none found$')" "empty repository prints none found six times"
+expect_eq 8 "$(printf '%s\n' "$eo" | grep -c '^none found$')" "empty repository prints none found eight times"
 expect_grep '\(commit none\)' "$eo" "no commit prints none"
+
+single_pairs="$(printf '%s\n' "$out" | sed -n '/^### 8b Changed together /,$p' | sed '1d')"
+expect_eq "none found" "$single_pairs" "one-commit repository has no changed-together pairs"
+
+history_repo="$tmp/history"
+mkdir -p "$history_repo"
+git -C "$history_repo" init -q
+for path in hot.py mate.py twice.py deleted.py; do
+    printf 'first\n' > "$history_repo/$path"
+done
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m first
+for path in hot.py mate.py twice.py deleted.py; do
+    printf 'second\n' >> "$history_repo/$path"
+done
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m second
+for path in hot.py mate.py deleted.py; do
+    printf 'third\n' >> "$history_repo/$path"
+done
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m third
+printf 'fourth\n' >> "$history_repo/hot.py"
+rm "$history_repo/deleted.py"
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m fourth
+mkdir -p "$history_repo/bulk"
+for ((n = 1; n <= 21; n++)); do
+    printf 'bulk\n' > "$history_repo/bulk/$n.py"
+done
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m bulk
+history_json="$("$rm_" --json "$history_repo")"
+history_facts="$(printf '%s' "$history_json" | python3 -c '
+import json, sys
+history = json.load(sys.stdin).get("history")
+if history is None:
+    print("history missing")
+    sys.exit(0)
+changed = history.get("most_changed", [])
+pairs = history.get("changed_together", [])
+hot = next((row.get("commits") for row in changed if row.get("path") == "hot.py"), None)
+coupled = next((row.get("together") for row in pairs if (row.get("path_a"), row.get("path_b")) == ("hot.py", "mate.py")), None)
+print("counts", hot, coupled)
+paths = [row.get("path", "") for row in changed]
+paths += [row.get(key, "") for row in pairs for key in ("path_a", "path_b")]
+print("bulk", history.get("window") == [{"commits_read": 5, "commits_skipped_bulk": 1}], not any(path.startswith("bulk/") for path in paths))
+print("rare", all(set((row.get("path_a"), row.get("path_b"))) != {"hot.py", "twice.py"} for row in pairs))
+print("deleted", "deleted.py" not in paths)
+')"
+expect_grep '^counts 4 3$' "$history_facts" "history counts four edits and three shared commits"
+expect_grep '^bulk True True$' "$history_facts" "history skips the 21-file commit and reports its window"
+expect_grep '^rare True$' "$history_facts" "history omits a pair with only two shared commits"
+expect_grep '^deleted True$' "$history_facts" "history excludes deleted paths from both tables"
 
 # 9. Verification harness facts, planted on disk (untracked, so the work tree check above is not affected).
 h="$tmp/harness"; mkdir -p "$h/scripts" "$h/verify/features" "$h/.local/verify/20200101T000000Z" "$h/.local/verify/20261001T120000Z" "$h/.local/verify/notes"

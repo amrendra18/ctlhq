@@ -9,7 +9,7 @@ Produce an evidence-based audit before proposing implementation work. Find mater
 
 ## Tool
 
-`bin/ctlhq-repo-map` (a symlink to `skills/project-audit/bin/ctlhq-repo-map`) builds the starting map when the repository has no project guide. It is read-only. `ctlhq-repo-map --help` lists its seven sections and exit codes. Its section 7 holds the verification harness facts for workflow step 3. Choosing which entry points and tests matter stays with the lead reviewer.
+`bin/ctlhq-repo-map` (a symlink to `skills/project-audit/bin/ctlhq-repo-map`) builds the starting map when the repository has no project guide. It is read-only. `ctlhq-repo-map --help` lists its eight sections and exit codes. Its section 7 holds the verification harness facts for workflow step 3. Section 8 points the Architecture lens at code that changes often or changes together. Choosing which entry points and tests matter stays with the lead reviewer.
 
 `bin/ctlhq-audit-report check REPORT.md` refuses a report that breaks the report contract and prints the round verdict. It is read-only; `--help` lists the rules.
 
