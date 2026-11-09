@@ -69,6 +69,11 @@ Determine whether the design is the smallest clear system that can meet current 
 ### Required coverage
 
 - **System shape:** Component responsibilities, boundaries, dependency direction, coupling, cohesion, cycles, data flow, control flow, and error flow
+- **Change-together test.** For each structural finding, name the pieces that must change together during one ordinary edit. Assign one kind:
+  1. **Missing link.** Pieces change together but live apart, such as one rule repeated in two places. Usually bring them together.
+  2. **Unneeded link.** Independent pieces are tied together, such as a caller using another component's private code. Usually separate them.
+  3. **Unused structure.** Code, options, or layers have no current use. Usually remove them after meeting "Proof required for removal" below.
+- **Special-case census.** List branches for one-off values, ignored errors, retries, sleeps, flags or arguments used by one caller, and disabled or skipped tests. Give each item a file and line. Check whether each item points to a missing requirement or owner. Keep handling that meets a real need, such as retries during an outage. Send retries, sleeps, and ignored errors that hide step order to Security and Reliability too. Send disabled or skipped tests to Tests and Evidence too. Never use the census count to measure progress.
 - **State and contracts:** Sources of truth, state ownership, consistency rules, public interfaces, internal contracts, versioning, migrations, and backward compatibility
 - **Simplicity and duplication:** Layers, wrappers, indirection, abstractions, extension points, configuration, competing implementations, and repeated policy across components (Code Craft owns copied logic and inconsistent helpers inside and between modules)
 - **Repository hygiene and removal:** Dead code, unused exports, dependencies, scripts, flags, configuration, fixtures, documentation, assets, generated output, stale experiments, obsolete migrations, ownership, and change locality. Code Craft owns naming and repository layout
@@ -83,6 +88,7 @@ Determine whether the design is the smallest clear system that can meet current 
 - Does state have one owner, and are consistency and recovery rules visible?
 - Can a change stay local, or does hidden coupling force edits across unrelated layers?
 - Which file or dependency can be removed while preserving every accepted behavior?
+- Which findings share one underlying cause, and which single design change would remove that cause?
 
 ### Proof required for removal
 
@@ -102,6 +108,8 @@ A removal recommendation must name the exact item, the evidence that it is redun
 ### Required output
 
 Provide the current architecture map, scale assumptions, bottleneck evidence, duplication or removal candidates, and a smaller target shape. Separate measured limits from inferred ones.
+
+For each structural finding, include its change-together kind. Provide the special-case census as a numbered list.
 
 ## 4. Tests and Evidence
 

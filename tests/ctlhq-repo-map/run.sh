@@ -78,10 +78,10 @@ py="$(command -v python3)"
 err="$(PATH=/var/empty "$py" "$rm_" "$repo" 2>&1)"; expect_rc 1 $? "no git on PATH exits 1"
 expect_grep '^fix: install git' "$err" "no git on PATH gets a fix line"
 
-# 2. Text report: seven numbered sections.
+# 2. Text report: eight numbered sections.
 out="$("$rm_" "$repo")"; expect_rc 0 $? "map exits 0"
 expect_grep '^ctlhq-repo-map: .*\(commit [0-9a-f]{7,}\)$' "$(printf '%s\n' "$out" | head -1)" "first line names the commit"
-expect_eq 7 "$(printf '%s\n' "$out" | grep -cE '^## [1-7]\. ')" "seven numbered section headers"
+expect_eq 8 "$(printf '%s\n' "$out" | grep -cE '^## [1-8]\. ')" "eight numbered section headers"
 expect_grep '^## 1\. Languages ' "$out" "section 1 is Languages"
 expect_grep '^## 6\. Ports and env vars ' "$out" "section 6 is Ports and env vars"
 expect_grep '^## 7\. Verification harness \(3\)$' "$out" "section 7 is Verification harness with three rows"
@@ -105,7 +105,7 @@ expect_grep '\| go main \| cmd/server \| cmd/server/main.go \|' "$out" "cmd/*/ma
 expect_grep '\| make target \| build \| Makefile \|' "$out" "Makefile target build"
 expect_nogrep '\| make target \| (VERSION|\.PHONY|%\.o) ' "$out" "variables, .PHONY and patterns are not targets"
 expect_grep '\| bin/ executable \| demo \| bin/demo \|' "$out" "executable in bin/"
-expect_nogrep 'bin/notes' "$out" "non-executable bin/ file skipped"
+expect_nogrep 'bin/notes' "$(printf '%s\n' "$out" | sed -n '/^## 2\./,/^## 3\./p')" "non-executable bin/ file skipped as an entry point"
 
 # 5. Test commands.
 expect_grep '\| npm run test \| package.json \|' "$out" "npm test script"
@@ -120,7 +120,7 @@ expect_grep '\| bash tests/smoke/run.sh \| tests/smoke/run.sh \|' "$out" "tests/
 expect_grep '\| 6 \| README.md \|' "$out" "README word count 6"
 expect_grep '\| 2 \| AGENTS.md \|' "$out" "AGENTS.md word count"
 expect_grep '\| 5 \| docs/intro.md \|' "$out" "docs/*.md word count"
-expect_nogrep 'docs/nested.txt|ignored.md' "$out" "non-md and ignored files skipped"
+expect_nogrep 'docs/nested.txt|ignored.md' "$(printf '%s\n' "$out" | sed -n '/^## 4\./,/^## 5\./p')" "non-md and ignored files skipped as docs"
 
 # 7. CI, ports and env vars.
 expect_grep '\| \.github/workflows/ci\.yml \|' "$out" "GitHub workflow listed"
@@ -137,14 +137,201 @@ expect_grep '\| port \| 9090 \| config/app\.yaml \|' "$out" "port key in config/
 sub="$("$rm_" "$repo/docs")"; expect_rc 0 $? "subfolder exits 0"
 expect_eq "$(printf '%s\n' "$out" | tail -n +2)" "$(printf '%s\n' "$sub" | tail -n +2)" "subfolder maps the whole repository"
 js="$("$rm_" --json "$repo")"; expect_rc 0 $? "--json exits 0"
-expect_eq "languages entry_points test_commands docs ci ports_env verification" \
-  "$(printf '%s' "$js" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(k for k in d if k not in ("root","commit")))')" "JSON has the seven sections"
+expect_eq "languages entry_points test_commands docs ci ports_env verification history" \
+  "$(printf '%s' "$js" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(k for k in d if k not in ("root","commit")))')" "JSON has eight sections"
 expect_eq 2 "$(printf '%s' "$js" | python3 -c 'import json,sys; d=json.load(sys.stdin); print([r["files"] for r in d["languages"] if r["language"]=="Go"][0])')" "JSON Go count matches"
 expect_eq "" "$(git -C "$repo" status --porcelain)" "work tree unchanged after runs"
 empty="$tmp/empty"; mkdir -p "$empty"; git -C "$empty" init -q
 eo="$("$rm_" "$empty")"; expect_rc 0 $? "empty repository exits 0"
-expect_eq 6 "$(printf '%s\n' "$eo" | grep -c '^none found$')" "empty repository prints none found six times"
+expect_eq 8 "$(printf '%s\n' "$eo" | grep -c '^none found$')" "empty repository prints none found eight times"
 expect_grep '\(commit none\)' "$eo" "no commit prints none"
+
+single_pairs="$(printf '%s\n' "$out" | sed -n '/^### 8b Changed together /,$p' | sed '1d')"
+expect_eq "none found" "$single_pairs" "one-commit repository has no changed-together pairs"
+
+history_repo="$tmp/history"
+mkdir -p "$history_repo"
+git -C "$history_repo" init -q
+for path in hot.py mate.py twice.py deleted.py; do
+    printf 'first\n' > "$history_repo/$path"
+done
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m first
+for path in hot.py mate.py twice.py deleted.py; do
+    printf 'second\n' >> "$history_repo/$path"
+done
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m second
+for path in hot.py mate.py deleted.py; do
+    printf 'third\n' >> "$history_repo/$path"
+done
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m third
+printf 'fourth\n' >> "$history_repo/hot.py"
+rm "$history_repo/deleted.py"
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m fourth
+mkdir -p "$history_repo/bulk"
+for ((n = 1; n <= 21; n++)); do
+    printf 'bulk\n' > "$history_repo/bulk/$n.py"
+done
+git -C "$history_repo" add -A
+git -C "$history_repo" -c user.name=t -c user.email=t@example.com commit -q -m bulk
+history_json="$("$rm_" --json "$history_repo")"
+history_facts="$(printf '%s' "$history_json" | python3 -c '
+import json, sys
+history = json.load(sys.stdin).get("history")
+if history is None:
+    print("history missing")
+    sys.exit(0)
+changed = history.get("most_changed", [])
+pairs = history.get("changed_together", [])
+hot = next((row.get("commits") for row in changed if row.get("path") == "hot.py"), None)
+coupled = next((row.get("together") for row in pairs if (row.get("path_a"), row.get("path_b")) == ("hot.py", "mate.py")), None)
+print("counts", hot, coupled)
+paths = [row.get("path", "") for row in changed]
+paths += [row.get(key, "") for row in pairs for key in ("path_a", "path_b")]
+print("bulk", history.get("window") == [{"commits_read": 5, "commits_skipped_bulk": 1}], not any(path.startswith("bulk/") for path in paths))
+print("rare", all(set((row.get("path_a"), row.get("path_b"))) != {"hot.py", "twice.py"} for row in pairs))
+print("deleted", "deleted.py" not in paths)
+')"
+expect_grep '^counts 4 3$' "$history_facts" "history counts four edits and three shared commits"
+expect_grep '^bulk True True$' "$history_facts" "history skips the 21-file commit and reports its window"
+expect_grep '^rare True$' "$history_facts" "history omits a pair with only two shared commits"
+expect_grep '^deleted True$' "$history_facts" "history excludes deleted paths from both tables"
+
+invalid_repo="$tmp/invalid-history"
+mkdir -p "$invalid_repo"
+git -C "$invalid_repo" init -q
+git -C "$invalid_repo" fast-import --quiet <<'G'
+commit refs/heads/main
+mark :1
+committer Test <test@example.com> 1700000000 +0000
+data 4
+root
+M 100644 inline "old-\377.py"
+data 2
+x
+
+commit refs/heads/main
+mark :2
+committer Test <test@example.com> 1700000001 +0000
+data 4
+next
+from :1
+D "old-\377.py"
+M 100644 inline safe.py
+data 2
+x
+
+G
+git -C "$invalid_repo" symbolic-ref HEAD refs/heads/main
+git -C "$invalid_repo" read-tree HEAD
+printf 'x\n' > "$invalid_repo/safe.py"
+invalid_json="$("$rm_" --json "$invalid_repo" 2> "$tmp/invalid-history.err")"
+expect_rc 0 $? "deleted non-UTF-8 history path exits 0"
+invalid_facts="$(printf '%s' "$invalid_json" | python3 -c '
+import json, sys
+try:
+    history = json.load(sys.stdin)["history"]
+except ValueError:
+    print("invalid JSON")
+    sys.exit(1)
+print("valid JSON")
+print("window", history["window"] == [{"commits_read": 2, "commits_skipped_bulk": 0}])
+print("changed", history["most_changed"] == [{"commits": 1, "path": "safe.py"}])
+')"
+expect_grep '^valid JSON$' "$invalid_facts" "deleted non-UTF-8 history path returns valid JSON"
+expect_grep '^window True$' "$invalid_facts" "deleted non-UTF-8 history path reads two commits"
+expect_grep '^changed True$' "$invalid_facts" "deleted non-UTF-8 history path counts safe.py once"
+expect_nogrep 'Traceback' "$(cat "$tmp/invalid-history.err")" "deleted non-UTF-8 history path has no traceback"
+
+filename_facts="$(python3 - "$tmp" "$rm_" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+def add(path):
+    return b'M 100644 inline ' + json.dumps(path).encode() + b'\ndata 2\nx\n'
+
+
+def commit(number, changes):
+    header = (f'commit refs/heads/main\nmark :{number}\n'
+              f'committer Test <test@example.com> {1700000000 + number} +0000\n'
+              'data 2\nx\n').encode()
+    parent = b'from :1\n' if number == 2 else b''
+    return header + parent + b''.join(changes) + b'\n'
+
+
+for name in ('count', 'bulk'):
+    repo = Path(sys.argv[1]) / ('carriage-return-' + name)
+    repo.mkdir()
+    first = [add('old\rname.py')]
+    second = [b'D "old\\rname.py"\n']
+    if name == 'count':
+        second.append(add('old\nname.py'))
+    else:
+        first += [add('old\nname.py')] + [add(f'file{i}.py') for i in range(19)]
+    for args, data in [
+        (('init', '-q'), None),
+        (('fast-import', '--quiet'), commit(1, first) + commit(2, second)),
+        (('symbolic-ref', 'HEAD', 'refs/heads/main'), None),
+        (('read-tree', 'HEAD'), None),
+        (('checkout-index', '-a'), None),
+    ]:
+        subprocess.run(['git', '-C', str(repo), *args], input=data, check=True, capture_output=True)
+    result = subprocess.run([sys.argv[2], '--json', str(repo)], check=True, capture_output=True)
+    history = json.loads(result.stdout)['history']
+    if name == 'count':
+        print(json.dumps(history['most_changed']))
+    else:
+        print(history['window'][0]['commits_skipped_bulk'])
+        print(len(history['most_changed']))
+PY
+)"
+expect_rc 0 $? "carriage-return history test inputs and maps exit 0"
+expect_eq '[{"commits": 1, "path": "old\nname.py"}]' "$(printf '%s\n' "$filename_facts" | sed -n '1p')" "history counts the current newline name once"
+expect_eq 1 "$(printf '%s\n' "$filename_facts" | sed -n '2p')" "history skips a bulk commit with 21 distinct names"
+expect_eq 0 "$(printf '%s\n' "$filename_facts" | sed -n '3p')" "history excludes all paths from the bulk commit"
+
+current_filename_facts="$(python3 - "$tmp" "$rm_" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+repo = Path(sys.argv[1]) / 'current-carriage-return'
+repo.mkdir()
+paths = ('current\rname.py', 'peer\rname.py')
+subprocess.run(['git', '-C', str(repo), 'init', '-q'], check=True, capture_output=True)
+for number in range(3):
+    for path in paths:
+        (repo / path).write_text(f'{number}\n')
+    for args in (('add', '-A'), ('-c', 'user.name=t', '-c', 'user.email=t@example.com',
+                                'commit', '-q', '-m', str(number))):
+        subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True)
+result = subprocess.run([sys.argv[2], str(repo)], check=True, capture_output=True)
+history_text = result.stdout.split(b'## 8. Change history\n', 1)[1]
+most_changed, changed_together = history_text.split(b'### 8b Changed together', 1)
+print('no raw CR', b'\r' not in history_text)
+print('most changed rows', all(row in most_changed.splitlines() for row in (
+    b'| 1 | 3 | current name.py |', b'| 2 | 3 | peer name.py |')))
+print('changed together row', b'| 1 | 3 | current name.py | peer name.py |' in changed_together.splitlines())
+result = subprocess.run([sys.argv[2], '--json', str(repo)], check=True, capture_output=True)
+history = json.loads(result.stdout)['history']
+print('exact JSON names', history['most_changed'] == [
+    {'commits': 3, 'path': path} for path in paths] and history['changed_together'] == [
+    {'together': 3, 'path_a': paths[0], 'path_b': paths[1]}])
+PY
+)"
+expect_rc 0 $? "current carriage-return test inputs and maps exit 0"
+expect_grep '^no raw CR True$' "$current_filename_facts" "history text contains no raw carriage returns"
+expect_grep '^most changed rows True$' "$current_filename_facts" "current carriage-return names stay in complete most-changed rows"
+expect_grep '^changed together row True$' "$current_filename_facts" "current carriage-return names stay in one complete changed-together row"
+expect_grep '^exact JSON names True$' "$current_filename_facts" "JSON keeps exact carriage-return names and three shared edits"
 
 # 9. Verification harness facts, planted on disk (untracked, so the work tree check above is not affected).
 h="$tmp/harness"; mkdir -p "$h/scripts" "$h/verify/features" "$h/.local/verify/20200101T000000Z" "$h/.local/verify/20261001T120000Z" "$h/.local/verify/notes"
