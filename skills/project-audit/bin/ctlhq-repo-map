@@ -386,7 +386,7 @@ def build(top: Path, files: list[str], head: str) -> dict:
 
 
 def cell(v) -> str:
-    return str(v).replace("|", "\\|").replace("\n", " ")
+    return str(v).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
 def render(top: Path, head: str, data: dict) -> str:

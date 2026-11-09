@@ -296,6 +296,43 @@ expect_eq '[{"commits": 1, "path": "old\nname.py"}]' "$(printf '%s\n' "$filename
 expect_eq 1 "$(printf '%s\n' "$filename_facts" | sed -n '2p')" "history skips a bulk commit with 21 distinct names"
 expect_eq 0 "$(printf '%s\n' "$filename_facts" | sed -n '3p')" "history excludes all paths from the bulk commit"
 
+current_filename_facts="$(python3 - "$tmp" "$rm_" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+repo = Path(sys.argv[1]) / 'current-carriage-return'
+repo.mkdir()
+paths = ('current\rname.py', 'peer\rname.py')
+subprocess.run(['git', '-C', str(repo), 'init', '-q'], check=True, capture_output=True)
+for number in range(3):
+    for path in paths:
+        (repo / path).write_text(f'{number}\n')
+    for args in (('add', '-A'), ('-c', 'user.name=t', '-c', 'user.email=t@example.com',
+                                'commit', '-q', '-m', str(number))):
+        subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True)
+result = subprocess.run([sys.argv[2], str(repo)], check=True, capture_output=True)
+history_text = result.stdout.split(b'## 8. Change history\n', 1)[1]
+most_changed, changed_together = history_text.split(b'### 8b Changed together', 1)
+print('no raw CR', b'\r' not in history_text)
+print('most changed rows', all(row in most_changed.splitlines() for row in (
+    b'| 1 | 3 | current name.py |', b'| 2 | 3 | peer name.py |')))
+print('changed together row', b'| 1 | 3 | current name.py | peer name.py |' in changed_together.splitlines())
+result = subprocess.run([sys.argv[2], '--json', str(repo)], check=True, capture_output=True)
+history = json.loads(result.stdout)['history']
+print('exact JSON names', history['most_changed'] == [
+    {'commits': 3, 'path': path} for path in paths] and history['changed_together'] == [
+    {'together': 3, 'path_a': paths[0], 'path_b': paths[1]}])
+PY
+)"
+expect_rc 0 $? "current carriage-return test inputs and maps exit 0"
+expect_grep '^no raw CR True$' "$current_filename_facts" "history text contains no raw carriage returns"
+expect_grep '^most changed rows True$' "$current_filename_facts" "current carriage-return names stay in complete most-changed rows"
+expect_grep '^changed together row True$' "$current_filename_facts" "current carriage-return names stay in one complete changed-together row"
+expect_grep '^exact JSON names True$' "$current_filename_facts" "JSON keeps exact carriage-return names and three shared edits"
+
 # 9. Verification harness facts, planted on disk (untracked, so the work tree check above is not affected).
 h="$tmp/harness"; mkdir -p "$h/scripts" "$h/verify/features" "$h/.local/verify/20200101T000000Z" "$h/.local/verify/20261001T120000Z" "$h/.local/verify/notes"
 git -C "$h" init -q
