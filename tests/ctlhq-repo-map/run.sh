@@ -200,6 +200,52 @@ expect_grep '^bulk True True$' "$history_facts" "history skips the 21-file commi
 expect_grep '^rare True$' "$history_facts" "history omits a pair with only two shared commits"
 expect_grep '^deleted True$' "$history_facts" "history excludes deleted paths from both tables"
 
+invalid_repo="$tmp/invalid-history"
+mkdir -p "$invalid_repo"
+git -C "$invalid_repo" init -q
+git -C "$invalid_repo" fast-import --quiet <<'G'
+commit refs/heads/main
+mark :1
+committer Test <test@example.com> 1700000000 +0000
+data 4
+root
+M 100644 inline "old-\377.py"
+data 2
+x
+
+commit refs/heads/main
+mark :2
+committer Test <test@example.com> 1700000001 +0000
+data 4
+next
+from :1
+D "old-\377.py"
+M 100644 inline safe.py
+data 2
+x
+
+G
+git -C "$invalid_repo" symbolic-ref HEAD refs/heads/main
+git -C "$invalid_repo" read-tree HEAD
+printf 'x\n' > "$invalid_repo/safe.py"
+invalid_json="$("$rm_" --json "$invalid_repo" 2> "$tmp/invalid-history.err")"
+expect_rc 0 $? "deleted non-UTF-8 history path exits 0"
+invalid_facts="$(printf '%s' "$invalid_json" | python3 -c '
+import json, sys
+try:
+    history = json.load(sys.stdin)["history"]
+except ValueError:
+    print("invalid JSON")
+    sys.exit(1)
+print("valid JSON")
+print("window", history["window"] == [{"commits_read": 2, "commits_skipped_bulk": 0}])
+print("changed", history["most_changed"] == [{"commits": 1, "path": "safe.py"}])
+')"
+expect_grep '^valid JSON$' "$invalid_facts" "deleted non-UTF-8 history path returns valid JSON"
+expect_grep '^window True$' "$invalid_facts" "deleted non-UTF-8 history path reads two commits"
+expect_grep '^changed True$' "$invalid_facts" "deleted non-UTF-8 history path counts safe.py once"
+expect_nogrep 'Traceback' "$(cat "$tmp/invalid-history.err")" "deleted non-UTF-8 history path has no traceback"
+
 # 9. Verification harness facts, planted on disk (untracked, so the work tree check above is not affected).
 h="$tmp/harness"; mkdir -p "$h/scripts" "$h/verify/features" "$h/.local/verify/20200101T000000Z" "$h/.local/verify/20261001T120000Z" "$h/.local/verify/notes"
 git -C "$h" init -q
