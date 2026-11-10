@@ -28,10 +28,10 @@ The maintainer answers in the private report thread and fixes a confirmed proble
 ## Not in scope
 
 1. Claude Code, Codex, and the models themselves. Report those to their makers.
-2. Outside programs that ctlhq calls but does not ship, such as `git`, `gh`, `bun` and the packages `bun install` downloads, `node`, `python3`, `rg`, `jq`, `tart`, UTM, `gitleaks`, first-commit, and Chrome.
+2. Outside programs that ctlhq calls but does not ship, such as `git`, `gh`, `bun` and the packages `bun install` downloads, `node`, `python3`, `rg`, `jq`, `gitleaks`, first-commit, and Chrome.
 3. Lines you apply yourself: the PATH line and the Claude Code Stop hook entry that the installer prints, the Codex Stop hook entry in the README, and the `sudo git config --system` commands from `ctlhq-preflight`. A report is in scope when that text itself is unsafe.
 4. Skill and playbook text. An agent decides how to follow it. Report an unsafe instruction in a skill as a normal issue.
-5. Running ctlhq on Linux or Windows. ctlhq supports macOS only. A problem in `ctlhq-env` on macOS is in scope, even when its test machine runs Linux or Windows.
+5. Running ctlhq on Linux or Windows. ctlhq supports macOS only.
 
 ## Supported versions
 
