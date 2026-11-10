@@ -46,7 +46,8 @@ export JAVA TLA2TOOLS
 ```
 
 1. If `ctlhq-formal-tools` is missing or its env command fails, stop and report the missing prerequisite.
-2. Show `ctlhq-formal-tools install` as the explicit setup command. Never install Java or TLC automatically.
+2. Show `ctlhq-formal-tools install` only when `~/.ctlhq/tools/formal/` is missing. Otherwise, show `ctlhq-formal-tools check`.
+   The operator inspects the existing bundle, then removes or moves it themselves before installing again. Never install tools or remove or move the bundle automatically.
 3. In Codex, request escalation for the exact first TLC command before running it. The sandbox can block TLC's local listener.
 4. Request escalation for an exact project-skill write into a read-only folder before writing there. Keep sandbox rules unchanged.
 

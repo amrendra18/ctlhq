@@ -182,7 +182,8 @@ def main(argv):
             print(f"wrote {bundle / JAVA_PATH}")
             print(f"wrote {bundle / 'tla2tools.jar'}")
             return 0
-        ready, rows, java, jar = inspect_tools(root / "formal")
+        bundle = root / "formal"
+        ready, rows, java, jar = inspect_tools(bundle)
         if argv[0] == "check":
             print("\n".join(rows))
         elif ready:
@@ -190,7 +191,12 @@ def main(argv):
             print(f"TLA2TOOLS={shlex.quote(str(jar))}")
         else:
             print("\n".join(rows), file=sys.stderr)
-            print("run ctlhq-formal-tools install", file=sys.stderr)
+        if not ready:
+            if os.path.lexists(bundle):
+                print("run ctlhq-formal-tools check; inspect the existing bundle, then remove or move "
+                      "~/.ctlhq/tools/formal/ yourself before installing again", file=sys.stderr)
+            else:
+                print("run ctlhq-formal-tools install", file=sys.stderr)
         return 0 if ready else 1
     except (OSError, ValueError, tarfile.TarError) as error:
         print(f"ctlhq-formal-tools: {error}", file=sys.stderr)

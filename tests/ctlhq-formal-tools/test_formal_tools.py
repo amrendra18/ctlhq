@@ -135,6 +135,8 @@ class FormalToolsTests(unittest.TestCase):
         self.assertIn("Java", out)
         self.assertIn("TLC", out)
         self.assertIn("missing", out)
+        self.assertIn("run ctlhq-formal-tools install", err)
+        self.assertNotIn("remove or move", err)
         self.assertFalse(self.tools_root.exists())
         self.assertEqual(self.calls, [])
         result, out, err = self.run_tool("env")
@@ -142,6 +144,21 @@ class FormalToolsTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("ctlhq-formal-tools install", err)
         self.assertFalse(self.tools_root.exists())
+
+    def test_existing_incomplete_bundle_has_manual_recovery_advice(self):
+        self.destination.mkdir(parents=True)
+        for command in ("check", "env"):
+            with self.subTest(command=command):
+                result, out, err = self.run_tool(command)
+                self.assertEqual(result, 1)
+                self.assertIn("ctlhq-formal-tools check", err)
+                self.assertIn("inspect the existing bundle", err)
+                self.assertIn("remove or move ~/.ctlhq/tools/formal/ yourself", err)
+                self.assertNotIn("run ctlhq-formal-tools install", err)
+                if command == "env":
+                    self.assertEqual(out, "")
+                self.assertEqual(list(self.destination.iterdir()), [])
+                self.assertEqual(self.calls, [])
 
     def test_install_check_and_shell_safe_env(self):
         out = self.install()
