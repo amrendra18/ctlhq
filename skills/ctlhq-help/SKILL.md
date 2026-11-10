@@ -53,7 +53,7 @@ Whether `/ctlhq-mode` stays on depends on how the user starts it:
 - `/ctlhq-mode` with a message attaches the skill to that message. It fades as the chat moves on.
 - To keep it on, start each new task with `/ctlhq-mode` (Claude Code), or name `ctlhq-mode` in the task's first message (Codex).
 
-Mid-chat, "new task" makes the mode match a fresh playbook. In Claude Code, `/ctlhq-mode` already uses `ctlhq-agent` for the subagents its playbook steps spawn. To get the same style from your own Claude Code subagent, use `subagent_type: "ctlhq-agent"`. In Codex, follow [the Subagents section in `ctlhq-mode`](../ctlhq-mode/SKILL.md#subagents).
+Mid-chat, "new task" makes the mode match a fresh playbook. For helpers spawned by `/ctlhq-mode` or your own tasks, follow [the Subagents section in `ctlhq-mode`](../ctlhq-mode/SKILL.md#subagents).
 
 ## Pick a skill
 
