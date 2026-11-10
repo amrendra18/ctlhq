@@ -12,7 +12,6 @@ skills/<name>/       one skill per folder: SKILL.md, references/, playbooks/, sc
 agents/              subagent definitions (ctlhq-agent)
 home/                AGENTS.md, the optional shared rules file; ctlhq-install --agents-md writes it to ~/.codex/AGENTS.md
 docs/                the building principles
-envs/                test machine recipes for ctlhq-env: ubuntu, macos-clean, windows, nas, peer
 tests/<name>/run.sh  one test script per tool or area
 tests/scenarios/     tasks for a fresh agent, run by hand: setup, prompt.md, grade; no run.sh
 tests/stand-ins/     fakes for tests: Claude Code, GitHub CLI, pre-commit, and a throwaway signing key;
