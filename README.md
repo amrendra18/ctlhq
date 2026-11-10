@@ -67,6 +67,10 @@ Optional:
 5. Google Chrome, for `ctlhq-browser`, `ctlhq-icon-sheet`, and their tests.
 6. `skill-creator`, the skill for writing skills, used by `/automate-me`, `/reflect`, and the "Authoring or modifying a skill" playbook. Codex ships it. On Claude Code, install it with `/plugin install skill-creator@claude-plugins-official`.
 7. first-commit, a separate tool that creates a new project's Git repository and installs its Git hooks. Get it from `https://github.com/amrendra18/first-commit`. `/start-project` and `/run-method` use it when it is on PATH. Without it, the operator's setup block runs `git init` instead.
+8. Temurin Java 25.0.4.1+1 and TLC distribution 1.7.4, for formal verification.
+   `ctlhq-formal-tools check` reports readiness without executing either tool.
+   On macOS with Apple Silicon, run `ctlhq-formal-tools install` explicitly to download and verify the pinned tools.
+   Installation refuses an existing destination. Setup never runs installation automatically.
 
 `bin/ctlhq-doctor` checks every tool above except `skill-creator`, and prints an install line for each missing one except a separate tool. It looks for a separate tool on your PATH, because the skills run it by name. A copy only in `~/.ctlhq/bin` shows as missing with a note; `ctlhq-first-push` still finds a `gitleaks` kept there.
 It also checks the PATH line and the models file.
@@ -162,6 +166,7 @@ Written by other tools, only when you run them:
 | 6 | `~/.ctlhq/message-words.txt`, and `.local/message-words.txt` in one repository | words such as private project names that `ctlhq-message-check` refuses. `ctlhq-commit` runs that check on every commit message, and `ctlhq-push` runs it on new commit messages and branch names | you, by hand |
 | 7 | `~/.ctlhq/asks.json` and `~/.ctlhq/asks.json.lock` | the operator's questions, open and closed, under fixed names such as `ctlhq-1`; only you can read `asks.json` | `ctlhq-asks add` and `ctlhq-asks close` |
 | 8 | `~/.ctlhq/mocks/<project name>/<SHA-256>.html` | a copy of each mock-up you accepted, named by its hash | the `design-options` skill, when you accept a mock-up |
+| 9 | `~/.ctlhq/tools/formal/` | pinned Java and TLC, with temporary staging and lock folders beside it | `ctlhq-formal-tools install`, only when you run it explicitly |
 
 Suggested, never applied for you:
 
@@ -191,6 +196,7 @@ Network use:
 6. `ctlhq-env` with the `tart` provider downloads the machine image a recipe in `envs/` names.
 7. `ctlhq-preflight --service`, `ctlhq-serve`, and `ctlhq-browser` request only the URLs you give them.
 8. `ctlhq-preflight --hooks` runs `pre-commit`, which may download hook code.
+9. `ctlhq-formal-tools install` downloads pinned Java and TLC over HTTPS and checks their SHA-256 hashes. `check` and `env` make no network requests.
 
 **Test machine drivers.** The `tart` and `utm` providers of `ctlhq-env` are untested on a real machine; only fake stand-ins of `tart` and `utmctl` have run them.
 `ctlhq-env restore` with `tart` runs `tart delete` on the virtual machine (VM) the recipe names, then clones it back from the snapshot.
@@ -215,7 +221,8 @@ So these commands can remove a VM of yours that has a recipe's name, such as `ub
    2. the Stop hook entry in `~/.claude/settings.json`, and the one in `~/.codex/hooks.json` if you added it;
    3. a pre-push hook from `ctlhq-first-push hook install`. In that repository, delete `.git/hooks/pre-push`, then rename `.git/hooks/pre-push.before-first-push` back to `pre-push` if it exists;
    4. `~/.ctlhq-backups/`, after you restore what you want from it (the uninstall does not move backed-up files back);
-   5. `~/.ctlhq/`, which holds the models file, the layers file, the push settings, the message word list, the accepted mock-ups, and `bin/gitleaks` if you put it there;
+   5. `~/.ctlhq/`, which holds models, layers, push settings, message words, and accepted mock-ups.
+      It also holds managed Java and TLC, plus `bin/gitleaks` if you put it there;
    6. the folders `~/.claude/skills`, `~/.claude/agents`, and `~/.codex/skills`, if the install created them and they are now empty;
    7. the clone itself.
 
@@ -247,6 +254,9 @@ The skills you are most likely to type yourself:
 | 8 | `/first-push` | you are about to push a repository to GitHub for the first time, or make one public |
 | 9 | `/prepare-public-repo` | you want a repository reviewed and cleaned up before it becomes public; it never rewrites history or pushes |
 | 10 | `/fresh-history-push` | you want a repository's history replaced by one signed commit, pushed to GitHub, and scanned before you make it public |
+| 11 | `/find-state-machines` | you want a ranked, read-only inventory of hidden states and risky event orders |
+| 12 | `/create-formal-verification-skill` | the inventory identifies behavior where event order matters and you want a model check |
+| 13 | `/maintain-formal-verification-skill` | code changed and its formal verification skill needs updating |
 
 To make a repository public, type `/prepare-public-repo` first and `/fresh-history-push` second.
 `/first-push` checks every push, and `/fresh-history-push` runs that check for you.
@@ -261,7 +271,10 @@ To change ctlhq itself, read [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Credits
 
-ctlhq's coding principles and some of its skills are adapted from [pstack](https://github.com/cursor/plugins/tree/main/pstack) 0.15.36 by Lauren Tan ([poteto](https://github.com/poteto)), MIT license. Thanks to pstack for the idea behind them: "if you want to go fast, go deep first." pstack's copyright notice is kept in [LICENSE](./LICENSE).
+ctlhq adapts its coding principles and formal verification skills from [pstack](https://github.com/cursor/plugins/tree/main/pstack) 0.15.36 by Lauren Tan ([poteto](https://github.com/poteto)).
+The source uses the MIT license. Its copyright notice remains in [LICENSE](./LICENSE).
+The find-state-machines skill is original ctlhq work.
+Thanks to pstack for the idea behind these skills, "if you want to go fast, go deep first."
 
 ## License
 

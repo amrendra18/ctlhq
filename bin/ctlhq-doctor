@@ -7,7 +7,8 @@ Usage:
 One line per check: status, name, detail. Then a summary line.
   required  python3 (3.9 or newer), node (22.18 or newer), bash, git, the ctlhq
             repository root, and every executable in bin/ answering --help with exit 0
-  optional  bun, gh, rg, jq, Google Chrome, each separate tool, the checkout's branch,
+  optional  bun, gh, rg, jq, Google Chrome, managed Java and TLC, each separate tool,
+            the checkout's branch,
             bin/ on PATH, the models file (~/.ctlhq/models.toml) present and valid
 
 Status words: ok; missing; old (present, version below the bar); invalid (present,
@@ -29,6 +30,9 @@ matter. The doctor runs `ctlhq-skills tools` on this repository's skills/,
 tool. The row shows its path on PATH, else missing with no install line (and the copy in
 ~/.ctlhq/bin when there is one), and the skills that name it. A malformed separate-tools
 value gives an invalid row. The doctor never runs a separate tool.
+
+The Java and TLC row runs `ctlhq-formal-tools check`. It reads the pinned tool files,
+executes neither tool, and never installs them. Missing tools stay optional.
 
 The models file is checked with `ctlhq-models validate` on a temporary copy, so
 the doctor never writes under ~/.ctlhq. --models PATH (or the environment
@@ -135,6 +139,36 @@ def check_tool(name: str, required: bool) -> dict:
             return c
     c["detail"] = f"{c['version'] or 'found'} ({path})   needed by {c['needed_by']}"
     return c
+
+
+
+def check_formal_tools() -> dict:
+    checker = ROOT / "bin" / "ctlhq-formal-tools"
+    rc, out, err = run([str(checker), "check"])
+    bundle_exists = os.path.lexists(Path.home() / ".ctlhq/tools/formal")
+    lines = out.strip().splitlines()
+    states = [line.split(" | ", 2)[1] for line in lines if " | " in line]
+    status = "invalid"
+    action = None
+    if len(states) == 2:
+        if rc == 0 and states == ["ready", "ready"]:
+            status = "ok"
+        elif rc == 1:
+            if all(state in ("ready", "missing") for state in states):
+                status = "missing"
+                action = "ctlhq-formal-tools check" if bundle_exists else "ctlhq-formal-tools install"
+            else:
+                action = "ctlhq-formal-tools check"
+    detail = "; ".join(lines) or err.strip() or f"checker exited {rc}"
+    if action:
+        detail += f"; operator command: {action}"
+    if bundle_exists and action == "ctlhq-formal-tools check":
+        detail += ("; inspect the existing bundle, then remove or move "
+                   "~/.ctlhq/tools/formal/ yourself before installing again")
+    return {"name": "Java and TLC", "required": False, "status": status,
+            "version": "", "path": str(checker), "install": action,
+            "needed_by": "create-formal-verification-skill, maintain-formal-verification-skill",
+            "detail": detail}
 
 
 def separate_tools() -> tuple:
@@ -293,6 +327,7 @@ def main(argv: list) -> int:
 
     checks = [check_tool(n, True) for n in REQUIRED_TOOLS]
     checks += [check_tool(n, False) for n in OPTIONAL_TOOLS]
+    checks.append(check_formal_tools())
     tools, problems = separate_tools()
     checks += [check_separate_tool(n, skills) for n, skills in sorted(tools.items())]
     checks += [check_separate_value(p) for p in problems]
