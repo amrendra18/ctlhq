@@ -45,7 +45,6 @@ Use the shared tools in this repository's `bin/` instead of writing your own. Ea
 | 3 | screenshot at a window size, console errors, network log | `ctlhq-browser screenshot`, `console`, `network` |
 | 4 | navigation performance trace, heap snapshot after page load | `ctlhq-browser trace`, `ctlhq-browser heap` |
 | 5 | `index.html` with the screenshots that changed since the last run marked | `ctlhq-gallery <evidence folder> --previous <last evidence folder>` |
-| 6 | a test machine: start, snapshot, restore, run a command, screenshot | `ctlhq-env up`, `snapshot`, `restore`, `exec`, `screenshot` |
 
 When the repo already has a driver (Playwright specs, an expect script), `scripts/verify` calls it and uses the shared tools for the parts it lacks. Every `ctlhq-browser` command opens a new tab, even with `--attach`. For interaction evidence, wait for the expected state and capture or profile through the driver controlling that session.
 

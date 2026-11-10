@@ -188,14 +188,8 @@ Network use:
 3. `ctlhq-push` pushes to GitHub, and only to repositories of the owner in `~/.ctlhq/first-push.toml`.
 4. `ctlhq-dep-age` asks the npm, PyPI, Go, and crates.io registries for release dates.
 5. `ctlhq-name-check --registry` asks npm and PyPI whether a name is taken.
-6. `ctlhq-env` with the `tart` provider downloads the machine image a recipe in `envs/` names.
-7. `ctlhq-preflight --service`, `ctlhq-serve`, and `ctlhq-browser` request only the URLs you give them.
-8. `ctlhq-preflight --hooks` runs `pre-commit`, which may download hook code.
-
-**Test machine drivers.** The `tart` and `utm` providers of `ctlhq-env` are untested on a real machine; only fake stand-ins of `tart` and `utmctl` have run them.
-`ctlhq-env restore` with `tart` runs `tart delete` on the virtual machine (VM) the recipe names, then clones it back from the snapshot.
-`ctlhq-env snapshot` with `tart` deletes an earlier snapshot with the same tag.
-So these commands can remove a VM of yours that has a recipe's name, such as `ubuntu`. Use these providers only with VMs you can lose.
+6. `ctlhq-preflight --service`, `ctlhq-serve`, and `ctlhq-browser` request only the URLs you give them.
+7. `ctlhq-preflight --hooks` runs `pre-commit`, which may download hook code.
 
 ## Uninstall
 
