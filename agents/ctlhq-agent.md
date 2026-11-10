@@ -1,6 +1,6 @@
 ---
 name: ctlhq-agent
-description: Delegate subagent for code-writing and helper tasks spawned during a `/ctlhq-mode` run. Use for delegates, not as the runner for `/ctlhq-mode` itself. Spawn a fresh `ctlhq-agent` for each new task, and resume one only in the strict cases that ctlhq-mode's Subagents section names. Reads the `ctlhq-mode` skill's `SKILL.md` in full before any work, including its inline Principles index. Substituting a generic subagent type (`general-purpose` in Claude Code, or Codex's default agent) skips that read and drifts.
+description: Delegate subagent for code-writing and helper tasks spawned during a `/ctlhq-mode` run. Use for delegates, not as the runner for `/ctlhq-mode` itself. Spawn a fresh `ctlhq-agent` for each new task, and resume one only in the strict cases that ctlhq-mode's Subagents section names. Reads the `ctlhq-mode` skill's `SKILL.md` in full before any work, including its inline Principles index. Substituting a generic subagent type (`general-purpose` in Claude Code) skips that read and drifts. For Codex helpers, follow the read-first instruction in ctlhq-mode's Subagents section.
 is_background: true
 ---
 
