@@ -34,7 +34,7 @@ The default role-to-model mapping is the `default` column of `bin/ctlhq-models s
 
 **(c) Show the roles and confirm.** Run `bin/ctlhq-models show` and show every role with its model, marking any real model name not in the detected set as needing a choice (`bin/ctlhq-models validate --allow <detected names>` lists them). Also list each line step 2 dropped. Ask whether to accept as-is or change specific roles, offering the detected models plus `inherit-parent` and `auto` (both mean: this role runs on the parent chat model) as the options. Prefer asking the operator over free text. For panel roles (`best-of-n-runners`, `architect-runners`, `interrogate-reviewers`) the value is a list, and one subagent runs per entry, alias entries included, so the list length sets the count. `best-of-n-cross-judge-pool` is also a list, but best-of-n selects one value from it whose model family differs from the parent's when possible. `swarm-workers` is the default model for every worker unless a race or comparison assigns another model per arm.
 
-**(d) The role map.** Four roles split the work between building and planning. `builders` (default `opus`) writes code. `planners-and-reviewers` (default `fable`) writes deep-dive plans and reviews. The main agent moderates: it briefs, reviews, and commits, runs on the session's own model, and has no role line. Each of the two roles has a `-limit-fallback` role: the model to use when the role's model hits its usage limit. `planners-and-reviewers-limit-fallback` defaults to `opus`. `builders-limit-fallback` defaults to `inherit-parent`, which here means the main agent does the build work itself (step 8). These four lines carry a role-map comment. Show these four roles with the other roles and confirm them the same way. The `[codex]` table at the end of the models file holds the Codex values, such as `planners-and-reviewers = "gpt-6-astra"`. In Codex, every `ctlhq-models` call adds `--host codex`.
+**(d) The role map.** Four roles split the work between building and planning. `builders` (default `opus`) writes code. `planners-and-reviewers` (default `fable`) writes deep-dive plans and reviews. The main agent moderates: it briefs, reviews, and commits, runs on the session's own model, and has no role line. Each of the two roles has a `-limit-fallback` role: the model to use when the role's model hits its usage limit. `planners-and-reviewers-limit-fallback` defaults to `opus`. `builders-limit-fallback` defaults to `inherit-parent`, which here means the main agent does the build work itself (step 9). These four lines carry a role-map comment. Show these four roles with the other roles and confirm them the same way. The `[codex]` table at the end of the models file holds the Codex values, such as `planners-and-reviewers = "gpt-6-astra"`. In Codex, every `ctlhq-models` call adds `--host codex`.
 
 ### 4. Validate
 
@@ -52,7 +52,31 @@ Tell the user the models file was written and that it applies to new sessions. R
 
 Check whether the project has a way to drive the real app for proof (a `verify-*` skill, or an existing harness). If not, offer once: "want a project-local verification skill, so agents can drive the app the way a user does and prove changes work? I can generate one with /verify-setup." On yes, invoke `/verify-setup` (resolves wherever ctlhq is installed: workspace, user, or the ctlhq repository). On no, move on without pushing.
 
-### 8. When a model hits its usage limit
+### 8. Offer formal verification (optional)
+
+Look for a project skill that checks its code against a model or proof.
+If none exists, offer once to find and rank its implicit state machines. Explain that a formal model checks allowed event orders against stated rules.
+On no, continue without asking again.
+On yes, use [find-state-machines](../find-state-machines/SKILL.md) for a read-only inventory, then check the tools:
+
+```sh
+ctlhq-formal-tools check
+```
+
+Use the ranking to recommend [create-formal-verification-skill](../create-formal-verification-skill/SKILL.md) only where order matters.
+Keep the inventory available when tools are missing. Before any model run, show the operator this command when installation is needed:
+
+```sh
+ctlhq-formal-tools install
+```
+
+The operator runs installation explicitly. Never install tools automatically, including after they accept the offer.
+Installation checks pinned downloads and writes `~/.ctlhq/tools/formal/` on macOS with Apple Silicon.
+It refuses an existing destination. Inspect an existing incomplete bundle with `ctlhq-formal-tools check` first.
+The operator removes or moves `~/.ctlhq/tools/formal/` themselves before installing again.
+Never remove or move that bundle automatically.
+
+### 9. When a model hits its usage limit
 
 The host refuses a spawn because the role's model reached its usage limit. This differs from `fallback` above, which handles a model name the host does not accept.
 

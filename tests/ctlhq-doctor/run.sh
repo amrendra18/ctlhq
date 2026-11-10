@@ -167,6 +167,9 @@ fd
 expect_rc 0 "$rc" "with origin/HEAD unset the doctor exits 0"
 expect_grep '^ok +branch +main at '"$short"'$' "$out" "with origin/HEAD unset the default branch is main"
 
+python3 "$here/test_formal_tools.py"
+expect_rc 0 $? "formal tools remain optional and never install during doctor checks"
+
 echo "$pass checks passed"
 if [ "$fail" -gt 0 ]; then
 	echo "$fail checks failed"

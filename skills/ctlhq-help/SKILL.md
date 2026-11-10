@@ -93,6 +93,9 @@ The default answer is `/ctlhq-mode`, which runs most of the others when its step
 | 30 | Publish a repository as one fresh signed commit, then scan what the remote holds | [`/fresh-history-push`](../fresh-history-push/SKILL.md) |
 | 31 | Find their way around ctlhq | `/ctlhq-help` |
 | 32 | Review a plan, a commit, or a pull request with a fresh agent | [`/plan-review`](../plan-review/SKILL.md), [`/commit-review`](../commit-review/SKILL.md), [`/pr-review`](../pr-review/SKILL.md) |
+| 33 | Find and rank hidden state machines without changing code | [`/find-state-machines`](../find-state-machines/SKILL.md) |
+| 34 | Create a formal check where the inventory says event order matters | [`/create-formal-verification-skill`](../create-formal-verification-skill/SKILL.md) |
+| 35 | Update an existing formal verification skill after code changes | [`/maintain-formal-verification-skill`](../maintain-formal-verification-skill/SKILL.md) |
 
 If a skill directory next to this one is missing from the table, run `ctlhq-skills show <name>` (or `ctlhq-skills find <word>` to search), which reads its frontmatter, and route by its description. The `principle-*` directories are covered under principles below.
 
